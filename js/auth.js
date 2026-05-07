@@ -48,8 +48,10 @@ export function initAuth(clientId) {
     auto_select: true,
   });
 
-  // Trigger one-tap prompt (re-authenticates silently if auto_select is true)
-  google.accounts.id.prompt();
+  // Only show the one-tap prompt if user isn't already signed in
+  if (!currentUser) {
+    google.accounts.id.prompt();
+  }
 }
 
 /**
