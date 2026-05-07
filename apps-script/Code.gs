@@ -40,7 +40,7 @@ const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
 // Cache per execution
 let _cachedLogLevel = null;
-let _cachedApiSecret = null;
+
 
 // ============================================================
 // HELPERS — Open spreadsheets by ID
@@ -48,6 +48,17 @@ let _cachedApiSecret = null;
 
 function getSheet(key) {
   return SpreadsheetApp.openById(SPREADSHEET_IDS[key]).getSheets()[0];
+}
+
+/**
+ * Finds the video/item ID column index, checking both 'video_id' and 'item_id' headers.
+ * @param {string[]} headers - Array of column header names
+ * @returns {number} Column index, or -1 if neither found
+ */
+function findVideoIdCol(headers) {
+  var col = headers.indexOf('video_id');
+  if (col === -1) col = headers.indexOf('item_id');
+  return col;
 }
 
 // ============================================================
@@ -67,9 +78,6 @@ function doGet(e) {
         return jsonResponse(handleRefresh());
       case 'logs':
         return jsonResponse(handleLogs(e.parameter));
-      case 'init':
-        // Returns the API secret for the frontend (call once, store in memory)
-        return jsonResponse(handleInit());
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -102,70 +110,7 @@ function jsonResponse(data) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-// ============================================================
-// API SECRET & HMAC VERIFICATION
-// ============================================================
 
-/**
- * Generates or retrieves the API secret from the Meta sheet.
- * This secret is never exposed in the frontend source code.
- * The frontend fetches it once via ?action=init (requires page to be loaded from the correct origin).
- */
-function getApiSecret() {
-  if (_cachedApiSecret) return _cachedApiSecret;
-  
-  var secret = getMeta('api_secret');
-  
-  // Auto-generate if missing
-  if (!secret) {
-    secret = Utilities.getUuid() + '-' + Utilities.getUuid();
-    setMeta('api_secret', secret);
-    log('INFO', 'getApiSecret', 'Generated new API secret');
-  }
-  
-  _cachedApiSecret = secret;
-  return secret;
-}
-
-/**
- * Creates an HMAC-SHA256 signature for a payload.
- * The frontend signs comment requests with this.
- * 
- * @param {string} payload - The string to sign (e.g., videoId + body + timestamp)
- * @param {string} secret - The API secret
- * @returns {string} Hex-encoded HMAC signature
- */
-function createHmac(payload, secret) {
-  var signature = Utilities.computeHmacSha256Signature(payload, secret);
-  return signature.map(function(b) {
-    return ('0' + (b & 0xFF).toString(16)).slice(-2);
-  }).join('');
-}
-
-/**
- * Verifies an HMAC signature from the frontend.
- * 
- * @param {string} payload - The signed payload
- * @param {string} signature - The HMAC signature from the request
- * @returns {boolean} True if valid
- */
-function verifyHmac(payload, signature) {
-  var secret = getApiSecret();
-  var expected = createHmac(payload, secret);
-  return expected === signature;
-}
-
-/**
- * Returns the API secret to the frontend.
- * This is called once when the page loads.
- * The secret lives in memory only — never in source code.
- */
-function handleInit() {
-  return {
-    status: 'ok',
-    api_secret: getApiSecret(),
-  };
-}
 
 // ============================================================
 // RATE LIMITING
@@ -480,14 +425,46 @@ function extractImageFromHtml(html) {
  * @param {string} articleUrl - The article URL to fetch
  * @returns {string} og:image URL or empty string
  */
+/**
+ * Validates that a URL is safe to fetch server-side.
+ * Blocks private/internal IPs, non-HTTPS protocols, and cloud metadata endpoints.
+ *
+ * @param {string} url - URL to validate
+ * @returns {boolean} True if safe to fetch
+ */
+function isSafeUrl(url) {
+  if (!url) return false;
+  // Only allow HTTPS
+  if (!/^https:\/\//i.test(url)) return false;
+  // Extract hostname
+  var hostMatch = url.match(/^https:\/\/([^/:]+)/i);
+  if (!hostMatch) return false;
+  var host = hostMatch[1].toLowerCase();
+  // Block private/internal ranges and cloud metadata
+  var blocked = [
+    /^localhost$/,
+    /^127\./,
+    /^10\./,
+    /^172\.(1[6-9]|2[0-9]|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./,
+    /^metadata\.google/,
+    /^0\./,
+    /^\[/,  // IPv6
+  ];
+  for (var i = 0; i < blocked.length; i++) {
+    if (blocked[i].test(host)) return false;
+  }
+  return true;
+}
+
 function fetchOgImage(articleUrl) {
-  if (!articleUrl) return '';
+  if (!articleUrl || !isSafeUrl(articleUrl)) return '';
   try {
     var response = UrlFetchApp.fetch(articleUrl, {
       muteHttpExceptions: true,
       followRedirects: true,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WatchDirectly/1.0)' },
-      validateHttpsCertificates: false,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)' },
     });
     if (response.getResponseCode() !== 200) return '';
 
@@ -525,6 +502,7 @@ function parseRssFeed(xml, channelName, tier, category) {
     }
   } catch (e) {
     // Fallback to regex based parsing if XML is malformed
+    log('WARN', 'parseRssFeed', 'XML parse failed for ' + channelName + ': ' + e.message + '. Falling back to regex.');
     return parseRegex(xml, channelName, tier, category);
   }
 }
@@ -735,13 +713,11 @@ function getVideos(page, limit) {
       video[headers[j]] = row[j];
     }
     
-    // Fallback if media_type is missing from sheet data
+    // Legacy fallback: if media_type column is missing from older sheet data,
+    // infer type from video_id length. YouTube IDs are always exactly 11 chars;
+    // article IDs are base64-encoded URLs (much longer).
     if (!video.media_type) {
-      if (video.video_id && video.video_id.length === 11) {
-        video.media_type = 'video';
-      } else {
-        video.media_type = 'article';
-      }
+      video.media_type = (video.video_id && video.video_id.length === 11) ? 'video' : 'article';
     }
     
     videos.push(video);
@@ -785,7 +761,7 @@ function getComments(videoId) {
   }
 
   var headers = data[0];
-  var videoIdCol = headers.indexOf('video_id');
+  var videoIdCol = findVideoIdCol(headers);
   var comments = [];
 
   for (var i = 1; i < data.length; i++) {
@@ -811,27 +787,15 @@ function handleAddComment(data) {
   var parentId = data.parentId;
   var body = data.body;
   var token = data.token;
-  var signature = data.signature;
-  var timestamp = data.timestamp;
 
   // 1. Validate required fields
   if (!videoId || !body || !token) {
     return { status: 'error', message: 'videoId, body, and token are required' };
   }
 
-  // 2. Verify HMAC signature (anti-abuse)
-  if (signature && timestamp) {
-    var payload = videoId + '|' + body + '|' + timestamp;
-    if (!verifyHmac(payload, signature)) {
-      log('ERROR', 'addComment', 'Invalid HMAC signature');
-      return { status: 'error', message: 'Invalid request signature' };
-    }
-    // Check timestamp freshness (reject if > 5 min old)
-    var age = (Date.now() - parseInt(timestamp)) / 1000;
-    if (age > 300) {
-      log('WARN', 'addComment', 'Stale timestamp: ' + age + 's old');
-      return { status: 'error', message: 'Request expired, please retry' };
-    }
+  // 2. Validate comment length (max 2000 characters)
+  if (body.length > 2000) {
+    return { status: 'error', message: 'Comment too long (max 2000 characters)' };
   }
 
   // 3. Verify Google token and get user info
@@ -894,7 +858,7 @@ function updateCommentCount(videoId) {
   var commentsSheet = getSheet('COMMENTS');
   var commentsData = commentsSheet.getDataRange().getValues();
   var headers = commentsData[0];
-  var videoIdCol = headers.indexOf('video_id');
+  var videoIdCol = findVideoIdCol(headers);
   var count = 0;
 
   for (var i = 1; i < commentsData.length; i++) {
@@ -905,7 +869,7 @@ function updateCommentCount(videoId) {
   var videosSheet = getSheet('VIDEOS');
   var videosData = videosSheet.getDataRange().getValues();
   var vHeaders = videosData[0];
-  var vVideoIdCol = vHeaders.indexOf('video_id');
+  var vVideoIdCol = findVideoIdCol(vHeaders);
   var commentCountCol = vHeaders.indexOf('comment_count');
 
   for (var i = 1; i < videosData.length; i++) {
@@ -920,6 +884,15 @@ function updateCommentCount(videoId) {
 // AUTHENTICATION
 // ============================================================
 
+/**
+ * Verifies a Google ID token using Google's tokeninfo endpoint.
+ * 
+ * NOTE: The `tokeninfo` endpoint is simple but has limitations:
+ * - It makes a network call per verification (adds latency)
+ * - Google recommends using a JWT library for production
+ *   (Apps Script lacks native JWT verification support)
+ * - Token is validated for structure + expiry by Google's servers
+ */
 function verifyGoogleToken(idToken) {
   try {
     var response = UrlFetchApp.fetch(
@@ -1026,6 +999,12 @@ function log(level, source, message) {
 }
 
 function handleLogs(params) {
+  // Require admin token from Meta sheet
+  var adminToken = getMeta('admin_token');
+  if (adminToken && params.token !== adminToken) {
+    return { status: 'error', message: 'Unauthorized' };
+  }
+
   var count = parseInt(params.count) || 50;
   var sheet = getSheet('LOGS');
   var data = sheet.getDataRange().getValues();

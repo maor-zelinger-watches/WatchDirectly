@@ -6,7 +6,7 @@
  */
 
 import { createApiClient } from './api.js';
-import { createMediaCard, sortVideos } from './feed.js';
+import { createMediaCard } from './feed.js';
 import { buildCommentTree, createCommentThread, createCommentHtml } from './comments.js';
 import { initAuth, renderSignInButton, getCurrentUser, isSignedIn, getToken, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
@@ -59,7 +59,7 @@ const iframeObserver = new IntersectionObserver((entries) => {
 // INITIALIZATION
 // ============================================================
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   let authRetries = 0;
   function tryInitAuth() {
     if (typeof google !== 'undefined' && google.accounts) {
@@ -73,7 +73,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setupInfiniteScroll();
 
-  if (!showCachedFeed()) {
+  const cached = await showCachedFeed();
+  if (!cached) {
     loadNextPage();
   } else {
     // Stale-while-revalidate: patch comment counts from fresh API data
@@ -186,10 +187,9 @@ function appendCards(videos) {
     }
 
     const feedContainer = document.getElementById('feed-container');
-    const sorted = sortVideos(videos);
 
     // Deduplicate: skip items already rendered in the DOM
-    const deduped = sorted.filter(video => {
+    const deduped = videos.filter(video => {
       const id = video.video_id;
       return id && !feedContainer.querySelector(`[data-video-id="${id}"]`);
     });
@@ -243,7 +243,7 @@ function appendCards(videos) {
  * Show cached feed instantly on page load (stale-while-revalidate).
  * Called before loadNextPage so the user sees content immediately.
  */
-function showCachedFeed() {
+async function showCachedFeed() {
   const cached = localStorage.getItem('wd_feed_cache');
   if (!cached) return false;
 
@@ -269,7 +269,7 @@ function showCachedFeed() {
       if (sentinel) sentinel.style.display = '';
     }
 
-    appendCards(videos);
+    await appendCards(videos);
     return true;
   } catch (e) {
     localStorage.removeItem('wd_feed_cache');
@@ -426,7 +426,8 @@ async function submitInlineComment(videoId, parentId, textarea) {
     return;
   }
 
-  const submitBtn = textarea.closest('form').querySelector('button[type="submit"]');
+  const form = textarea.closest('form');
+  const submitBtn = form ? form.querySelector('button[type="submit"]') : null;
   if (submitBtn) submitBtn.disabled = true;
 
   const user = getCurrentUser();
@@ -527,7 +528,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
     
     if (replyForm) {
       replyForm.style.display = '';
-      submitBtn.disabled = false;
+      if (submitBtn) submitBtn.disabled = false;
     } else {
       textarea.value = body;
       textarea.dispatchEvent(new Event('input'));
@@ -544,6 +545,8 @@ function attachReplyHandlers(videoId) {
   if (!card) return;
 
   card.querySelectorAll('.reply-btn').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = 'true';
     btn.addEventListener('click', (e) => {
       toggleReplyForm(videoId, e.currentTarget.dataset.commentId);
     });
@@ -608,7 +611,7 @@ function updateAuthUI(user) {
   if (user) {
     container.innerHTML = `
       <div class="header__user">
-        <img src="${user.picture}" alt="${sanitizeHtml(user.name)}" class="header__user-avatar" referrerpolicy="no-referrer" />
+        <img src="${sanitizeHtml(user.picture)}" alt="${sanitizeHtml(user.name)}" class="header__user-avatar" referrerpolicy="no-referrer" />
         <span class="header__user-name">${sanitizeHtml(user.name)}</span>
         <button class="header__signout-btn" id="signout-btn">Sign out</button>
       </div>

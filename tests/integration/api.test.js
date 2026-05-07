@@ -2,7 +2,7 @@
  * Integration tests for js/api.js
  * 
  * Tests the API client with mocked fetch responses.
- * Covers: fetchFeed, fetchComments, postComment (with HMAC), error handling.
+ * Covers: fetchFeed, fetchComments, postComment (token-only auth), error handling.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -22,7 +22,6 @@ const localStorageMock = (() => {
 Object.defineProperty(global, 'localStorage', { value: localStorageMock });
 
 const MOCK_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/test/exec';
-const MOCK_API_SECRET = 'test-secret-key-for-hmac';
 
 const mockFeedResponse = {
   status: 'ok',
@@ -65,30 +64,6 @@ const mockCommentsResponse = {
     },
   ],
 };
-
-const mockInitResponse = {
-  status: 'ok',
-  api_secret: MOCK_API_SECRET,
-};
-
-/**
- * Helper: creates a fetch mock that handles both ?action=init (GET) and
- * the subsequent POST for comment submission.
- */
-function createCommentFetchMock(postResponse) {
-  return vi.fn(async (url, options) => {
-    // GET request for init (fetching API secret)
-    if (typeof url === 'string' && url.includes('action=init')) {
-      return { ok: true, json: () => Promise.resolve(mockInitResponse) };
-    }
-    // POST request for comment
-    if (options && options.method === 'POST') {
-      return { ok: true, json: () => Promise.resolve(postResponse) };
-    }
-    // Fallback
-    return { ok: true, json: () => Promise.resolve({ status: 'ok' }) };
-  });
-}
 
 describe('API Client', () => {
   let api;
@@ -190,42 +165,47 @@ describe('API Client', () => {
   });
 
   describe('postComment', () => {
-    it('fetches API secret then sends signed POST request', async () => {
-      global.fetch = createCommentFetchMock({ status: 'ok', comment_id: 'c_new' });
+    it('sends a POST request with token-only auth', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', comment_id: 'c_new' }),
+      });
 
       const result = await api.postComment('v1', '', 'Nice!', 'mock-google-token');
       expect(result.comment_id).toBe('c_new');
 
-      // Should have called fetch twice: once for init, once for POST
-      expect(global.fetch).toHaveBeenCalledTimes(2);
+      // Should have called fetch once: just the POST
+      expect(global.fetch).toHaveBeenCalledTimes(1);
 
-      // First call: GET ?action=init
-      const firstCall = global.fetch.mock.calls[0];
-      expect(firstCall[0]).toContain('action=init');
-
-      // Second call: POST with signature and timestamp
-      const secondCall = global.fetch.mock.calls[1];
-      const body = JSON.parse(secondCall[1].body);
+      const call = global.fetch.mock.calls[0];
+      const body = JSON.parse(call[1].body);
       expect(body.action).toBe('comment');
       expect(body.videoId).toBe('v1');
       expect(body.body).toBe('Nice!');
       expect(body.token).toBe('mock-google-token');
-      expect(body.signature).toBeTruthy();
-      expect(body.timestamp).toBeTruthy();
+      // No HMAC fields
+      expect(body.signature).toBeUndefined();
+      expect(body.timestamp).toBeUndefined();
     });
 
-    it('caches the API secret across multiple calls', async () => {
-      global.fetch = createCommentFetchMock({ status: 'ok', comment_id: 'c_1' });
+    it('makes one fetch per comment (no init call)', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', comment_id: 'c_1' }),
+      });
 
       await api.postComment('v1', '', 'First!', 'token');
       await api.postComment('v2', '', 'Second!', 'token');
 
-      // init should only be called once, so 3 total: 1 init + 2 posts
-      expect(global.fetch).toHaveBeenCalledTimes(3);
+      // 2 posts, no init call
+      expect(global.fetch).toHaveBeenCalledTimes(2);
     });
 
     it('throws on blocked user response', async () => {
-      global.fetch = createCommentFetchMock({ status: 'error', message: 'User is blocked' });
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'error', message: 'User is blocked' }),
+      });
 
       await expect(
         api.postComment('v1', '', 'spam', 'token')
@@ -233,3 +213,4 @@ describe('API Client', () => {
     });
   });
 });
+

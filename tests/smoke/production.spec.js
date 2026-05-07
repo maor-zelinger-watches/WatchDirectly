@@ -62,10 +62,18 @@ test.describe('Production Smoke Tests', () => {
     const card = page.locator('.media-card').first();
     await expect(card).toBeVisible({ timeout: 30000 });
 
-    const iframe = card.locator('iframe');
-    await expect(iframe).toBeVisible();
-    const src = await iframe.getAttribute('src');
-    expect(src).toContain('youtube');
+    // Iframes are lazy-loaded via IntersectionObserver (data-src → src).
+    // Check for the iframe element with a data-src pointing to YouTube.
+    const iframe = card.locator('iframe[data-src], iframe[src]');
+    const count = await iframe.count();
+    if (count > 0) {
+      const dataSrc = await iframe.getAttribute('data-src') || await iframe.getAttribute('src');
+      expect(dataSrc).toContain('youtube');
+    } else {
+      // First card might be an article — check that the card is valid
+      const isArticle = await card.locator('.article-card__embed').count() > 0;
+      expect(isArticle).toBe(true);
+    }
   });
 
   test('multiple video cards render', async ({ page }) => {
@@ -198,33 +206,16 @@ test.describe('Comment Injection (Production API)', () => {
 
   const TEST_VIDEO_ID = 'aI_aCq8mu88'; // Nico Leonard's latest — known to exist in feed
 
-  test('inject test comment via API and verify it appears', async ({ page, request }) => {
-    // Step 1: Get the API secret
-    const initRes = await request.get(`${API_URL}?action=init`);
-    const initData = await initRes.json();
-    expect(initData.status).toBe('ok');
-    expect(initData.api_secret).toBeTruthy();
-    const secret = initData.api_secret;
-
-    // Step 2: Create HMAC signature
-    const testBody = `[SMOKE TEST] Automated test comment — ${new Date().toISOString()}`;
-    const timestamp = Date.now().toString();
-    const payload = `${TEST_VIDEO_ID}|${testBody}|${timestamp}`;
-
-    // Use Web Crypto API in Playwright's Node context
-    const { createHmac } = await import('crypto');
-    const signature = createHmac('sha256', secret)
-      .update(payload)
-      .digest('hex');
-
-    // Step 3: Post the test comment (we need a valid Google token, which we don't have in tests)
-    // Instead, let's verify the comments endpoint works and check the flow via UI
-    const commentsRes = await request.get(`${API_URL}?action=comments&videoId=${TEST_VIDEO_ID}`);
+  test('verify comments endpoint and UI for known video', async ({ page, request }) => {
+    // Step 1: Verify the comments endpoint works (no HMAC needed)
+    const commentsRes = await request.get(`${API_URL}?action=comments&videoId=${TEST_VIDEO_ID}`, {
+      timeout: 30000,
+    });
     const commentsData = await commentsRes.json();
     expect(commentsData.status).toBe('ok');
     expect(Array.isArray(commentsData.comments)).toBe(true);
 
-    // Step 4: Load the site and expand comments on the test video
+    // Step 2: Load the site and expand comments on the test video
     await page.goto(PROD_URL);
     await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
@@ -254,7 +245,9 @@ test.describe('Comment Injection (Production API)', () => {
   });
 
   test('API returns correct comment structure', async ({ request }) => {
-    const res = await request.get(`${API_URL}?action=comments&videoId=${TEST_VIDEO_ID}`);
+    const res = await request.get(`${API_URL}?action=comments&videoId=${TEST_VIDEO_ID}`, {
+      timeout: 30000,
+    });
     const data = await res.json();
 
     expect(data.status).toBe('ok');
@@ -271,7 +264,9 @@ test.describe('Comment Injection (Production API)', () => {
   });
 
   test('API feed returns videos with comment_count field', async ({ request }) => {
-    const res = await request.get(`${API_URL}?action=feed&page=1&limit=3`);
+    const res = await request.get(`${API_URL}?action=feed&page=1&limit=3`, {
+      timeout: 30000,
+    });
     const data = await res.json();
 
     expect(data.status).toBe('ok');

@@ -14,7 +14,9 @@ import { test, expect } from '@playwright/test';
 const API_URL = 'https://script.google.com/macros/s/AKfycbwyt7c8SWw9y0TnKq4RhcV7yLjS1JkXnNThYInpj-EnNYbA3ecgwVSX4gBIACNKHCqu0A/exec';
 
 async function fetchFeed(request, page = 1, limit = 50) {
-  const res = await request.get(`${API_URL}?action=feed&page=${page}&limit=${limit}`);
+  const res = await request.get(`${API_URL}?action=feed&page=${page}&limit=${limit}`, {
+    timeout: 30000, // Apps Script cold-starts can take 3-10s
+  });
   return res.json();
 }
 

@@ -75,18 +75,20 @@ export function validateCommentDepth(depth) {
 export function createCommentHtml(comment) {
   const escapedBody = sanitizeHtml(comment.body);
   const escapedName = sanitizeHtml(comment.user_name);
+  const escapedId = sanitizeHtml(comment.comment_id);
+  const escapedAvatar = sanitizeHtml(comment.user_avatar);
   const depth = comment.depth || 0;
 
   const replyButton = (depth === 0 && !comment.isOptimistic)
-    ? `<button class="comment__reply-btn reply-btn" data-comment-id="${comment.comment_id}">↩ Reply</button>`
+    ? `<button class="comment__reply-btn reply-btn" data-comment-id="${escapedId}">↩ Reply</button>`
     : '';
 
   const optimisticClass = comment.isOptimistic ? ' comment--optimistic' : '';
 
   return `
-    <div class="comment comment--depth-${depth}${optimisticClass}" data-comment-id="${comment.comment_id}">
+    <div class="comment comment--depth-${depth}${optimisticClass}" data-comment-id="${escapedId}">
       <div class="comment__avatar">
-        <img src="${comment.user_avatar}" alt="${escapedName}" class="comment__avatar-img" referrerpolicy="no-referrer" />
+        <img src="${escapedAvatar}" alt="${escapedName}" class="comment__avatar-img" referrerpolicy="no-referrer" />
       </div>
       <div class="comment__body">
         <div class="comment__header">

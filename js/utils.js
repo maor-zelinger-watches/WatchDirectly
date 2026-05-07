@@ -37,35 +37,6 @@ export function timeAgo(date) {
 }
 
 /**
- * Formats a date as an absolute string (e.g., "May 7, 2026").
- * 
- * @param {string|Date} date - ISO date string or Date object
- * @returns {string} Formatted date string
- */
-export function formatDate(date) {
-  const d = date instanceof Date ? date : new Date(date);
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
-}
-
-/**
- * Generates a unique comment ID with a "c_" prefix.
- * Uses crypto.randomUUID if available, falls back to timestamp + random.
- * 
- * @returns {string} Unique ID string (e.g., "c_a1b2c3d4e5f6")
- */
-export function generateId() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return `c_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
-  }
-  // Fallback for environments without crypto.randomUUID
-  const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).slice(2, 8);
-  return `c_${timestamp}${random}`;
-}
-
-/**
  * Escapes HTML special characters to prevent XSS in user-generated content.
  * Preserves newlines and spaces but escapes everything that could be interpreted as HTML.
  * 
@@ -80,56 +51,4 @@ export function sanitizeHtml(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
-}
-
-/**
- * Simple debounce function.
- * 
- * @param {Function} fn - Function to debounce
- * @param {number} ms - Delay in milliseconds
- * @returns {Function} Debounced function
- */
-export function debounce(fn, ms) {
-  let timer;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), ms);
-  };
-}
-
-/**
- * Gets a value from localStorage with TTL support.
- * 
- * @param {string} key - Storage key
- * @returns {any|null} Parsed value or null if expired/missing
- */
-export function cacheGet(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const { value, expires } = JSON.parse(raw);
-    if (expires && Date.now() > expires) {
-      localStorage.removeItem(key);
-      return null;
-    }
-    return value;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Sets a value in localStorage with TTL support.
- * 
- * @param {string} key - Storage key
- * @param {any} value - Value to store (must be JSON-serializable)
- * @param {number} ttlMs - Time to live in milliseconds
- */
-export function cacheSet(key, value, ttlMs) {
-  try {
-    const expires = ttlMs ? Date.now() + ttlMs : null;
-    localStorage.setItem(key, JSON.stringify({ value, expires }));
-  } catch {
-    // localStorage might be full or unavailable — fail silently
-  }
 }

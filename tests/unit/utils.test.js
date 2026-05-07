@@ -3,13 +3,11 @@
  * 
  * Tests cover:
  * - timeAgo(): relative time formatting with edge cases
- * - formatDate(): absolute date formatting
- * - generateId(): unique ID generation
  * - sanitizeHtml(): XSS prevention for user-generated content
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { timeAgo, formatDate, generateId, sanitizeHtml } from '../../js/utils.js';
+import { timeAgo, sanitizeHtml } from '../../js/utils.js';
 
 describe('timeAgo', () => {
   let now;
@@ -92,55 +90,6 @@ describe('timeAgo', () => {
   it('handles timestamps in milliseconds', () => {
     const timestamp = new Date('2026-05-07T11:00:00Z').getTime();
     expect(timeAgo(timestamp)).toBe('1h');
-  });
-});
-
-describe('formatDate', () => {
-  it('formats an ISO date string to readable format', () => {
-    const result = formatDate('2026-05-07T08:00:00Z');
-    expect(result).toBe('May 7, 2026');
-  });
-
-  it('formats another date correctly', () => {
-    const result = formatDate('2026-01-15T12:00:00Z');
-    expect(result).toBe('Jan 15, 2026');
-  });
-
-  it('formats December correctly', () => {
-    const result = formatDate('2025-12-25T00:00:00Z');
-    expect(result).toBe('Dec 25, 2025');
-  });
-
-  it('handles Date objects', () => {
-    const result = formatDate(new Date('2026-05-07T08:00:00Z'));
-    expect(result).toBe('May 7, 2026');
-  });
-});
-
-describe('generateId', () => {
-  it('returns a non-empty string', () => {
-    const id = generateId();
-    expect(id).toBeTruthy();
-    expect(typeof id).toBe('string');
-    expect(id.length).toBeGreaterThan(0);
-  });
-
-  it('generates unique IDs on successive calls', () => {
-    const ids = new Set();
-    for (let i = 0; i < 100; i++) {
-      ids.add(generateId());
-    }
-    expect(ids.size).toBe(100);
-  });
-
-  it('generates IDs with a consistent prefix', () => {
-    const id = generateId();
-    expect(id).toMatch(/^c_/);
-  });
-
-  it('generates URL-safe IDs (no special characters)', () => {
-    const id = generateId();
-    expect(id).toMatch(/^[a-zA-Z0-9_-]+$/);
   });
 });
 

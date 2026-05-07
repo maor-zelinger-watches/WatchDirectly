@@ -53,12 +53,13 @@
         <ul>
           <li><strong>Your name</strong> — displayed next to your comments</li>
           <li><strong>Your profile picture</strong> — displayed next to your comments</li>
+          <li><strong>Your email address</strong> — used internally for rate limiting and abuse prevention; never displayed publicly or shared with third parties</li>
           <li><strong>Your Google authentication token</strong> — used to verify your identity when posting comments; not stored persistently</li>
         </ul>
-        <p>We do <strong>not</strong> access your email, contacts, YouTube channel, or any other Google account data. We do <strong>not</strong> store your Google login credentials.</p>
+        <p>We do <strong>not</strong> access your contacts, YouTube channel, or any other Google account data. We do <strong>not</strong> store your Google login credentials.</p>
 
         <h4>2.3 Comments</h4>
-        <p>When you post a comment, we store your display name, profile picture URL, comment text, and a timestamp. Comments are stored on our backend and are publicly visible.</p>
+        <p>When you post a comment, we store your display name, profile picture URL, email address (for anti-abuse purposes), comment text, and a timestamp. Comments are stored on our backend. Your name, profile picture, and comment text are publicly visible; your email address is never displayed.</p>
 
         <h4>2.4 Local Storage</h4>
         <p>We use your browser's <code>localStorage</code> to cache the video feed for faster page loads. This data stays on your device and is not transmitted to us. You can clear it at any time through your browser settings.</p>
@@ -68,6 +69,7 @@
         <h3>3. How We Use Information</h3>
         <ul>
           <li><strong>Display comments:</strong> Your name and picture are shown alongside your comments so other users know who wrote them.</li>
+          <li><strong>Anti-abuse:</strong> Your email address is used to enforce rate limits and to block abusive users. It is never displayed publicly.</li>
           <li><strong>Feed caching:</strong> We cache the video feed locally to reduce load times on return visits.</li>
         </ul>
         <p>We do <strong>not</strong> use your information for advertising, analytics, profiling, or any purpose other than providing the Service.</p>

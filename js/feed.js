@@ -9,10 +9,24 @@
 import { timeAgo, sanitizeHtml } from './utils.js';
 
 /**
- * Creates an HTML string for a video card in the feed.
+ * Validates a URL is safe (only http/https protocols).
+ * @param {string} url - URL to validate
+ * @returns {string} The URL if safe, or empty string
+ */
+function safeUrl(url) {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return url;
+  } catch (e) { /* invalid URL */ }
+  return '';
+}
+
+/**
+ * Creates an HTML string for a media card (video or article) in the feed.
  * Uses CSS Grid: thumbnail left, info right, comments below.
  * 
- * @param {Object} video - Video data from the API
+ * @param {Object} item - Media item data from the API
  * @returns {string} HTML string for the card
  */
 export function createMediaCard(item) {
@@ -20,6 +34,7 @@ export function createMediaCard(item) {
     title: sanitizeHtml(item.title),
     channel: sanitizeHtml(item.channel_name),
     category: sanitizeHtml(item.category),
+    videoId: sanitizeHtml(item.video_id),
   };
 
   // Fallback: If media_type is missing but ID is > 11 chars (base64 or URL), it must be an article
@@ -28,15 +43,15 @@ export function createMediaCard(item) {
   
   const embedHtml = isArticle ? `
     <div class="article-card__embed">
-      ${item.preview_image ? `<img src="${sanitizeHtml(item.preview_image)}" alt="${escaped.title}" class="article-card__img" loading="lazy">` : `<div class="article-card__placeholder">📰</div>`}
+      ${safeUrl(item.preview_image) ? `<img src="${sanitizeHtml(safeUrl(item.preview_image))}" alt="${escaped.title}" class="article-card__img" loading="lazy">` : `<div class="article-card__placeholder">📰</div>`}
       <div class="article-card__overlay">
-        <a href="${sanitizeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="btn btn--primary btn--sm article-card__link-btn">Read Article</a>
+        ${safeUrl(item.url) ? `<a href="${sanitizeHtml(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer" class="btn btn--primary btn--sm article-card__link-btn">Read Article</a>` : ''}
       </div>
     </div>
   ` : `
     <div class="media-card__embed">
       <iframe
-        data-src="https://www.youtube-nocookie.com/embed/${item.video_id}"
+        data-src="https://www.youtube-nocookie.com/embed/${escaped.videoId}"
         title="${escaped.title}"
         frameborder="0"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
@@ -46,7 +61,7 @@ export function createMediaCard(item) {
   `;
 
   return `
-    <article class="${cardClass}" data-video-id="${item.video_id}">
+    <article class="${cardClass}" data-video-id="${escaped.videoId}">
       <div class="media-card__grid">
         ${embedHtml}
         <div class="media-card__content">
@@ -61,22 +76,22 @@ export function createMediaCard(item) {
           </div>
         </div>
       </div>
-      <div class="media-card__comments-section" data-video-id="${item.video_id}">
-        <button class="media-card__comments-toggle" data-video-id="${item.video_id}">
+      <div class="media-card__comments-section" data-video-id="${escaped.videoId}">
+        <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}">
           💬 ${item.comment_count || 0} comments
         </button>
-        <div class="media-card__comments-body" data-video-id="${item.video_id}" style="display: none;">
-          <div class="media-card__comments-list" data-video-id="${item.video_id}">
+        <div class="media-card__comments-body" data-video-id="${escaped.videoId}" style="display: none;">
+          <div class="media-card__comments-list" data-video-id="${escaped.videoId}">
             <!-- Comments rendered here -->
           </div>
-          <div class="media-card__comment-input" data-video-id="${item.video_id}">
-            <div class="media-card__auth-prompt" data-video-id="${item.video_id}">
+          <div class="media-card__comment-input" data-video-id="${escaped.videoId}">
+            <div class="media-card__auth-prompt" data-video-id="${escaped.videoId}">
               <p>Sign in with Google to join the discussion</p>
             </div>
-            <form class="media-card__comment-form" data-video-id="${item.video_id}" style="display: none;">
+            <form class="media-card__comment-form" data-video-id="${escaped.videoId}" style="display: none;">
               <textarea
                 class="media-card__textarea"
-                data-video-id="${item.video_id}"
+                data-video-id="${escaped.videoId}"
                 placeholder="What do you think?"
                 maxlength="2000"
                 rows="2"
@@ -101,12 +116,4 @@ export function sortVideos(videos) {
   return [...videos].sort((a, b) => {
     return new Date(b.published_at).getTime() - new Date(a.published_at).getTime();
   });
-}
-
-/**
- * Filters videos by tier.
- */
-export function filterVideos(videos, tier) {
-  if (tier === 'all') return [...videos];
-  return videos.filter(v => v.tier === tier);
 }

@@ -1,11 +1,13 @@
 /**
  * Setup.gs — One-time setup functions for WatchDirectly
  * 
+ * ⚠️  ARCHIVE: This file is retained for reference only.
+ *     The spreadsheet IDs here MUST match SPREADSHEET_IDS in Code.gs.
+ *     Do NOT run these functions unless re-initializing from scratch.
+ * 
  * Run these manually from the Apps Script editor:
  *   1. Select function from dropdown → populateChannels → Run
  *   2. Select function from dropdown → populateMeta → Run
- * 
- * Delete this file after setup is complete.
  */
 
 function populateChannels() {

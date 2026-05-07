@@ -156,20 +156,7 @@ img {
   gap: var(--sp-3);
 }
 
-.header__back-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-full);
-  color: var(--text-primary);
-  transition: background var(--transition-fast);
-}
 
-.header__back-btn:hover {
-  background: var(--bg-surface-hover);
-}
 
 .header__logo {
   display: flex;
@@ -268,46 +255,7 @@ img {
   min-height: calc(100vh - var(--header-height));
 }
 
-/* ============================================================
-   FILTER TABS
-   ============================================================ */
 
-.filter-tabs {
-  display: flex;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-4);
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
-}
-
-.filter-tabs::-webkit-scrollbar {
-  display: none;
-}
-
-.filter-tabs__btn {
-  padding: var(--sp-2) var(--sp-3);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--text-secondary);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  white-space: nowrap;
-  transition: all var(--transition-fast);
-}
-
-.filter-tabs__btn:hover {
-  color: var(--text-primary);
-  border-color: var(--text-secondary);
-}
-
-.filter-tabs__btn--active {
-  color: var(--bg-canvas);
-  background: var(--accent);
-  border-color: var(--accent);
-  font-weight: var(--fw-semibold);
-}
 
 /* ============================================================
    VIDEO CARD — Grid Layout (thumbnail left, info right)
@@ -325,7 +273,7 @@ img {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
-  transition: border-color var(--transition-normal);
+  transition: border-color var(--transition-normal), opacity 0.3s ease, transform 0.3s ease;
 }
 
 .media-card:hover {
@@ -335,10 +283,6 @@ img {
 .media-card--entering {
   opacity: 0;
   transform: translateY(12px);
-}
-
-.media-card {
-  transition: border-color var(--transition-normal), opacity 0.3s ease, transform 0.3s ease;
 }
 
 /* Grid: thumbnail | content */
@@ -520,89 +464,7 @@ img {
   padding: var(--sp-4);
 }
 
-/* ============================================================
-   COMMENTS
-   ============================================================ */
 
-.detail-view__comments {
-  padding: var(--sp-4);
-}
-
-.comments-header {
-  font-size: var(--fs-md);
-  font-weight: var(--fw-semibold);
-  color: var(--text-primary);
-  margin-bottom: var(--sp-4);
-  padding-bottom: var(--sp-3);
-  border-bottom: 1px solid var(--separator);
-}
-
-/* Comment Input */
-.comment-input {
-  margin-bottom: var(--sp-6);
-}
-
-.comment-input__auth-prompt {
-  padding: var(--sp-4);
-  text-align: center;
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-
-.comment-input__form {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.comment-input__user {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-3) 0;
-  font-size: var(--fs-sm);
-  color: var(--text-secondary);
-}
-
-.comment-input__user img {
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-full);
-}
-
-.comment-input__textarea {
-  width: 100%;
-  padding: var(--sp-3);
-  font-family: var(--font-family);
-  font-size: var(--fs-base);
-  color: var(--text-primary);
-  background: transparent;
-  border: none;
-  outline: none;
-  resize: vertical;
-  min-height: 60px;
-}
-
-.comment-input__textarea::placeholder {
-  color: var(--text-muted);
-}
-
-.comment-input__footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--sp-2) var(--sp-3);
-  border-top: 1px solid var(--separator);
-}
-
-.comment-input__charcount {
-  font-size: var(--fs-xs);
-  color: var(--text-muted);
-}
 
 /* Comment Thread */
 .comment-thread {
@@ -866,16 +728,7 @@ img {
   to { transform: rotate(360deg); }
 }
 
-.comments-loading {
-  text-align: center;
-  padding: var(--sp-8);
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-}
 
-.comments-loading .spinner {
-  margin-bottom: var(--sp-3);
-}
 
 /* ============================================================
    TOAST NOTIFICATIONS
@@ -939,42 +792,7 @@ img {
   padding: var(--sp-6) var(--sp-4);
 }
 
-#load-more-btn {
-  position: relative;
-  padding: var(--sp-3) var(--sp-8);
-  font-size: var(--fs-base);
-  animation: loadMorePulse 2.5s ease-in-out infinite;
-}
 
-#load-more-btn:hover {
-  animation: none;
-  box-shadow: 0 0 20px var(--accent-dim);
-  transform: translateY(-1px);
-}
-
-#load-more-btn.loading {
-  pointer-events: none;
-  opacity: 0.7;
-  animation: none;
-}
-
-#load-more-btn.loading::after {
-  content: '';
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  margin-left: var(--sp-2);
-  border: 2px solid var(--bg-canvas);
-  border-top-color: transparent;
-  border-radius: var(--radius-full);
-  animation: spin 0.6s linear infinite;
-  vertical-align: middle;
-}
-
-@keyframes loadMorePulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 160, 83, 0); }
-  50% { box-shadow: 0 0 16px 4px rgba(212, 160, 83, 0.25); }
-}
 
 .feed__empty {
   text-align: center;
