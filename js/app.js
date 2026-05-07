@@ -1,12 +1,11 @@
 /**
  * app.js — Main application controller for WatchDirectly
  * 
- * Initializes all modules, handles routing, and manages view state.
- * Hash-based routing: #/ (feed) and #/post/VIDEO_ID (detail).
+ * Single-page feed with inline comments. No routing.
  */
 
 import { createApiClient } from './api.js';
-import { createVideoCard, sortVideos, filterVideos } from './feed.js';
+import { createVideoCard, sortVideos } from './feed.js';
 import { buildCommentTree, createCommentThread, createCommentHtml, validateCommentDepth } from './comments.js';
 import { initAuth, renderSignInButton, getCurrentUser, isSignedIn, getToken, onAuthChange, signOut } from './auth.js';
 import { timeAgo, formatDate, sanitizeHtml, generateId } from './utils.js';
@@ -30,11 +29,10 @@ const CONFIG = {
 
 const state = {
   videos: [],
-  currentFilter: 'all',
   currentPage: 1,
   totalVideos: 0,
-  currentVideoId: null,
   loading: false,
+  expandedComments: new Set(), // Track which video cards have comments open
 };
 
 const api = createApiClient(CONFIG.APPS_SCRIPT_URL);
@@ -55,53 +53,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   tryInitAuth();
 
-  setupFilterTabs();
   setupLoadMore();
-  setupCommentForm();
-  setupBackButton();
 
-  // Handle initial route
-  handleRoute();
-
-  // Listen for hash changes
-  window.addEventListener('hashchange', handleRoute);
+  // Load feed
+  loadFeed();
 });
 
 // ============================================================
-// ROUTING
+// FEED
 // ============================================================
-
-function handleRoute() {
-  const hash = window.location.hash || '#/';
-
-  if (hash.startsWith('#/post/')) {
-    const videoId = hash.replace('#/post/', '');
-    showDetailView(videoId);
-  } else {
-    showFeedView();
-  }
-}
-
-function navigate(hash) {
-  window.location.hash = hash;
-}
-
-// ============================================================
-// FEED VIEW
-// ============================================================
-
-function showFeedView() {
-  document.getElementById('feed-view').style.display = '';
-  document.getElementById('detail-view').style.display = 'none';
-  document.getElementById('back-btn').style.display = 'none';
-
-  state.currentVideoId = null;
-
-  // Only load if we don't have videos yet
-  if (state.videos.length === 0) {
-    loadFeed();
-  }
-}
 
 async function loadFeed(page = 1) {
   if (state.loading) return;
@@ -147,15 +107,8 @@ function renderFeed() {
   const loadMore = document.getElementById('load-more-container');
   const empty = document.getElementById('feed-empty');
 
-  let videos = state.videos;
-
-  // Apply filter
-  if (state.currentFilter !== 'all') {
-    videos = filterVideos(videos, parseInt(state.currentFilter));
-  }
-
   // Sort chronologically
-  videos = sortVideos(videos);
+  const videos = sortVideos(state.videos);
 
   if (videos.length === 0) {
     feedContainer.innerHTML = '';
@@ -171,117 +124,105 @@ function renderFeed() {
   const hasMore = state.videos.length < state.totalVideos;
   loadMore.style.display = hasMore ? '' : 'none';
 
-  // Attach click handlers to entire video card (except iframe)
-  feedContainer.querySelectorAll('.video-card').forEach(card => {
-    card.addEventListener('click', (e) => {
-      // Don't navigate if clicking on the iframe itself
-      if (e.target.tagName === 'IFRAME') return;
-      const videoId = card.dataset.videoId;
-      navigate(`#/post/${videoId}`);
+  // Attach comment toggle handlers
+  attachCommentToggleHandlers();
+}
+
+// ============================================================
+// INLINE COMMENTS
+// ============================================================
+
+function attachCommentToggleHandlers() {
+  document.querySelectorAll('.video-card__comments-toggle').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const videoId = btn.dataset.videoId;
+      toggleComments(videoId);
     });
-    card.style.cursor = 'pointer';
   });
 }
 
-// ============================================================
-// DETAIL VIEW
-// ============================================================
+function toggleComments(videoId) {
+  const body = document.querySelector(`.video-card__comments-body[data-video-id="${videoId}"]`);
+  if (!body) return;
 
-async function showDetailView(videoId) {
-  document.getElementById('feed-view').style.display = 'none';
-  document.getElementById('detail-view').style.display = '';
-  document.getElementById('back-btn').style.display = '';
+  const isExpanded = body.style.display !== 'none';
 
-  state.currentVideoId = videoId;
-
-  // Find video in state or use minimal data
-  const video = state.videos.find(v => v.video_id === videoId) || { video_id: videoId };
-
-  renderDetailVideo(video);
-  loadComments(videoId);
+  if (isExpanded) {
+    body.style.display = 'none';
+    state.expandedComments.delete(videoId);
+  } else {
+    body.style.display = '';
+    state.expandedComments.add(videoId);
+    loadInlineComments(videoId);
+    updateInlineCommentFormUI(videoId);
+    setupInlineCommentForm(videoId);
+  }
 }
 
-function renderDetailVideo(video) {
-  const container = document.getElementById('detail-video');
-  const title = sanitizeHtml(video.title || 'Loading...');
-  const channel = sanitizeHtml(video.channel_name || '');
+async function loadInlineComments(videoId) {
+  const listEl = document.querySelector(`.video-card__comments-list[data-video-id="${videoId}"]`);
+  if (!listEl) return;
 
-  container.innerHTML = `
-    <div class="detail-view__embed">
-      <iframe
-        src="https://www.youtube-nocookie.com/embed/${video.video_id}?autoplay=0"
-        title="${title}"
-        frameborder="0"
-        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-        allowfullscreen
-      ></iframe>
-    </div>
-    <div class="detail-view__info">
-      <h2 class="detail-view__title">${title}</h2>
-      <div class="detail-view__meta">
-        <span>🎬 ${channel}</span>
-        ${video.published_at ? `<span>·</span><span>${formatDate(video.published_at)} · ${timeAgo(video.published_at)}</span>` : ''}
-      </div>
-      ${video.tier !== undefined ? `
-        <div class="detail-view__tags">
-          <span class="video-card__tier tier-${video.tier}">Tier ${video.tier}</span>
-          <span class="video-card__separator">·</span>
-          <span class="video-card__category">${sanitizeHtml(video.category || '')}</span>
-        </div>
-      ` : ''}
-    </div>
-  `;
-}
-
-async function loadComments(videoId) {
-  const commentsList = document.getElementById('comments-list');
-  const commentsLoading = document.getElementById('comments-loading');
-  const commentsHeader = document.getElementById('comments-header');
-
-  commentsList.innerHTML = '';
-  commentsLoading.style.display = '';
+  listEl.innerHTML = '<div class="comments-loading-inline"><div class="spinner"></div></div>';
 
   try {
     const data = await api.fetchComments(videoId);
     const comments = data.comments || [];
     const tree = buildCommentTree(comments);
 
-    commentsHeader.textContent = `💬 Comments (${comments.length})`;
+    // Update toggle button count
+    const toggleBtn = document.querySelector(`.video-card__comments-toggle[data-video-id="${videoId}"]`);
+    if (toggleBtn) {
+      toggleBtn.textContent = `💬 ${comments.length} comments`;
+    }
 
     if (tree.length === 0) {
-      commentsList.innerHTML = '<p class="comments-empty" style="text-align: center; color: var(--text-muted); padding: 24px;">No comments yet. Be the first!</p>';
+      listEl.innerHTML = '<p class="comments-empty">No comments yet. Be the first!</p>';
     } else {
-      commentsList.innerHTML = tree.map(c => createCommentThread(c)).join('');
-      attachReplyHandlers();
+      listEl.innerHTML = tree.map(c => createCommentThread(c)).join('');
+      attachReplyHandlers(videoId);
     }
   } catch (error) {
     console.error('Failed to load comments:', error);
-    commentsList.innerHTML = '<p style="text-align: center; color: var(--text-muted);">Failed to load comments.</p>';
-  } finally {
-    commentsLoading.style.display = 'none';
+    listEl.innerHTML = '<p class="comments-empty">Failed to load comments.</p>';
   }
 }
 
-// ============================================================
-// COMMENT POSTING
-// ============================================================
+function updateInlineCommentFormUI(videoId) {
+  const authPrompt = document.querySelector(`.video-card__auth-prompt[data-video-id="${videoId}"]`);
+  const form = document.querySelector(`.video-card__comment-form[data-video-id="${videoId}"]`);
+  if (!authPrompt || !form) return;
 
-function setupCommentForm() {
-  const form = document.getElementById('comment-form');
-  const textarea = document.getElementById('comment-textarea');
-  const charcount = document.getElementById('comment-charcount');
+  const user = getCurrentUser();
+  if (user) {
+    authPrompt.style.display = 'none';
+    form.style.display = '';
+  } else {
+    authPrompt.style.display = '';
+    form.style.display = 'none';
+  }
+}
 
+function setupInlineCommentForm(videoId) {
+  const form = document.querySelector(`.video-card__comment-form[data-video-id="${videoId}"]`);
+  const textarea = document.querySelector(`.video-card__textarea[data-video-id="${videoId}"]`);
+  if (!form || !textarea || form.dataset.bound) return;
+
+  form.dataset.bound = 'true';
+
+  const charcount = form.querySelector('.video-card__charcount');
   textarea.addEventListener('input', () => {
-    charcount.textContent = `${textarea.value.length}/2000`;
+    if (charcount) charcount.textContent = `${textarea.value.length}/2000`;
   });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    await submitComment('', textarea);
+    await submitInlineComment(videoId, '', textarea);
   });
 }
 
-async function submitComment(parentId, textarea) {
+async function submitInlineComment(videoId, parentId, textarea) {
   const body = textarea.value.trim();
   if (!body) return;
 
@@ -290,15 +231,14 @@ async function submitComment(parentId, textarea) {
     return;
   }
 
-  const submitBtn = textarea.closest('form').querySelector('button[type="submit"], .reply-submit-btn');
+  const submitBtn = textarea.closest('form').querySelector('button[type="submit"]');
   if (submitBtn) submitBtn.disabled = true;
 
   try {
-    await api.postComment(state.currentVideoId, parentId, body, getToken());
+    await api.postComment(videoId, parentId, body, getToken());
     textarea.value = '';
     showToast('Comment posted!', 'success');
-    // Reload comments
-    loadComments(state.currentVideoId);
+    loadInlineComments(videoId);
   } catch (error) {
     console.error('Failed to post comment:', error);
     showToast(error.message || 'Failed to post comment', 'error');
@@ -307,28 +247,31 @@ async function submitComment(parentId, textarea) {
   }
 }
 
-function attachReplyHandlers() {
-  document.querySelectorAll('.reply-btn').forEach(btn => {
+function attachReplyHandlers(videoId) {
+  const card = document.querySelector(`.video-card[data-video-id="${videoId}"]`);
+  if (!card) return;
+
+  card.querySelectorAll('.reply-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       const commentId = e.currentTarget.dataset.commentId;
-      toggleReplyForm(commentId);
+      toggleReplyForm(videoId, commentId);
     });
   });
 }
 
-function toggleReplyForm(commentId) {
-  // Remove any existing reply forms
-  document.querySelectorAll('.reply-form').forEach(f => f.remove());
+function toggleReplyForm(videoId, commentId) {
+  // Remove any existing reply forms in this card
+  const card = document.querySelector(`.video-card[data-video-id="${videoId}"]`);
+  if (card) card.querySelectorAll('.reply-form').forEach(f => f.remove());
 
   if (!isSignedIn()) {
     showToast('Please sign in to reply', 'info');
     return;
   }
 
-  const commentEl = document.querySelector(`.comment[data-comment-id="${commentId}"]`);
+  const commentEl = card.querySelector(`.comment[data-comment-id="${commentId}"]`);
   if (!commentEl) return;
 
-  const user = getCurrentUser();
   const replyForm = document.createElement('div');
   replyForm.className = 'reply-form';
   replyForm.innerHTML = `
@@ -349,7 +292,7 @@ function toggleReplyForm(commentId) {
   });
 
   replyForm.querySelector('.reply-submit-btn').addEventListener('click', () => {
-    submitComment(commentId, textarea);
+    submitInlineComment(videoId, commentId, textarea);
   });
 }
 
@@ -362,7 +305,10 @@ function setupAuthUI() {
 
   onAuthChange((user) => {
     updateAuthUI(user);
-    updateCommentFormUI(user);
+    // Update all expanded comment forms when auth state changes
+    state.expandedComments.forEach(videoId => {
+      updateInlineCommentFormUI(videoId);
+    });
   });
 
   // Render sign-in button initially
@@ -389,44 +335,6 @@ function updateAuthUI(user) {
   }
 }
 
-function updateCommentFormUI(user) {
-  const authPrompt = document.getElementById('comment-auth-prompt');
-  const form = document.getElementById('comment-form');
-  const userInfo = document.getElementById('comment-user-info');
-
-  if (!authPrompt || !form) return;
-
-  if (user) {
-    authPrompt.style.display = 'none';
-    form.style.display = '';
-    userInfo.innerHTML = `
-      <img src="${user.picture}" alt="${sanitizeHtml(user.name)}" referrerpolicy="no-referrer" />
-      <span>${sanitizeHtml(user.name)}</span>
-    `;
-  } else {
-    authPrompt.style.display = '';
-    form.style.display = 'none';
-  }
-}
-
-// ============================================================
-// FILTER TABS
-// ============================================================
-
-function setupFilterTabs() {
-  document.getElementById('filter-tabs').addEventListener('click', (e) => {
-    const btn = e.target.closest('.filter-tabs__btn');
-    if (!btn) return;
-
-    // Update active state
-    document.querySelectorAll('.filter-tabs__btn').forEach(b => b.classList.remove('filter-tabs__btn--active'));
-    btn.classList.add('filter-tabs__btn--active');
-
-    state.currentFilter = btn.dataset.filter;
-    renderFeed();
-  });
-}
-
 // ============================================================
 // LOAD MORE
 // ============================================================
@@ -434,16 +342,6 @@ function setupFilterTabs() {
 function setupLoadMore() {
   document.getElementById('load-more-btn').addEventListener('click', () => {
     loadFeed(state.currentPage + 1);
-  });
-}
-
-// ============================================================
-// BACK BUTTON
-// ============================================================
-
-function setupBackButton() {
-  document.getElementById('back-btn').addEventListener('click', () => {
-    navigate('#/');
   });
 }
 

@@ -31,11 +31,25 @@ export function initAuth(clientId) {
     return;
   }
 
+  // Restore session from localStorage (GIS doesn't persist across refresh)
+  const saved = localStorage.getItem('wd_user');
+  if (saved) {
+    try {
+      currentUser = JSON.parse(saved);
+      notifyListeners();
+    } catch (e) {
+      localStorage.removeItem('wd_user');
+    }
+  }
+
   google.accounts.id.initialize({
     client_id: clientId,
     callback: handleCredentialResponse,
     auto_select: true,
   });
+
+  // Trigger one-tap prompt (re-authenticates silently if auto_select is true)
+  google.accounts.id.prompt();
 }
 
 /**
@@ -75,6 +89,9 @@ function handleCredentialResponse(response) {
       token: token,
     };
 
+    // Persist to localStorage so session survives refresh
+    localStorage.setItem('wd_user', JSON.stringify(currentUser));
+
     notifyListeners();
   } catch (error) {
     console.error('Failed to decode credential:', error);
@@ -89,6 +106,7 @@ export function signOut() {
     google.accounts.id.disableAutoSelect();
   }
   currentUser = null;
+  localStorage.removeItem('wd_user');
   notifyListeners();
 }
 

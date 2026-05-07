@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WatchDirectly — Watch Content, No Algorithm</title>
-  <meta name="description" content="Chronological feed of the best watch YouTube content from 18 curated creators. No algorithm, just the latest videos and community discussion.">
+  <meta name="description" content="Chronological feed of the best watch YouTube content from 19 curated creators. No algorithm, just the latest videos and community discussion.">
   
   <!-- Open Graph -->
   <meta property="og:title" content="WatchDirectly">
@@ -27,9 +27,6 @@
   <!-- ===== HEADER ===== -->
   <header class="header" id="header">
     <div class="header__inner">
-      <button class="header__back-btn" id="back-btn" aria-label="Back to feed" style="display: none;">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-      </button>
       <div class="header__logo">
         <span class="header__logo-icon">⌚</span>
         <h1 class="header__title">WatchDirectly</h1>
@@ -45,18 +42,10 @@
 
     <!-- Feed View -->
     <section class="feed-view" id="feed-view">
-      <!-- Filter Tabs -->
-      <div class="filter-tabs" id="filter-tabs">
-        <button class="filter-tabs__btn filter-tabs__btn--active" data-filter="all">All</button>
-        <button class="filter-tabs__btn" data-filter="0">⭐ Tier 0</button>
-        <button class="filter-tabs__btn" data-filter="1">Tier 1</button>
-        <button class="filter-tabs__btn" data-filter="2">Tier 2</button>
-        <button class="filter-tabs__btn" data-filter="3">Tier 3</button>
-      </div>
 
       <!-- Feed Cards Container -->
       <div class="feed" id="feed-container">
-        <!-- Video cards rendered here by JS -->
+        <!-- Video cards with inline comments rendered here by JS -->
       </div>
 
       <!-- Loading Skeleton -->
@@ -74,53 +63,6 @@
       <!-- Empty State -->
       <div class="feed__empty" id="feed-empty" style="display: none;">
         <p>No videos yet. Check back soon!</p>
-      </div>
-    </section>
-
-    <!-- Post Detail View -->
-    <section class="detail-view" id="detail-view" style="display: none;">
-      <!-- Video embed + info -->
-      <div class="detail-view__video" id="detail-video">
-        <!-- Rendered by JS -->
-      </div>
-
-      <!-- Comment Section -->
-      <div class="detail-view__comments">
-        <h2 class="comments-header" id="comments-header">💬 Comments</h2>
-
-        <!-- Comment Input -->
-        <div class="comment-input" id="comment-input-container">
-          <div class="comment-input__auth-prompt" id="comment-auth-prompt">
-            <p>Sign in with Google to join the discussion</p>
-          </div>
-          <form class="comment-input__form" id="comment-form" style="display: none;">
-            <div class="comment-input__user" id="comment-user-info">
-              <!-- User avatar + name rendered here -->
-            </div>
-            <textarea
-              class="comment-input__textarea"
-              id="comment-textarea"
-              placeholder="What do you think?"
-              maxlength="2000"
-              rows="3"
-            ></textarea>
-            <div class="comment-input__footer">
-              <span class="comment-input__charcount" id="comment-charcount">0/2000</span>
-              <button type="submit" class="btn btn--primary btn--sm" id="comment-submit-btn">Comment</button>
-            </div>
-          </form>
-        </div>
-
-        <!-- Comments List -->
-        <div class="comments-list" id="comments-list">
-          <!-- Comment threads rendered here by JS -->
-        </div>
-
-        <!-- Comments Loading -->
-        <div class="comments-loading" id="comments-loading" style="display: none;">
-          <div class="spinner"></div>
-          <p>Loading comments...</p>
-        </div>
       </div>
     </section>
 
