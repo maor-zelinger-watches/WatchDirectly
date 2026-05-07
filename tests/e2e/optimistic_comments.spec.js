@@ -41,6 +41,15 @@ test.describe('Optimistic UI Comments', () => {
       });
     });
 
+    // Mock the init API (needed for HMAC signing)
+    await page.route('**/exec?action=init', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'ok', api_secret: 'test-secret' })
+      });
+    });
+
     // Mock Google Auth by injecting into localStorage
     await page.addInitScript(() => {
       localStorage.setItem('wd_user', JSON.stringify({
@@ -107,7 +116,7 @@ test.describe('Optimistic UI Comments', () => {
         await route.fulfill({
           status: 500,
           contentType: 'application/json',
-          body: JSON.stringify({ status: 'error', message: 'Failed to save' })
+          body: JSON.stringify({ status: 'error', message: 'Failed to save' }),
         });
       } else {
         await route.fallback();
@@ -122,24 +131,23 @@ test.describe('Optimistic UI Comments', () => {
     const textarea = page.locator('.media-card__textarea').first();
     const commentText = 'This comment will fail.';
     await textarea.fill(commentText);
-    
+
     const submitBtn = page.locator('.media-card__comment-form button[type="submit"]').first();
     await submitBtn.click();
 
     // Verify optimistic comment appears immediately
     const commentsList = page.locator('.media-card__comments-list').first();
-    const newComment = commentsList.locator('.comment').first();
-    await expect(newComment).toBeVisible();
+    await expect(commentsList.locator('.comment')).toHaveCount(1, { timeout: 2000 });
 
-    // Wait for network failure
-    // After failure, the comment should be removed
-    await expect(newComment).toBeHidden();
+    // Wait for network failure + rollback (500ms mock delay + processing)
+    // The rollback removes the entire .comment-thread, so the comment count drops to 0
+    await expect(commentsList.locator('.comment')).toHaveCount(0, { timeout: 5000 });
 
     // The text should be restored to the textarea
-    await expect(textarea).toHaveValue(commentText);
-    
+    await expect(textarea).toHaveValue(commentText, { timeout: 2000 });
+
     // Toast should appear
     const toast = page.locator('.toast--error');
-    await expect(toast).toBeVisible();
+    await expect(toast).toBeVisible({ timeout: 2000 });
   });
 });
