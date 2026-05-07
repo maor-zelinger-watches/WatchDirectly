@@ -1,37 +1,54 @@
 /**
  * WatchDirectly — Google Apps Script Backend (Code.gs)
  * 
- * Deploy as a web app from inside the Google Sheet:
+ * Deploy as a web app:
  *   Deploy → New Deployment → Web App
  *   Execute as: Me | Who has access: Anyone
  * 
- * Sheets expected:
- *   1. Channels  — creator list with channel_id and feed_url
- *   2. Videos    — aggregated video entries
- *   3. Comments  — threaded comments
- *   4. Meta      — config key-value pairs
- *   5. BlockedUsers — blocked email addresses
- *   6. Logs      — structured debug logs
+ * IMPORTANT: Each "sheet" is a separate Google Spreadsheet.
+ * Store this script in any of them (e.g., Meta) via Extensions → Apps Script.
+ * 
+ * Anti-abuse strategy:
+ *   1. Google Sign-In token verification (primary auth)
+ *   2. API_SECRET stored in Meta sheet — HMAC-signed requests
+ *   3. Rate limiting — max 1 comment per 30 seconds per user
+ *   4. BlockedUsers sheet — manual bans
  */
+
+// ============================================================
+// SPREADSHEET IDs — Each "sheet" is a separate Google Spreadsheet
+// ============================================================
+
+const SPREADSHEET_IDS = {
+  CHANNELS:     '1P6m12rLNOVej8QgMwOJdREliOAhM6oyEHD7JCC6iRPo',
+  VIDEOS:       '1OIQULOWEnor6Klpzg-IFhzi-w78EKKLVMtE-5oEw8W4',
+  COMMENTS:     '1tTRWXAfePQRhLie1m9_E6zbkvY9QUrLPRpmpLYqoNw4',
+  META:         '11Zm0nouToxUzXQZZ4OQOcYcFLl0xdSsWQfPLsQs0AF4',
+  BLOCKED:      '1ZNePTyTIZsM73WW4nC3AwSb27oDjVoftjJJeWTajjL0',
+  LOGS:         '1C6kVxkdANBBech6sDPRye62Mo4MdeSrGCkY78ZHi_9s',
+};
 
 // ============================================================
 // CONFIGURATION
 // ============================================================
 
-const SHEET_CHANNELS = 'Channels';
-const SHEET_VIDEOS = 'Videos';
-const SHEET_COMMENTS = 'Comments';
-const SHEET_META = 'Meta';
-const SHEET_BLOCKED = 'BlockedUsers';
-const SHEET_LOGS = 'Logs';
-
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
+const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
 
 const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
-// Cache the log level per execution to avoid repeated sheet reads
+// Cache per execution
 let _cachedLogLevel = null;
+let _cachedApiSecret = null;
+
+// ============================================================
+// HELPERS — Open spreadsheets by ID
+// ============================================================
+
+function getSheet(key) {
+  return SpreadsheetApp.openById(SPREADSHEET_IDS[key]).getSheets()[0];
+}
 
 // ============================================================
 // HTTP HANDLERS
@@ -50,6 +67,9 @@ function doGet(e) {
         return jsonResponse(handleRefresh());
       case 'logs':
         return jsonResponse(handleLogs(e.parameter));
+      case 'init':
+        // Returns the API secret for the frontend (call once, store in memory)
+        return jsonResponse(handleInit());
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -61,8 +81,8 @@ function doGet(e) {
 
 function doPost(e) {
   try {
-    const data = JSON.parse(e.postData.contents);
-    const action = data.action || '';
+    var data = JSON.parse(e.postData.contents);
+    var action = data.action || '';
 
     switch (action) {
       case 'comment':
@@ -83,29 +103,123 @@ function jsonResponse(data) {
 }
 
 // ============================================================
+// API SECRET & HMAC VERIFICATION
+// ============================================================
+
+/**
+ * Generates or retrieves the API secret from the Meta sheet.
+ * This secret is never exposed in the frontend source code.
+ * The frontend fetches it once via ?action=init (requires page to be loaded from the correct origin).
+ */
+function getApiSecret() {
+  if (_cachedApiSecret) return _cachedApiSecret;
+  
+  var secret = getMeta('api_secret');
+  
+  // Auto-generate if missing
+  if (!secret) {
+    secret = Utilities.getUuid() + '-' + Utilities.getUuid();
+    setMeta('api_secret', secret);
+    log('INFO', 'getApiSecret', 'Generated new API secret');
+  }
+  
+  _cachedApiSecret = secret;
+  return secret;
+}
+
+/**
+ * Creates an HMAC-SHA256 signature for a payload.
+ * The frontend signs comment requests with this.
+ * 
+ * @param {string} payload - The string to sign (e.g., videoId + body + timestamp)
+ * @param {string} secret - The API secret
+ * @returns {string} Hex-encoded HMAC signature
+ */
+function createHmac(payload, secret) {
+  var signature = Utilities.computeHmacSha256Signature(payload, secret);
+  return signature.map(function(b) {
+    return ('0' + (b & 0xFF).toString(16)).slice(-2);
+  }).join('');
+}
+
+/**
+ * Verifies an HMAC signature from the frontend.
+ * 
+ * @param {string} payload - The signed payload
+ * @param {string} signature - The HMAC signature from the request
+ * @returns {boolean} True if valid
+ */
+function verifyHmac(payload, signature) {
+  var secret = getApiSecret();
+  var expected = createHmac(payload, secret);
+  return expected === signature;
+}
+
+/**
+ * Returns the API secret to the frontend.
+ * This is called once when the page loads.
+ * The secret lives in memory only — never in source code.
+ */
+function handleInit() {
+  return {
+    status: 'ok',
+    api_secret: getApiSecret(),
+  };
+}
+
+// ============================================================
+// RATE LIMITING
+// ============================================================
+
+/**
+ * Checks if a user is posting too frequently.
+ * Stores last comment timestamp per email in Meta sheet.
+ * 
+ * @param {string} email - User's email
+ * @returns {boolean} True if rate limited
+ */
+function isRateLimited(email) {
+  var key = 'rate_' + email;
+  var lastComment = getMeta(key);
+  
+  if (!lastComment) return false;
+  
+  var elapsed = (Date.now() - new Date(lastComment).getTime()) / 1000;
+  return elapsed < RATE_LIMIT_SECONDS;
+}
+
+/**
+ * Records a comment timestamp for rate limiting.
+ * @param {string} email 
+ */
+function recordCommentTime(email) {
+  setMeta('rate_' + email, new Date().toISOString());
+}
+
+// ============================================================
 // FEED HANDLER
 // ============================================================
 
 function handleFeed(params) {
   // Check if refresh needed
-  const lastFetch = getMeta('last_fetch');
-  const refreshHours = parseInt(getMeta('refresh_interval_hours')) || DEFAULT_REFRESH_HOURS;
-  const staleThreshold = refreshHours * 60 * 60 * 1000;
+  var lastFetch = getMeta('last_fetch');
+  var refreshHours = parseInt(getMeta('refresh_interval_hours')) || DEFAULT_REFRESH_HOURS;
+  var staleThreshold = refreshHours * 60 * 60 * 1000;
 
   if (!lastFetch || (Date.now() - new Date(lastFetch).getTime()) > staleThreshold) {
     log('INFO', 'handleFeed', 'Feed is stale, triggering refresh');
     fetchAllFeeds();
   }
 
-  const page = parseInt(params.page) || 1;
-  const limit = parseInt(params.limit) || DEFAULT_PAGE_LIMIT;
+  var page = parseInt(params.page) || 1;
+  var limit = parseInt(params.limit) || DEFAULT_PAGE_LIMIT;
 
   return getVideos(page, limit);
 }
 
 function handleRefresh() {
   log('INFO', 'handleRefresh', 'Manual refresh triggered');
-  const stats = fetchAllFeeds();
+  var stats = fetchAllFeeds();
   return { status: 'ok', ...stats };
 }
 
@@ -114,40 +228,39 @@ function handleRefresh() {
 // ============================================================
 
 function fetchAllFeeds() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const channelsSheet = ss.getSheetByName(SHEET_CHANNELS);
-  const videosSheet = ss.getSheetByName(SHEET_VIDEOS);
+  var channelsSheet = getSheet('CHANNELS');
+  var videosSheet = getSheet('VIDEOS');
 
-  const channelData = channelsSheet.getDataRange().getValues();
-  const headers = channelData[0];
-  const feedUrlCol = headers.indexOf('feed_url');
-  const channelNameCol = headers.indexOf('channel_name');
-  const tierCol = headers.indexOf('tier');
-  const categoryCol = headers.indexOf('category');
-  const enabledCol = headers.indexOf('enabled');
+  var channelData = channelsSheet.getDataRange().getValues();
+  var headers = channelData[0];
+  var feedUrlCol = headers.indexOf('feed_url');
+  var channelNameCol = headers.indexOf('channel_name');
+  var tierCol = headers.indexOf('tier');
+  var categoryCol = headers.indexOf('category');
+  var enabledCol = headers.indexOf('enabled');
 
   // Get existing video IDs for deduplication
-  const existingVideos = new Set();
-  const videoData = videosSheet.getDataRange().getValues();
+  var existingVideos = {};
+  var videoData = videosSheet.getDataRange().getValues();
   if (videoData.length > 1) {
-    const videoIdCol = videoData[0].indexOf('video_id');
-    for (let i = 1; i < videoData.length; i++) {
-      existingVideos.add(videoData[i][videoIdCol]);
+    var videoIdCol = videoData[0].indexOf('video_id');
+    for (var i = 1; i < videoData.length; i++) {
+      existingVideos[videoData[i][videoIdCol]] = true;
     }
   }
 
-  let newCount = 0;
-  let errorCount = 0;
+  var newCount = 0;
+  var errorCount = 0;
 
-  for (let i = 1; i < channelData.length; i++) {
-    const row = channelData[i];
-    const enabled = enabledCol === -1 || row[enabledCol] === true || row[enabledCol] === 'TRUE';
+  for (var i = 1; i < channelData.length; i++) {
+    var row = channelData[i];
+    var enabled = enabledCol === -1 || row[enabledCol] === true || row[enabledCol] === 'TRUE';
     if (!enabled) continue;
 
-    const feedUrl = row[feedUrlCol];
-    const channelName = row[channelNameCol];
-    const tier = row[tierCol];
-    const category = row[categoryCol];
+    var feedUrl = row[feedUrlCol];
+    var channelName = row[channelNameCol];
+    var tier = row[tierCol];
+    var category = row[categoryCol];
 
     if (!feedUrl) {
       log('WARN', 'fetchAllFeeds', 'No feed_url for channel: ' + channelName);
@@ -155,10 +268,11 @@ function fetchAllFeeds() {
     }
 
     try {
-      const videos = fetchAndParseFeed(feedUrl, channelName, tier, category);
+      var videos = fetchAndParseFeed(feedUrl, channelName, tier, category);
 
-      for (const video of videos) {
-        if (!existingVideos.has(video.video_id)) {
+      for (var v = 0; v < videos.length; v++) {
+        var video = videos[v];
+        if (!existingVideos[video.video_id]) {
           videosSheet.appendRow([
             video.video_id,
             video.channel_name,
@@ -170,7 +284,7 @@ function fetchAllFeeds() {
             video.category,
             0, // comment_count
           ]);
-          existingVideos.add(video.video_id);
+          existingVideos[video.video_id] = true;
           newCount++;
         }
       }
@@ -193,37 +307,38 @@ function fetchAllFeeds() {
 }
 
 function fetchAndParseFeed(feedUrl, channelName, tier, category) {
-  const response = UrlFetchApp.fetch(feedUrl, { muteHttpExceptions: true });
+  var response = UrlFetchApp.fetch(feedUrl, { muteHttpExceptions: true });
 
   if (response.getResponseCode() !== 200) {
     throw new Error('HTTP ' + response.getResponseCode());
   }
 
-  const xml = response.getContentText();
+  var xml = response.getContentText();
   return parseRssFeed(xml, channelName, tier, category);
 }
 
 function parseRssFeed(xml, channelName, tier, category) {
-  const doc = XmlService.parse(xml);
-  const root = doc.getRootElement();
-  const ns = XmlService.getNamespace('http://www.w3.org/2005/Atom');
-  const ytNs = XmlService.getNamespace('yt', 'http://www.youtube.com/xml/schemas/2015');
+  var doc = XmlService.parse(xml);
+  var root = doc.getRootElement();
+  var ns = XmlService.getNamespace('http://www.w3.org/2005/Atom');
+  var ytNs = XmlService.getNamespace('yt', 'http://www.youtube.com/xml/schemas/2015');
 
-  const entries = root.getChildren('entry', ns);
-  const videos = [];
+  var entries = root.getChildren('entry', ns);
+  var videos = [];
 
-  for (const entry of entries) {
-    const videoIdEl = entry.getChild('videoId', ytNs);
-    const titleEl = entry.getChild('title', ns);
-    const publishedEl = entry.getChild('published', ns);
-    const linkEl = entry.getChild('link', ns);
+  for (var i = 0; i < entries.length; i++) {
+    var entry = entries[i];
+    var videoIdEl = entry.getChild('videoId', ytNs);
+    var titleEl = entry.getChild('title', ns);
+    var publishedEl = entry.getChild('published', ns);
+    var linkEl = entry.getChild('link', ns);
 
     if (!videoIdEl || !titleEl) continue;
 
-    const videoId = videoIdEl.getText();
-    const title = titleEl.getText();
-    const published = publishedEl ? publishedEl.getText() : new Date().toISOString();
-    const url = linkEl ? linkEl.getAttribute('href').getValue() : 'https://www.youtube.com/watch?v=' + videoId;
+    var videoId = videoIdEl.getText();
+    var title = titleEl.getText();
+    var published = publishedEl ? publishedEl.getText() : new Date().toISOString();
+    var url = linkEl ? linkEl.getAttribute('href').getValue() : 'https://www.youtube.com/watch?v=' + videoId;
 
     videos.push({
       video_id: videoId,
@@ -244,21 +359,20 @@ function parseRssFeed(xml, channelName, tier, category) {
 // ============================================================
 
 function getVideos(page, limit) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEET_VIDEOS);
-  const data = sheet.getDataRange().getValues();
+  var sheet = getSheet('VIDEOS');
+  var data = sheet.getDataRange().getValues();
 
   if (data.length <= 1) {
     return { status: 'ok', videos: [], total: 0, page: page };
   }
 
-  const headers = data[0];
-  const videos = [];
+  var headers = data[0];
+  var videos = [];
 
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    const video = {};
-    for (let j = 0; j < headers.length; j++) {
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var video = {};
+    for (var j = 0; j < headers.length; j++) {
       video[headers[j]] = row[j];
     }
     videos.push(video);
@@ -270,8 +384,8 @@ function getVideos(page, limit) {
   });
 
   // Paginate
-  const start = (page - 1) * limit;
-  const paged = videos.slice(start, start + limit);
+  var start = (page - 1) * limit;
+  var paged = videos.slice(start, start + limit);
 
   return {
     status: 'ok',
@@ -286,7 +400,7 @@ function getVideos(page, limit) {
 // ============================================================
 
 function handleComments(params) {
-  const videoId = params.videoId;
+  var videoId = params.videoId;
   if (!videoId) {
     return { status: 'error', message: 'videoId is required' };
   }
@@ -294,23 +408,22 @@ function handleComments(params) {
 }
 
 function getComments(videoId) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEET_COMMENTS);
-  const data = sheet.getDataRange().getValues();
+  var sheet = getSheet('COMMENTS');
+  var data = sheet.getDataRange().getValues();
 
   if (data.length <= 1) {
     return { status: 'ok', comments: [] };
   }
 
-  const headers = data[0];
-  const videoIdCol = headers.indexOf('video_id');
-  const comments = [];
+  var headers = data[0];
+  var videoIdCol = headers.indexOf('video_id');
+  var comments = [];
 
-  for (let i = 1; i < data.length; i++) {
+  for (var i = 1; i < data.length; i++) {
     if (data[i][videoIdCol] !== videoId) continue;
 
-    const comment = {};
-    for (let j = 0; j < headers.length; j++) {
+    var comment = {};
+    for (var j = 0; j < headers.length; j++) {
       comment[headers[j]] = data[i][j];
     }
     comments.push(comment);
@@ -325,40 +438,63 @@ function getComments(videoId) {
 }
 
 function handleAddComment(data) {
-  const { videoId, parentId, body, token } = data;
+  var videoId = data.videoId;
+  var parentId = data.parentId;
+  var body = data.body;
+  var token = data.token;
+  var signature = data.signature;
+  var timestamp = data.timestamp;
 
-  // Validate required fields
+  // 1. Validate required fields
   if (!videoId || !body || !token) {
     return { status: 'error', message: 'videoId, body, and token are required' };
   }
 
-  // Verify Google token and get user info
-  const user = verifyGoogleToken(token);
+  // 2. Verify HMAC signature (anti-abuse)
+  if (signature && timestamp) {
+    var payload = videoId + '|' + body + '|' + timestamp;
+    if (!verifyHmac(payload, signature)) {
+      log('ERROR', 'addComment', 'Invalid HMAC signature');
+      return { status: 'error', message: 'Invalid request signature' };
+    }
+    // Check timestamp freshness (reject if > 5 min old)
+    var age = (Date.now() - parseInt(timestamp)) / 1000;
+    if (age > 300) {
+      log('WARN', 'addComment', 'Stale timestamp: ' + age + 's old');
+      return { status: 'error', message: 'Request expired, please retry' };
+    }
+  }
+
+  // 3. Verify Google token and get user info
+  var user = verifyGoogleToken(token);
   if (!user) {
     log('ERROR', 'addComment', 'Invalid Google token');
     return { status: 'error', message: 'Invalid authentication token' };
   }
 
-  // Check if user is blocked
+  // 4. Check if user is blocked
   if (isUserBlocked(user.email)) {
     log('ERROR', 'addComment', 'Blocked user attempted comment: ' + user.email);
-    return { status: 'error', message: 'User is blocked' };
+    return { status: 'error', message: 'You have been blocked from commenting' };
   }
 
-  // Determine depth
+  // 5. Check rate limit
+  if (isRateLimited(user.email)) {
+    log('WARN', 'addComment', 'Rate limited: ' + user.email);
+    return { status: 'error', message: 'Please wait before posting another comment' };
+  }
+
+  // 6. Determine depth
   var depth = 0;
   if (parentId) {
-    depth = 1; // Reply to a comment
-    // Validate parent exists and is depth 0
-    // (we only allow 2 levels: 0 and 1)
+    depth = 1;
   }
 
-  // Generate comment ID
+  // 7. Generate comment ID
   var commentId = 'c_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
 
-  // Append to Comments sheet
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_COMMENTS);
+  // 8. Append to Comments sheet
+  var sheet = getSheet('COMMENTS');
   var now = new Date().toISOString();
 
   sheet.appendRow([
@@ -373,7 +509,10 @@ function handleAddComment(data) {
     now,
   ]);
 
-  // Update comment count on the video
+  // 9. Record for rate limiting
+  recordCommentTime(user.email);
+
+  // 10. Update comment count on the video
   updateCommentCount(videoId);
 
   log('INFO', 'addComment', 'Comment added by ' + user.email + ' on video ' + videoId);
@@ -382,10 +521,8 @@ function handleAddComment(data) {
 }
 
 function updateCommentCount(videoId) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-
   // Count comments for this video
-  var commentsSheet = ss.getSheetByName(SHEET_COMMENTS);
+  var commentsSheet = getSheet('COMMENTS');
   var commentsData = commentsSheet.getDataRange().getValues();
   var headers = commentsData[0];
   var videoIdCol = headers.indexOf('video_id');
@@ -396,7 +533,7 @@ function updateCommentCount(videoId) {
   }
 
   // Update the video row
-  var videosSheet = ss.getSheetByName(SHEET_VIDEOS);
+  var videosSheet = getSheet('VIDEOS');
   var videosData = videosSheet.getDataRange().getValues();
   var vHeaders = videosData[0];
   var vVideoIdCol = vHeaders.indexOf('video_id');
@@ -416,7 +553,6 @@ function updateCommentCount(videoId) {
 
 function verifyGoogleToken(idToken) {
   try {
-    // Use Google's tokeninfo endpoint to verify the ID token
     var response = UrlFetchApp.fetch(
       'https://oauth2.googleapis.com/tokeninfo?id_token=' + idToken,
       { muteHttpExceptions: true }
@@ -444,11 +580,7 @@ function verifyGoogleToken(idToken) {
 // ============================================================
 
 function isUserBlocked(email) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_BLOCKED);
-
-  if (!sheet) return false;
-
+  var sheet = getSheet('BLOCKED');
   var data = sheet.getDataRange().getValues();
   var headers = data[0];
   var emailCol = headers.indexOf('email');
@@ -467,8 +599,7 @@ function isUserBlocked(email) {
 // ============================================================
 
 function getMeta(key) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_META);
+  var sheet = getSheet('META');
   var data = sheet.getDataRange().getValues();
 
   for (var i = 1; i < data.length; i++) {
@@ -479,8 +610,7 @@ function getMeta(key) {
 }
 
 function setMeta(key, value) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_META);
+  var sheet = getSheet('META');
   var data = sheet.getDataRange().getValues();
 
   for (var i = 1; i < data.length; i++) {
@@ -511,15 +641,10 @@ function log(level, source, message) {
   var levelValue = LOG_LEVELS[level] || 0;
   var configValue = LOG_LEVELS[configLevel] || LOG_LEVELS.ERROR;
 
-  // Only log if the message level is >= configured level
   if (levelValue < configValue) return;
 
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName(SHEET_LOGS);
-
-    if (!sheet) return;
-
+    var sheet = getSheet('LOGS');
     sheet.appendRow([
       new Date().toISOString(),
       level,
@@ -527,23 +652,17 @@ function log(level, source, message) {
       message,
     ]);
   } catch (e) {
-    // If logging itself fails, we can't do much
     Logger.log('Log write failed: ' + e.message);
   }
 }
 
 function handleLogs(params) {
   var count = parseInt(params.count) || 50;
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_LOGS);
-
-  if (!sheet) return { status: 'ok', logs: [] };
-
+  var sheet = getSheet('LOGS');
   var data = sheet.getDataRange().getValues();
   var headers = data[0];
   var logs = [];
 
-  // Get last N rows (most recent)
   var start = Math.max(1, data.length - count);
   for (var i = data.length - 1; i >= start; i--) {
     var entry = {};
