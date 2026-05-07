@@ -71,6 +71,8 @@ test.describe('Production Smoke Tests', () => {
   test('multiple video cards render', async ({ page }) => {
     await page.goto(PROD_URL);
     await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    // Wait for staggered animation to finish appending cards
+    await page.waitForTimeout(2000);
     const count = await page.locator('.video-card').count();
     expect(count).toBeGreaterThan(1);
   });
