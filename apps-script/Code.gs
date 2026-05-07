@@ -310,7 +310,8 @@ function fetchAllFeeds() {
       continue;
     }
 
-    var feedUrl = row[feedUrlCol];
+    var urlCol = cHeaders.indexOf('url');
+    var feedUrl = row[feedUrlCol] || (urlCol !== -1 ? row[urlCol] : '');
     var channelName = row[channelNameCol];
     var tier = row[tierCol];
     var category = row[categoryCol];
