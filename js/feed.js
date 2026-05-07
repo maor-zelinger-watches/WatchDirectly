@@ -35,6 +35,7 @@ export function createMediaCard(item) {
     channel: sanitizeHtml(item.channel_name),
     category: sanitizeHtml(item.category),
     videoId: sanitizeHtml(item.video_id),
+    url: safeUrl(item.url || (item.video_id && item.video_id.length === 11 ? `https://www.youtube.com/watch?v=${item.video_id}` : '')),
   };
 
   // Fallback: If media_type is missing but ID is > 11 chars (base64 or URL), it must be an article
@@ -65,7 +66,7 @@ export function createMediaCard(item) {
       <div class="media-card__grid">
         ${embedHtml}
         <div class="media-card__content">
-          <h3 class="media-card__title">${escaped.title}</h3>
+          <h3 class="media-card__title"><a href="${escaped.url}" target="_blank" rel="noopener noreferrer">${escaped.title}</a></h3>
           <div class="media-card__meta">
             <span class="media-card__channel">${isArticle ? '📰' : '🎬'} ${escaped.channel}</span>
             <span class="media-card__separator">·</span>
