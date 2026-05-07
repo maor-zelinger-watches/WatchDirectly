@@ -17,9 +17,9 @@ import { timeAgo, formatDate, sanitizeHtml, generateId } from './utils.js';
 
 const CONFIG = {
   // Replace with your deployed Google Apps Script URL
-  APPS_SCRIPT_URL: 'YOUR_APPS_SCRIPT_URL_HERE',
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwyt7c8SWw9y0TnKq4RhcV7yLjS1JkXnNThYInpj-EnNYbA3ecgwVSX4gBIACNKHCqu0A/exec',
   // Replace with your Google OAuth Client ID
-  GOOGLE_CLIENT_ID: 'YOUR_GOOGLE_CLIENT_ID_HERE',
+  GOOGLE_CLIENT_ID: '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com',
   // Videos per page
   PAGE_SIZE: 20,
 };
