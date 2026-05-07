@@ -30,36 +30,36 @@ test.describe('Production Smoke Tests', () => {
 
   test('no filter tabs in the page', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
     const filterTabs = page.locator('.filter-tabs');
     await expect(filterTabs).toHaveCount(0);
   });
 
   test('no tier badges on video cards', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
-    const tierBadge = page.locator('.video-card__tier');
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    const tierBadge = page.locator('.media-card__tier');
     await expect(tierBadge).toHaveCount(0);
   });
 
   test('video cards load from real API', async ({ page }) => {
     await page.goto(PROD_URL);
-    const card = page.locator('.video-card').first();
+    const card = page.locator('.media-card').first();
     await expect(card).toBeVisible({ timeout: 30000 });
   });
 
   test('video cards have title and channel name', async ({ page }) => {
     await page.goto(PROD_URL);
-    const card = page.locator('.video-card').first();
+    const card = page.locator('.media-card').first();
     await expect(card).toBeVisible({ timeout: 30000 });
 
-    await expect(card.locator('.video-card__title')).not.toBeEmpty();
-    await expect(card.locator('.video-card__channel')).not.toBeEmpty();
+    await expect(card.locator('.media-card__title')).not.toBeEmpty();
+    await expect(card.locator('.media-card__channel')).not.toBeEmpty();
   });
 
   test('video cards have YouTube embed', async ({ page }) => {
     await page.goto(PROD_URL);
-    const card = page.locator('.video-card').first();
+    const card = page.locator('.media-card').first();
     await expect(card).toBeVisible({ timeout: 30000 });
 
     const iframe = card.locator('iframe');
@@ -70,10 +70,10 @@ test.describe('Production Smoke Tests', () => {
 
   test('multiple video cards render', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
     // Wait for staggered animation to finish appending cards
     await page.waitForTimeout(2000);
-    const count = await page.locator('.video-card').count();
+    const count = await page.locator('.media-card').count();
     expect(count).toBeGreaterThan(1);
   });
 
@@ -81,9 +81,9 @@ test.describe('Production Smoke Tests', () => {
 
   test('each card has a comments toggle button', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
-    const toggles = page.locator('.video-card__comments-toggle');
+    const toggles = page.locator('.media-card__comments-toggle');
     const count = await toggles.count();
     expect(count).toBeGreaterThan(0);
     await expect(toggles.first()).toContainText('comments');
@@ -91,44 +91,44 @@ test.describe('Production Smoke Tests', () => {
 
   test('comments section is hidden by default', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
-    const body = page.locator('.video-card__comments-body').first();
+    const body = page.locator('.media-card__comments-body').first();
     await expect(body).toBeHidden();
   });
 
   test('clicking toggle expands comments inline', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
-    const body = page.locator('.video-card__comments-body').first();
+    const body = page.locator('.media-card__comments-body').first();
     await expect(body).toBeVisible({ timeout: 10000 });
   });
 
   test('expanded comments show auth prompt when not signed in', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
-    const authPrompt = page.locator('.video-card__auth-prompt').first();
+    const authPrompt = page.locator('.media-card__auth-prompt').first();
     await expect(authPrompt).toBeVisible();
   });
 
   test('clicking toggle again collapses comments', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
-    await expect(page.locator('.video-card__comments-body').first()).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.media-card__comments-body').first()).toBeVisible({ timeout: 10000 });
 
     await toggle.click();
-    await expect(page.locator('.video-card__comments-body').first()).toBeHidden();
+    await expect(page.locator('.media-card__comments-body').first()).toBeHidden();
   });
 
   // ── No Detail View ─────────────────────────────────────────
@@ -150,7 +150,7 @@ test.describe('Production Smoke Tests', () => {
   test('renders properly at mobile viewport', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
     const header = page.locator('.header');
     const headerBox = await header.boundingBox();
@@ -160,7 +160,7 @@ test.describe('Production Smoke Tests', () => {
   test('renders properly at desktop viewport', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
     const feed = page.locator('#feed-container');
     const feedBox = await feed.boundingBox();
@@ -176,7 +176,7 @@ test.describe('Production Smoke Tests', () => {
     });
 
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
     const realErrors = errors.filter(e =>
       !e.includes('compute-pressure') &&
@@ -226,26 +226,26 @@ test.describe('Comment Injection (Production API)', () => {
 
     // Step 4: Load the site and expand comments on the test video
     await page.goto(PROD_URL);
-    await page.locator('.video-card').first().waitFor({ timeout: 30000 });
+    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
 
     // Find the card for our test video
-    const testCard = page.locator(`.video-card[data-video-id="${TEST_VIDEO_ID}"]`);
+    const testCard = page.locator(`.media-card[data-video-id="${TEST_VIDEO_ID}"]`);
     const cardExists = await testCard.count() > 0;
 
     if (cardExists) {
       // Expand comments
-      const toggle = testCard.locator('.video-card__comments-toggle');
+      const toggle = testCard.locator('.media-card__comments-toggle');
       await toggle.click();
 
-      const commentsBody = testCard.locator('.video-card__comments-body');
+      const commentsBody = testCard.locator('.media-card__comments-body');
       await expect(commentsBody).toBeVisible({ timeout: 10000 });
 
       // Verify the comments list renders (even if empty)
-      const commentsList = testCard.locator('.video-card__comments-list');
+      const commentsList = testCard.locator('.media-card__comments-list');
       await expect(commentsList).toBeVisible();
 
       // Verify auth prompt is shown (since we're not logged in)
-      const authPrompt = testCard.locator('.video-card__auth-prompt');
+      const authPrompt = testCard.locator('.media-card__auth-prompt');
       await expect(authPrompt).toBeVisible();
     } else {
       // Video might not be on the first page — still verify the API worked
