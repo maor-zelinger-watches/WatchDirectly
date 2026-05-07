@@ -60,11 +60,12 @@ const iframeObserver = new IntersectionObserver((entries) => {
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {
+  let authRetries = 0;
   function tryInitAuth() {
     if (typeof google !== 'undefined' && google.accounts) {
       initAuth(CONFIG.GOOGLE_CLIENT_ID);
       setupAuthUI();
-    } else {
+    } else if (authRetries++ < 50) {
       setTimeout(tryInitAuth, 200);
     }
   }
