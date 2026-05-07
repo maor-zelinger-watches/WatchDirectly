@@ -326,9 +326,6 @@ function fetchAllFeeds() {
 
       for (var v = 0; v < videos.length; v++) {
         var video = videos[v];
-        if (video.media_type === 'article' && !video.preview_image) {
-          continue;
-        }
         if (!existingVideos[video.video_id]) {
           var newRow = [];
           if (vHeaders.length === 0) {
@@ -393,6 +390,126 @@ function extractYouTubeId(url) {
   return match ? match[1] : null;
 }
 
+/**
+ * Extracts the best preview image from HTML content using multiple strategies.
+ * Tries (in order): <img src>, <img srcset>, <figure> images, data-src lazy-load.
+ * Filters out tiny icons, avatars, tracking pixels, and ad images.
+ *
+ * @param {string} html - HTML content (description, content:encoded, etc.)
+ * @returns {string} Best image URL or empty string
+ */
+function extractImageFromHtml(html) {
+  if (!html) return '';
+
+  // Unescape CDATA and HTML entities
+  var clean = html
+    .replace(/<!\[CDATA\[/g, '')
+    .replace(/\]\]>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"');
+
+  // Collect all candidate image URLs
+  var candidates = [];
+
+  // 1. Standard <img src="...">
+  var imgSrcPattern = /<img[^>]+src=["']([^"']+)["']/gi;
+  var m;
+  while ((m = imgSrcPattern.exec(clean)) !== null) {
+    candidates.push(m[1]);
+  }
+
+  // 2. data-src (lazy-loaded images)
+  var dataSrcPattern = /<img[^>]+data-src=["']([^"']+)["']/gi;
+  while ((m = dataSrcPattern.exec(clean)) !== null) {
+    candidates.push(m[1]);
+  }
+
+  // 3. srcset (pick the largest)
+  var srcsetPattern = /<img[^>]+srcset=["']([^"']+)["']/gi;
+  while ((m = srcsetPattern.exec(clean)) !== null) {
+    var srcsetEntries = m[1].split(',');
+    // Sort by width descriptor (e.g., "url 800w") and pick largest
+    var best = srcsetEntries
+      .map(function(e) {
+        var parts = e.trim().split(/\s+/);
+        var w = parseInt((parts[1] || '0').replace('w', ''));
+        return { url: parts[0], width: w || 0 };
+      })
+      .sort(function(a, b) { return b.width - a.width; });
+    if (best.length > 0 && best[0].url) {
+      candidates.unshift(best[0].url); // Prefer largest srcset
+    }
+  }
+
+  // 4. <figure> background-image
+  var bgPattern = /background-image:\s*url\(["']?([^"')]+)["']?\)/gi;
+  while ((m = bgPattern.exec(clean)) !== null) {
+    candidates.push(m[1]);
+  }
+
+  // Filter out junk
+  var dominated = /gravatar|avatar|icon|logo|pixel|track|badge|emoji|smil|ad\-|ads\.|doubleclick|facebook\.com\/tr|1x1|spacer/i;
+  var imageExt = /\.(jpg|jpeg|png|webp|gif|avif)/i;
+
+  for (var i = 0; i < candidates.length; i++) {
+    var url = candidates[i].trim();
+    if (!url || url.length < 10) continue;
+    if (dominated.test(url)) continue;
+    // Prefer URLs that look like actual images
+    if (imageExt.test(url) || url.indexOf('wp-content/uploads') > -1 || url.indexOf('cdn') > -1) {
+      return url;
+    }
+  }
+
+  // Return first non-junk candidate even without image extension
+  for (var j = 0; j < candidates.length; j++) {
+    var u = candidates[j].trim();
+    if (u && u.length > 10 && !dominated.test(u)) return u;
+  }
+
+  return '';
+}
+
+/**
+ * Last-resort: fetch the article page and extract og:image.
+ * Only called for articles that have no image from the feed.
+ * Uses a browser User-Agent and short timeout.
+ *
+ * @param {string} articleUrl - The article URL to fetch
+ * @returns {string} og:image URL or empty string
+ */
+function fetchOgImage(articleUrl) {
+  if (!articleUrl) return '';
+  try {
+    var response = UrlFetchApp.fetch(articleUrl, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WatchDirectly/1.0)' },
+      validateHttpsCertificates: false,
+    });
+    if (response.getResponseCode() !== 200) return '';
+
+    var html = response.getContentText().substring(0, 50000); // Only scan first 50KB
+
+    // og:image (both attribute orders)
+    var ogMatch = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
+                || html.match(/content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
+    if (ogMatch) return ogMatch[1];
+
+    // twitter:image
+    var twMatch = html.match(/name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i)
+               || html.match(/content=["']([^"']+)["'][^>]*name=["']twitter:image["']/i);
+    if (twMatch) return twMatch[1];
+
+    // Last resort: first large image on the page
+    return extractImageFromHtml(html);
+  } catch (e) {
+    return '';
+  }
+}
+
 function parseRssFeed(xml, channelName, tier, category) {
   try {
     var doc = XmlService.parse(xml);
@@ -433,7 +550,7 @@ function parseRss2(root, channelName, tier, category) {
     var itemId = videoId || Utilities.base64Encode(guid).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
     
     var previewImage = '';
-    // Try media:content
+    // 1. Try media:content
     if (mediaNs) {
       var mediaContent = item.getChild('content', mediaNs);
       if (mediaContent && mediaContent.getAttribute('url')) {
@@ -446,19 +563,29 @@ function parseRss2(root, channelName, tier, category) {
         }
       }
     }
-    // Try enclosure
+    // 2. Try enclosure
     if (!previewImage) {
       var enclosure = item.getChild('enclosure');
       if (enclosure && enclosure.getAttribute('type') && enclosure.getAttribute('type').getValue().indexOf('image') > -1) {
         previewImage = enclosure.getAttribute('url').getValue();
       }
+      // Some feeds use enclosure without type for images
+      if (!previewImage && enclosure && enclosure.getAttribute('url')) {
+        var encUrl = enclosure.getAttribute('url').getValue();
+        if (/\.(jpg|jpeg|png|webp|gif)/i.test(encUrl)) {
+          previewImage = encUrl;
+        }
+      }
     }
-    // Try regexing from description or content:encoded
+    // 3. Extract from description + content:encoded using smart helper
     if (!previewImage) {
       var desc = item.getChildText('description') || '';
       var contentEncoded = contentNs ? item.getChildText('encoded', contentNs) || '' : '';
-      var imgMatch = (contentEncoded + desc).match(/<img[^>]+src="([^">]+)"/);
-      if (imgMatch) previewImage = imgMatch[1];
+      previewImage = extractImageFromHtml(contentEncoded + ' ' + desc);
+    }
+    // 4. Last resort for articles: fetch the article page for og:image
+    if (!previewImage && mediaType === 'article' && link) {
+      previewImage = fetchOgImage(link);
     }
     
     videos.push({
@@ -505,6 +632,7 @@ function parseAtom(root, channelName, tier, category) {
     var itemId = ytVideoId || Utilities.base64Encode(link).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
     
     var previewImage = '';
+    // 1. media:group > media:thumbnail (YouTube)
     if (mediaNs) {
       var mediaGroup = entry.getChild('group', mediaNs);
       if (mediaGroup) {
@@ -514,11 +642,14 @@ function parseAtom(root, channelName, tier, category) {
         }
       }
     }
-    
+    // 2. Extract from content/summary using smart helper
     if (!previewImage) {
       var content = entry.getChildText('content', ns) || entry.getChildText('summary', ns) || '';
-      var imgMatch = content.match(/<img[^>]+src="([^">]+)"/);
-      if (imgMatch) previewImage = imgMatch[1];
+      previewImage = extractImageFromHtml(content);
+    }
+    // 3. Last resort for articles: fetch og:image
+    if (!previewImage && mediaType === 'article' && link) {
+      previewImage = fetchOgImage(link);
     }
     
     videos.push({
@@ -557,8 +688,15 @@ function parseRegex(xml, channelName, tier, category) {
     var itemId = videoId || Utilities.base64Encode(link).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
     
     var previewImage = '';
-    var imgMatch = itemXml.match(/<media:content[^>]+url="([^">]+)"/i) || itemXml.match(/<media:thumbnail[^>]+url="([^">]+)"/i) || itemXml.match(/<img[^>]+src="([^">]+)"/i);
+    // 1. Try media tags
+    var imgMatch = itemXml.match(/<media:content[^>]+url="([^">]+)"/i) || itemXml.match(/<media:thumbnail[^>]+url="([^">]+)"/i);
     if (imgMatch) previewImage = imgMatch[1];
+    // 2. Smart HTML extraction
+    if (!previewImage) previewImage = extractImageFromHtml(itemXml);
+    // 3. og:image fallback for articles
+    if (!previewImage && mediaType === 'article' && link) {
+      previewImage = fetchOgImage(link);
+    }
     
     videos.push({
       video_id: itemId,
