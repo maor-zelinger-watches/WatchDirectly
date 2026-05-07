@@ -16,6 +16,9 @@
 /** @type {User|null} */
 let currentUser = null;
 
+/** @type {string} */
+let _clientId = '';
+
 /** @type {Function[]} */
 const listeners = [];
 
@@ -26,6 +29,8 @@ const listeners = [];
  * @param {string} clientId - Google OAuth 2.0 Client ID
  */
 export function initAuth(clientId) {
+  _clientId = clientId;
+
   if (typeof google === 'undefined' || !google.accounts) {
     console.warn('Google Identity Services SDK not loaded');
     return;
@@ -134,6 +139,60 @@ export function isSignedIn() {
  */
 export function getToken() {
   return currentUser ? currentUser.token : null;
+}
+
+/**
+ * Checks if the stored token is expired or about to expire (within 5 min buffer).
+ * @returns {boolean}
+ */
+export function isTokenExpired() {
+  if (!currentUser || !currentUser.token) return true;
+  try {
+    const payload = JSON.parse(atob(currentUser.token.split('.')[1]));
+    const expiresAt = payload.exp * 1000; // JWT exp is in seconds
+    return Date.now() > expiresAt - 5 * 60 * 1000; // 5 min buffer
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Refreshes the Google ID token by requesting a fresh credential via GIS.
+ * Returns a promise that resolves with the new token or null if refresh fails.
+ * 
+ * @returns {Promise<string|null>} Fresh token or null
+ */
+export function refreshToken() {
+  return new Promise((resolve) => {
+    if (typeof google === 'undefined' || !google.accounts) {
+      resolve(null);
+      return;
+    }
+
+    // Set a timeout — if GIS doesn't respond in 5s, give up
+    const timeout = setTimeout(() => {
+      resolve(null);
+    }, 5000);
+
+    // Temporarily override the callback to capture the fresh token
+    google.accounts.id.initialize({
+      client_id: _clientId,
+      callback: (response) => {
+        clearTimeout(timeout);
+        handleCredentialResponse(response);
+        resolve(currentUser ? currentUser.token : null);
+      },
+      auto_select: true,
+    });
+
+    google.accounts.id.prompt((notification) => {
+      // If prompt was dismissed or skipped, resolve null
+      if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+        clearTimeout(timeout);
+        resolve(null);
+      }
+    });
+  });
 }
 
 /**

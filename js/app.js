@@ -8,7 +8,7 @@
 import { createApiClient } from './api.js';
 import { createMediaCard } from './feed.js';
 import { buildCommentTree, createCommentThread, createCommentHtml } from './comments.js';
-import { initAuth, renderSignInButton, getCurrentUser, isSignedIn, getToken, onAuthChange, signOut } from './auth.js';
+import { initAuth, renderSignInButton, getCurrentUser, isSignedIn, getToken, isTokenExpired, refreshToken, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
 
 // ============================================================
@@ -486,7 +486,20 @@ async function submitInlineComment(videoId, parentId, textarea) {
   }
 
   try {
-    const response = await api.postComment(videoId, parentId, body, getToken());
+    // Ensure we have a fresh token (Google ID tokens expire after 1 hour)
+    let token = getToken();
+    if (isTokenExpired()) {
+      const freshToken = await refreshToken();
+      if (freshToken) {
+        token = freshToken;
+      } else {
+        // Token refresh failed — sign out and ask user to re-authenticate
+        signOut();
+        throw new Error('Session expired. Please sign in again.');
+      }
+    }
+
+    const response = await api.postComment(videoId, parentId, body, token);
     
     // Success: Update optimistic ID to real ID and remove optimistic class
     const el = document.querySelector(`.comment[data-comment-id="${optId}"]`);
