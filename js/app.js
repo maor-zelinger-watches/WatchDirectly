@@ -451,12 +451,28 @@ function renderComments(videoId, listEl, comments, tree) {
 
 /**
  * Prefetches comments for a batch of videos in the background.
- * Runs in parallel but doesn't block the UI.
+ * Uses sequential fetching with a small delay to avoid
+ * hitting Google Apps Script rate limits (which strip CORS headers).
  */
 function prefetchComments(videos) {
-  for (const video of videos) {
-    const id = video.video_id;
-    if (!id || state.commentsCache[id]) continue;
+  const queue = videos
+    .filter(v => v.video_id && !state.commentsCache[v.video_id])
+    .map(v => v.video_id);
+
+  if (queue.length === 0) return;
+
+  let index = 0;
+
+  function fetchNext() {
+    if (index >= queue.length) return;
+
+    const id = queue[index++];
+
+    // Skip if cached in the meantime (e.g. user expanded manually)
+    if (state.commentsCache[id]) {
+      fetchNext();
+      return;
+    }
 
     api.fetchComments(id)
       .then(data => {
@@ -474,8 +490,16 @@ function prefetchComments(videos) {
         const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${id}"]`);
         if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
       })
-      .catch(() => { /* silent — user can still load on expand */ });
+      .catch(() => { /* silent — user can still load on expand */ })
+      .finally(() => {
+        // Stagger next request by 300ms to stay under rate limit
+        setTimeout(fetchNext, 300);
+      });
   }
+
+  // Start 2 concurrent workers
+  fetchNext();
+  fetchNext();
 }
 
 function updateInlineCommentFormUI(videoId) {
