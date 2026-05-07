@@ -224,6 +224,49 @@ function handleRefresh() {
 }
 
 // ============================================================
+// SCHEDULED REFRESH — Run once: setupScheduledRefresh()
+// ============================================================
+
+/**
+ * Run this function ONCE from the Apps Script editor to install
+ * an automatic trigger that refreshes feeds every 4 hours.
+ *
+ * To run: Open Apps Script → select setupScheduledRefresh → click ▶ Run
+ * To verify: Edit → Current project's triggers
+ */
+function setupScheduledRefresh() {
+  // Remove any existing triggers for scheduledFetchAllFeeds to avoid duplicates
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'scheduledFetchAllFeeds') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+
+  // Create a new trigger that runs every 4 hours
+  ScriptApp.newTrigger('scheduledFetchAllFeeds')
+    .timeBased()
+    .everyHours(4)
+    .create();
+
+  log('INFO', 'setupScheduledRefresh', 'Trigger installed: scheduledFetchAllFeeds every 4 hours');
+}
+
+/**
+ * Entry point called by the time-based trigger.
+ * Wraps fetchAllFeeds with logging/error handling.
+ */
+function scheduledFetchAllFeeds() {
+  log('INFO', 'scheduledFetchAllFeeds', 'Scheduled refresh starting');
+  try {
+    var stats = fetchAllFeeds();
+    log('INFO', 'scheduledFetchAllFeeds', 'Completed. New: ' + stats.new_videos + ', Errors: ' + stats.errors);
+  } catch (e) {
+    log('ERROR', 'scheduledFetchAllFeeds', 'Failed: ' + e.message);
+  }
+}
+
+// ============================================================
 // RSS FEED FETCHING
 // ============================================================
 
