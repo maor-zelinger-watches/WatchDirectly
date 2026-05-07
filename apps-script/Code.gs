@@ -326,6 +326,9 @@ function fetchAllFeeds() {
 
       for (var v = 0; v < videos.length; v++) {
         var video = videos[v];
+        if (video.media_type === 'article' && !video.preview_image) {
+          continue;
+        }
         if (!existingVideos[video.video_id]) {
           var newRow = [];
           if (vHeaders.length === 0) {
