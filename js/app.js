@@ -7,7 +7,7 @@
 
 import { createApiClient } from './api.js';
 import { createVideoCard, sortVideos } from './feed.js';
-import { buildCommentTree, createCommentThread } from './comments.js';
+import { buildCommentTree, createCommentThread, createCommentHtml } from './comments.js';
 import { initAuth, renderSignInButton, getCurrentUser, isSignedIn, getToken, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
 
@@ -75,6 +75,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (!showCachedFeed()) {
     loadNextPage();
+  } else {
+    // Stale-while-revalidate: patch comment counts from fresh API data
+    revalidateCommentCounts();
   }
 });
 
@@ -257,6 +260,50 @@ function showCachedFeed() {
   }
 }
 
+/**
+ * Background revalidation: fetch fresh feed data and patch comment counts
+ * in the DOM without re-rendering the entire feed.
+ */
+async function revalidateCommentCounts() {
+  try {
+    const data = await api.fetchFeed(1, CONFIG.PAGE_SIZE);
+    const freshVideos = data.videos || [];
+
+    for (const video of freshVideos) {
+      const toggle = document.querySelector(`.video-card__comments-toggle[data-video-id="${video.video_id}"]`);
+      if (toggle) {
+        const currentCount = parseInt(toggle.textContent.replace(/[^0-9]/g, '')) || 0;
+        const freshCount = video.comment_count || 0;
+        if (freshCount !== currentCount) {
+          toggle.textContent = `💬 ${freshCount} comments`;
+        }
+      }
+    }
+
+    // Update cached state so next page load also has fresh counts
+    const cachedVideos = state.videos.map(v => {
+      const fresh = freshVideos.find(fv => fv.video_id === v.video_id);
+      return fresh ? { ...v, comment_count: fresh.comment_count } : v;
+    });
+    state.videos = cachedVideos;
+    localStorage.setItem('wd_feed_cache', JSON.stringify({ videos: cachedVideos, total: state.totalVideos }));
+  } catch (e) {
+    // Silent fail — stale counts are acceptable
+  }
+}
+
+/**
+ * Update comment_count in both state.videos and localStorage cache
+ * after a successful comment post. Prevents stale-count flash on next load.
+ */
+function updateCachedCommentCount(videoId, newCount) {
+  const video = state.videos.find(v => v.video_id === videoId);
+  if (video) {
+    video.comment_count = newCount;
+    localStorage.setItem('wd_feed_cache', JSON.stringify({ videos: state.videos, total: state.totalVideos }));
+  }
+}
+
 // ============================================================
 // INFINITE SCROLL
 // ============================================================
@@ -365,16 +412,113 @@ async function submitInlineComment(videoId, parentId, textarea) {
   const submitBtn = textarea.closest('form').querySelector('button[type="submit"]');
   if (submitBtn) submitBtn.disabled = true;
 
-  try {
-    await api.postComment(videoId, parentId, body, getToken());
+  const user = getCurrentUser();
+  const optId = 'opt_' + Date.now();
+  const optimisticComment = {
+    comment_id: optId,
+    parent_id: parentId,
+    user_name: user.name,
+    user_avatar: user.picture,
+    body: body,
+    created_at: new Date().toISOString(),
+    isOptimistic: true,
+    depth: parentId ? 1 : 0
+  };
+
+  // Generate HTML
+  const html = parentId ? createCommentHtml(optimisticComment) : createCommentThread(optimisticComment);
+  
+  // Inject into DOM
+  if (parentId) {
+    const parentThread = document.querySelector(`.comment[data-comment-id="${parentId}"]`).closest('.comment-thread');
+    if (parentThread) {
+      let repliesContainer = parentThread.querySelector('.comment-thread__replies');
+      if (!repliesContainer) {
+        repliesContainer = document.createElement('div');
+        repliesContainer.className = 'comment-thread__replies';
+        parentThread.appendChild(repliesContainer);
+      }
+      repliesContainer.insertAdjacentHTML('beforeend', html);
+    }
+  } else {
+    const listEl = document.querySelector(`.video-card__comments-list[data-video-id="${videoId}"]`);
+    if (listEl) {
+      const empty = listEl.querySelector('.comments-empty');
+      if (empty) empty.remove();
+      listEl.insertAdjacentHTML('beforeend', html);
+    }
+  }
+
+  // Update comment count
+  const toggleBtn = document.querySelector(`.video-card__comments-toggle[data-video-id="${videoId}"]`);
+  let previousCount = 0;
+  if (toggleBtn) {
+    previousCount = parseInt(toggleBtn.textContent.replace(/[^0-9]/g, '')) || 0;
+    toggleBtn.textContent = `💬 ${previousCount + 1} comments`;
+  }
+
+  // Hide reply form or clear textarea
+  let replyForm = null;
+  if (parentId) {
+    replyForm = textarea.closest('.reply-form');
+    if (replyForm) replyForm.style.display = 'none';
+  } else {
     textarea.value = '';
-    showToast('Comment posted!', 'success');
-    loadInlineComments(videoId);
+    textarea.dispatchEvent(new Event('input'));
+  }
+
+  try {
+    const response = await api.postComment(videoId, parentId, body, getToken());
+    
+    // Success: Update optimistic ID to real ID and remove optimistic class
+    const el = document.querySelector(`.comment[data-comment-id="${optId}"]`);
+    if (el) {
+      el.dataset.commentId = response.comment_id;
+      el.classList.remove('comment--optimistic');
+      if (!parentId) {
+        const actions = el.querySelector('.comment__actions');
+        if (actions) {
+          actions.innerHTML = `<button class="comment__reply-btn reply-btn" data-comment-id="${response.comment_id}">↩ Reply</button>`;
+          attachReplyHandlers(videoId);
+        }
+      }
+    }
+    
+    if (replyForm) replyForm.remove();
+    
+    // Update localStorage cache with the new comment count
+    updateCachedCommentCount(videoId, previousCount + 1);
+    
+    // showToast('Comment posted!', 'success'); // Optional, since it's optimistic, UI already updated
   } catch (error) {
     console.error('Failed to post comment:', error);
-    showToast(error.message || 'Failed to post comment', 'error');
+    
+    // Rollback
+    const el = document.querySelector(`.comment[data-comment-id="${optId}"]`);
+    if (el) {
+      const thread = el.closest('.comment-thread');
+      if (thread && thread.firstElementChild === el) {
+        thread.remove();
+      } else {
+        el.remove();
+      }
+    }
+    
+    if (toggleBtn) {
+      toggleBtn.textContent = `💬 ${previousCount} comments`;
+    }
+    
+    if (replyForm) {
+      replyForm.style.display = '';
+      submitBtn.disabled = false;
+    } else {
+      textarea.value = body;
+      textarea.dispatchEvent(new Event('input'));
+    }
+    
+    showToast('Failed to post comment. Please try again.', 'error');
   } finally {
-    if (submitBtn) submitBtn.disabled = false;
+    if (submitBtn && !replyForm) submitBtn.disabled = false;
   }
 }
 

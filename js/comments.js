@@ -77,12 +77,14 @@ export function createCommentHtml(comment) {
   const escapedName = sanitizeHtml(comment.user_name);
   const depth = comment.depth || 0;
 
-  const replyButton = depth === 0
+  const replyButton = (depth === 0 && !comment.isOptimistic)
     ? `<button class="comment__reply-btn reply-btn" data-comment-id="${comment.comment_id}">↩ Reply</button>`
     : '';
 
+  const optimisticClass = comment.isOptimistic ? ' comment--optimistic' : '';
+
   return `
-    <div class="comment comment--depth-${depth}" data-comment-id="${comment.comment_id}">
+    <div class="comment comment--depth-${depth}${optimisticClass}" data-comment-id="${comment.comment_id}">
       <div class="comment__avatar">
         <img src="${comment.user_avatar}" alt="${escapedName}" class="comment__avatar-img" referrerpolicy="no-referrer" />
       </div>
