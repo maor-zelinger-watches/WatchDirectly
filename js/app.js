@@ -32,6 +32,7 @@ const state = {
   loading: false,      // Prevents concurrent fetches
   hasMore: true,       // Whether more pages exist
   expandedComments: new Set(),
+  commentsCache: {},   // videoId -> { comments, tree } — prefetched comment data
   initialLoadComplete: false,
 };
 
@@ -79,6 +80,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   } else {
     // Stale-while-revalidate: patch comment counts from fresh API data
     revalidateCommentCounts();
+    // Prefetch comments for cached cards
+    prefetchComments(state.videos);
   }
 });
 
@@ -132,6 +135,9 @@ async function loadNextPage() {
       state.hasMore = state.videos.length < state.totalVideos;
       localStorage.setItem('wd_feed_cache', JSON.stringify({ videos: state.videos, total: state.totalVideos }));
 
+      // Prefetch comments for all loaded cards in the background
+      prefetchComments(state.videos);
+
       if (state.videos.length === 0) {
         empty.style.display = '';
       }
@@ -148,6 +154,9 @@ async function loadNextPage() {
       state.hasMore = state.videos.length < state.totalVideos;
 
       await appendCards(newVideos);
+
+      // Prefetch comments for newly loaded cards
+      prefetchComments(newVideos);
     }
   } catch (error) {
     console.error('Failed to load feed:', error);
@@ -364,6 +373,13 @@ async function loadInlineComments(videoId) {
   const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${videoId}"]`);
   if (!listEl) return;
 
+  // Use prefetched data if available
+  const cached = state.commentsCache[videoId];
+  if (cached) {
+    renderComments(videoId, listEl, cached.comments, cached.tree);
+    return;
+  }
+
   listEl.innerHTML = '<div class="comments-loading-inline"><div class="spinner"></div></div>';
 
   try {
@@ -371,18 +387,57 @@ async function loadInlineComments(videoId) {
     const comments = data.comments || [];
     const tree = buildCommentTree(comments);
 
-    const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${videoId}"]`);
-    if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
+    // Cache for future use
+    state.commentsCache[videoId] = { comments, tree };
 
-    if (tree.length === 0) {
-      listEl.innerHTML = '<p class="comments-empty">No comments yet. Be the first!</p>';
-    } else {
-      listEl.innerHTML = tree.map(c => createCommentThread(c)).join('');
-      attachReplyHandlers(videoId);
-    }
+    renderComments(videoId, listEl, comments, tree);
   } catch (error) {
     console.error('Failed to load comments:', error);
     listEl.innerHTML = '<p class="comments-empty">Failed to load comments.</p>';
+  }
+}
+
+/**
+ * Renders comments into the DOM for a given video.
+ */
+function renderComments(videoId, listEl, comments, tree) {
+  const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${videoId}"]`);
+  if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
+
+  if (tree.length === 0) {
+    listEl.innerHTML = '<p class="comments-empty">No comments yet. Be the first!</p>';
+  } else {
+    listEl.innerHTML = tree.map(c => createCommentThread(c)).join('');
+    attachReplyHandlers(videoId);
+  }
+}
+
+/**
+ * Prefetches comments for a batch of videos in the background.
+ * Runs in parallel but doesn't block the UI.
+ */
+function prefetchComments(videos) {
+  for (const video of videos) {
+    const id = video.video_id;
+    if (!id || state.commentsCache[id]) continue;
+
+    api.fetchComments(id)
+      .then(data => {
+        const comments = data.comments || [];
+        const tree = buildCommentTree(comments);
+        state.commentsCache[id] = { comments, tree };
+
+        // If the user already expanded this card while we were fetching, render now
+        if (state.expandedComments.has(id)) {
+          const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${id}"]`);
+          if (listEl) renderComments(id, listEl, comments, tree);
+        }
+
+        // Update the comment count badge from real data
+        const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${id}"]`);
+        if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
+      })
+      .catch(() => { /* silent — user can still load on expand */ });
   }
 }
 
@@ -500,6 +555,9 @@ async function submitInlineComment(videoId, parentId, textarea) {
     }
 
     const response = await api.postComment(videoId, parentId, body, token);
+    
+    // Invalidate prefetch cache so next expand fetches fresh data
+    delete state.commentsCache[videoId];
     
     // Success: Update optimistic ID to real ID and remove optimistic class
     const el = document.querySelector(`.comment[data-comment-id="${optId}"]`);
