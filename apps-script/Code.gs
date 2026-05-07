@@ -303,8 +303,12 @@ function fetchAllFeeds() {
 
   for (var i = 1; i < channelData.length; i++) {
     var row = channelData[i];
-    var enabled = enabledCol === -1 || row[enabledCol] === true || row[enabledCol] === 'TRUE';
-    if (!enabled) continue;
+    var rawEnabled = enabledCol === -1 ? true : row[enabledCol];
+    var enabled = rawEnabled === true || String(rawEnabled).toUpperCase() === 'TRUE';
+    if (!enabled) {
+      log('DEBUG', 'fetchAllFeeds', 'Skipping disabled channel: ' + row[channelNameCol] + ' (enabled=' + rawEnabled + ')');
+      continue;
+    }
 
     var feedUrl = row[feedUrlCol];
     var channelName = row[channelNameCol];
