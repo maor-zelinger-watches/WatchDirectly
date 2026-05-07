@@ -285,9 +285,13 @@ async function showCachedFeed() {
 }
 
 /**
- * Full stale-while-revalidate: fetch fresh page 1 from API,
- * compare with cached data, and re-render if content has changed.
- * Ensures users always see the latest content after cache flash.
+ * Full stale-while-revalidate with smooth DOM diffing.
+ * 
+ * 1. Fetch fresh page 1 from API
+ * 2. Fade out cards no longer in the feed
+ * 3. Slide in new cards at the correct position
+ * 4. Update comment counts on existing cards (no re-render)
+ * 5. Reorder if necessary
  */
 async function revalidateFeed() {
   try {
@@ -295,7 +299,7 @@ async function revalidateFeed() {
     const freshVideos = data.videos || [];
     if (freshVideos.length === 0) return;
 
-    // Check if feed content has actually changed
+    // Quick check: is anything different?
     const cachedIds = state.videos.map(v => v.video_id).join(',');
     const freshIds = freshVideos.map(v => v.video_id).join(',');
     const countsChanged = freshVideos.some(fv => {
@@ -309,37 +313,118 @@ async function revalidateFeed() {
       return;
     }
 
-    // --- Content differs: replace the feed ---
+    const container = document.getElementById('feed-container');
+    if (!container) return;
+
+    const freshIdSet = new Set(freshVideos.map(v => v.video_id));
+    const existingIdSet = new Set(state.videos.map(v => v.video_id));
+
+    // --- 1. Animate out cards no longer in the fresh feed ---
+    const removedCards = container.querySelectorAll('.media-card');
+    const removePromises = [];
+
+    removedCards.forEach(card => {
+      const id = card.dataset.videoId;
+      if (id && !freshIdSet.has(id)) {
+        card.classList.add('media-card--leaving');
+        removePromises.push(new Promise(resolve => {
+          card.addEventListener('transitionend', () => {
+            card.remove();
+            resolve();
+          }, { once: true });
+          // Safety timeout in case transitionend doesn't fire
+          setTimeout(() => { card.remove(); resolve(); }, 400);
+        }));
+      }
+    });
+
+    // Wait for fade-out animations to complete
+    if (removePromises.length > 0) {
+      await Promise.all(removePromises);
+    }
+
+    // --- 2. Update comment counts on surviving cards ---
+    for (const video of freshVideos) {
+      if (existingIdSet.has(video.video_id)) {
+        const toggle = document.querySelector(`.media-card__comments-toggle[data-video-id="${video.video_id}"]`);
+        if (toggle) {
+          const freshCount = video.comment_count || 0;
+          toggle.textContent = `💬 ${freshCount} comments`;
+        }
+      }
+    }
+
+    // --- 3. Insert new cards at the correct position ---
+    const newVideos = freshVideos.filter(v => !existingIdSet.has(v.video_id));
+
+    for (const video of newVideos) {
+      // Find where this card should go based on the fresh order
+      const freshIndex = freshVideos.indexOf(video);
+      const existingCards = container.querySelectorAll('.media-card');
+
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = createMediaCard(video);
+      const card = wrapper.firstElementChild;
+      card.classList.add('media-card--entering');
+
+      // Insert at the correct position
+      if (freshIndex >= existingCards.length) {
+        container.appendChild(card);
+      } else {
+        container.insertBefore(card, existingCards[freshIndex]);
+      }
+
+      // Wire up comment toggle
+      const toggle = card.querySelector('.media-card__comments-toggle');
+      if (toggle) {
+        toggle.addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleComments(toggle.dataset.videoId);
+        });
+      }
+
+      // Wire up lazy-load observer
+      const iframe = card.querySelector('iframe[data-src]');
+      if (iframe) iframeObserver.observe(iframe);
+
+      // Trigger enter animation
+      requestAnimationFrame(() => {
+        card.classList.remove('media-card--entering');
+      });
+    }
+
+    // --- 4. Reorder existing cards if order changed ---
+    const desiredOrder = freshVideos.map(v => v.video_id);
+    const currentCards = [...container.querySelectorAll('.media-card')];
+    const currentOrder = currentCards.map(c => c.dataset.videoId);
+
+    if (desiredOrder.join(',') !== currentOrder.join(',')) {
+      // Reorder by re-appending in the correct order
+      for (const id of desiredOrder) {
+        const card = container.querySelector(`.media-card[data-video-id="${id}"]`);
+        if (card) container.appendChild(card);
+      }
+    }
+
+    // --- 5. Update state and cache ---
     state.videos = freshVideos;
     state.totalVideos = data.total || freshVideos.length;
     state.currentPage = 1;
     state.hasMore = state.videos.length < state.totalVideos;
-    state.commentsCache = {}; // Clear stale comment cache
+    state.commentsCache = {};
 
-    // Re-render the feed container
-    const container = document.getElementById('feed-container');
-    if (container) {
-      container.innerHTML = '';
-      await appendCards(freshVideos);
-    }
-
-    // Update infinite scroll sentinel
     const sentinel = document.getElementById('load-more-container');
-    if (sentinel) {
-      sentinel.style.display = state.hasMore ? '' : 'none';
-    }
+    if (sentinel) sentinel.style.display = state.hasMore ? '' : 'none';
 
-    // Update localStorage cache
     localStorage.setItem('wd_feed_cache', JSON.stringify({
       videos: freshVideos,
       total: state.totalVideos,
     }));
 
-    // Prefetch comments for fresh cards
+    // Prefetch comments for all cards
     prefetchComments(freshVideos);
   } catch (e) {
     // Silent fail — stale cache is still visible
-    // Still prefetch comments for cached cards
     prefetchComments(state.videos);
   }
 }
