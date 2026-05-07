@@ -287,14 +287,51 @@ async function showCachedFeed() {
 }
 
 /**
- * Background revalidation: fetch fresh feed data and patch comment counts
- * in the DOM without re-rendering the entire feed.
+ * Background revalidation: fetch fresh feed data, prepend any new videos
+ * that weren't in the cache, and patch comment counts — all without
+ * re-rendering the existing feed.
  */
 async function revalidateCommentCounts() {
   try {
     const data = await api.fetchFeed(1, CONFIG.PAGE_SIZE);
     const freshVideos = data.videos || [];
 
+    // --- 1. Find new videos not in the current cache ---
+    const existingIds = new Set(state.videos.map(v => v.video_id));
+    const newVideos = freshVideos.filter(v => !existingIds.has(v.video_id));
+
+    if (newVideos.length > 0) {
+      // Prepend new videos to state and DOM
+      state.videos = [...newVideos, ...state.videos];
+      state.totalVideos = data.total || state.totalVideos;
+
+      const container = document.getElementById('feed-container');
+      if (container) {
+        // Build HTML for new cards and insert at the top
+        for (let i = newVideos.length - 1; i >= 0; i--) {
+          const html = createMediaCard(newVideos[i]);
+          container.insertAdjacentHTML('afterbegin', html);
+
+          // Activate lazy-load observers on new iframes
+          const firstCard = container.firstElementChild;
+          if (firstCard) {
+            const iframe = firstCard.querySelector('iframe[data-src]');
+            if (iframe) iframeObserver.observe(iframe);
+          }
+        }
+
+        // Animate new cards in
+        const newCards = container.querySelectorAll('.media-card:not(.media-card--visible)');
+        newCards.forEach((card, i) => {
+          setTimeout(() => card.classList.add('media-card--visible'), i * 80);
+        });
+      }
+
+      // Prefetch comments for the new cards
+      prefetchComments(newVideos);
+    }
+
+    // --- 2. Patch comment counts on existing cards ---
     for (const video of freshVideos) {
       const toggle = document.querySelector(`.media-card__comments-toggle[data-video-id="${video.video_id}"]`);
       if (toggle) {
@@ -306,7 +343,7 @@ async function revalidateCommentCounts() {
       }
     }
 
-    // Update cached state so next page load also has fresh counts
+    // --- 3. Update cache ---
     const cachedVideos = state.videos.map(v => {
       const fresh = freshVideos.find(fv => fv.video_id === v.video_id);
       return fresh ? { ...v, comment_count: fresh.comment_count } : v;
@@ -314,7 +351,7 @@ async function revalidateCommentCounts() {
     state.videos = cachedVideos;
     localStorage.setItem('wd_feed_cache', JSON.stringify({ videos: cachedVideos, total: state.totalVideos }));
   } catch (e) {
-    // Silent fail — stale counts are acceptable
+    // Silent fail — stale feed is acceptable
   }
 }
 

@@ -61,6 +61,25 @@ function findVideoIdCol(headers) {
   return col;
 }
 
+/**
+ * Decodes HTML entities in RSS/Atom feed text.
+ * Handles named entities (&amp; &lt; etc.), decimal (&#8217;), and hex (&#x2019;).
+ * @param {string} text
+ * @returns {string}
+ */
+function decodeHtmlEntities(text) {
+  if (!text) return '';
+  var decoded = text
+    .replace(/&#(\d+);/g, function(_, n) { return String.fromCharCode(parseInt(n, 10)); })
+    .replace(/&#x([0-9a-fA-F]+);/g, function(_, h) { return String.fromCharCode(parseInt(h, 16)); })
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+  return decoded;
+}
+
 // ============================================================
 // HTTP HANDLERS
 // ============================================================
@@ -518,7 +537,7 @@ function parseRss2(root, channelName, tier, category) {
   
   for (var i = 0; i < items.length; i++) {
     var item = items[i];
-    var title = item.getChildText('title') || '';
+    var title = decodeHtmlEntities(item.getChildText('title') || '');
     var link = item.getChildText('link') || '';
     var pubDate = item.getChildText('pubDate') || new Date().toISOString();
     var guid = item.getChildText('guid') || link;
@@ -591,7 +610,7 @@ function parseAtom(root, channelName, tier, category) {
 
   for (var i = 0; i < entries.length; i++) {
     var entry = entries[i];
-    var title = entry.getChildText('title', ns) || '';
+    var title = decodeHtmlEntities(entry.getChildText('title', ns) || '');
     
     var linkEl = entry.getChild('link', ns);
     var links = entry.getChildren('link', ns);
@@ -657,7 +676,7 @@ function parseRegex(xml, channelName, tier, category) {
     
     if (!titleMatch || !linkMatch) continue;
     
-    var title = titleMatch[1].trim();
+    var title = decodeHtmlEntities(titleMatch[1].trim());
     var link = linkMatch[1].trim();
     var pubDate = pubDateMatch ? pubDateMatch[1].trim() : new Date().toISOString();
     
