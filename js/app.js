@@ -78,10 +78,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (!cached) {
     loadNextPage();
   } else {
-    // Stale-while-revalidate: patch comment counts from fresh API data
-    revalidateCommentCounts();
-    // Prefetch comments for cached cards
-    prefetchComments(state.videos);
+    // Stale-while-revalidate: show cache instantly, then fetch fresh data
+    revalidateFeed();
   }
 });
 
@@ -287,71 +285,62 @@ async function showCachedFeed() {
 }
 
 /**
- * Background revalidation: fetch fresh feed data, prepend any new videos
- * that weren't in the cache, and patch comment counts — all without
- * re-rendering the existing feed.
+ * Full stale-while-revalidate: fetch fresh page 1 from API,
+ * compare with cached data, and re-render if content has changed.
+ * Ensures users always see the latest content after cache flash.
  */
-async function revalidateCommentCounts() {
+async function revalidateFeed() {
   try {
     const data = await api.fetchFeed(1, CONFIG.PAGE_SIZE);
     const freshVideos = data.videos || [];
+    if (freshVideos.length === 0) return;
 
-    // --- 1. Find new videos not in the current cache ---
-    const existingIds = new Set(state.videos.map(v => v.video_id));
-    const newVideos = freshVideos.filter(v => !existingIds.has(v.video_id));
-
-    if (newVideos.length > 0) {
-      // Prepend new videos to state and DOM
-      state.videos = [...newVideos, ...state.videos];
-      state.totalVideos = data.total || state.totalVideos;
-
-      const container = document.getElementById('feed-container');
-      if (container) {
-        // Build HTML for new cards and insert at the top
-        for (let i = newVideos.length - 1; i >= 0; i--) {
-          const html = createMediaCard(newVideos[i]);
-          container.insertAdjacentHTML('afterbegin', html);
-
-          // Activate lazy-load observers on new iframes
-          const firstCard = container.firstElementChild;
-          if (firstCard) {
-            const iframe = firstCard.querySelector('iframe[data-src]');
-            if (iframe) iframeObserver.observe(iframe);
-          }
-        }
-
-        // Animate new cards in
-        const newCards = container.querySelectorAll('.media-card:not(.media-card--visible)');
-        newCards.forEach((card, i) => {
-          setTimeout(() => card.classList.add('media-card--visible'), i * 80);
-        });
-      }
-
-      // Prefetch comments for the new cards
-      prefetchComments(newVideos);
-    }
-
-    // --- 2. Patch comment counts on existing cards ---
-    for (const video of freshVideos) {
-      const toggle = document.querySelector(`.media-card__comments-toggle[data-video-id="${video.video_id}"]`);
-      if (toggle) {
-        const currentCount = parseInt(toggle.textContent.replace(/[^0-9]/g, '')) || 0;
-        const freshCount = video.comment_count || 0;
-        if (freshCount !== currentCount) {
-          toggle.textContent = `💬 ${freshCount} comments`;
-        }
-      }
-    }
-
-    // --- 3. Update cache ---
-    const cachedVideos = state.videos.map(v => {
-      const fresh = freshVideos.find(fv => fv.video_id === v.video_id);
-      return fresh ? { ...v, comment_count: fresh.comment_count } : v;
+    // Check if feed content has actually changed
+    const cachedIds = state.videos.map(v => v.video_id).join(',');
+    const freshIds = freshVideos.map(v => v.video_id).join(',');
+    const countsChanged = freshVideos.some(fv => {
+      const cached = state.videos.find(v => v.video_id === fv.video_id);
+      return cached && cached.comment_count !== fv.comment_count;
     });
-    state.videos = cachedVideos;
-    localStorage.setItem('wd_feed_cache', JSON.stringify({ videos: cachedVideos, total: state.totalVideos }));
+
+    if (cachedIds === freshIds && !countsChanged) {
+      // Content identical — just prefetch comments
+      prefetchComments(state.videos);
+      return;
+    }
+
+    // --- Content differs: replace the feed ---
+    state.videos = freshVideos;
+    state.totalVideos = data.total || freshVideos.length;
+    state.currentPage = 1;
+    state.hasMore = state.videos.length < state.totalVideos;
+    state.commentsCache = {}; // Clear stale comment cache
+
+    // Re-render the feed container
+    const container = document.getElementById('feed-container');
+    if (container) {
+      container.innerHTML = '';
+      await appendCards(freshVideos);
+    }
+
+    // Update infinite scroll sentinel
+    const sentinel = document.getElementById('load-more-container');
+    if (sentinel) {
+      sentinel.style.display = state.hasMore ? '' : 'none';
+    }
+
+    // Update localStorage cache
+    localStorage.setItem('wd_feed_cache', JSON.stringify({
+      videos: freshVideos,
+      total: state.totalVideos,
+    }));
+
+    // Prefetch comments for fresh cards
+    prefetchComments(freshVideos);
   } catch (e) {
-    // Silent fail — stale feed is acceptable
+    // Silent fail — stale cache is still visible
+    // Still prefetch comments for cached cards
+    prefetchComments(state.videos);
   }
 }
 
