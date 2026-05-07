@@ -22,7 +22,8 @@ export function createMediaCard(item) {
     category: sanitizeHtml(item.category),
   };
 
-  const isArticle = item.media_type === 'article';
+  // Fallback: If media_type is missing but ID is > 11 chars (base64 or URL), it must be an article
+  const isArticle = item.media_type === 'article' || (item.video_id && item.video_id.length > 11);
   const cardClass = isArticle ? 'article-card media-card' : 'video-card media-card';
   
   const embedHtml = isArticle ? `

@@ -338,7 +338,7 @@ function fetchAndParseFeed(feedUrl, channelName, tier, category) {
 }
 
 function extractYouTubeId(url) {
-  var match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([^&]{11})/);
+  var match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([^&]{11})/);
   return match ? match[1] : null;
 }
 
@@ -379,7 +379,7 @@ function parseRss2(root, channelName, tier, category) {
     
     var videoId = extractYouTubeId(link);
     var mediaType = videoId ? 'video' : 'article';
-    var itemId = videoId || Utilities.base64Encode(guid).substring(0, 15).replace(/[^a-zA-Z0-9]/g, '');
+    var itemId = videoId || Utilities.base64Encode(guid).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
     
     var previewImage = '';
     // Try media:content
@@ -451,7 +451,7 @@ function parseAtom(root, channelName, tier, category) {
     
     var ytVideoId = ytVideoIdEl ? ytVideoIdEl.getText() : extractYouTubeId(link);
     var mediaType = ytVideoId ? 'video' : 'article';
-    var itemId = ytVideoId || Utilities.base64Encode(link).substring(0, 15).replace(/[^a-zA-Z0-9]/g, '');
+    var itemId = ytVideoId || Utilities.base64Encode(link).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
     
     var previewImage = '';
     if (mediaNs) {
@@ -503,7 +503,7 @@ function parseRegex(xml, channelName, tier, category) {
     
     var videoId = extractYouTubeId(link);
     var mediaType = videoId ? 'video' : 'article';
-    var itemId = videoId || Utilities.base64Encode(link).substring(0, 15).replace(/[^a-zA-Z0-9]/g, '');
+    var itemId = videoId || Utilities.base64Encode(link).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
     
     var previewImage = '';
     var imgMatch = itemXml.match(/<media:content[^>]+url="([^">]+)"/i) || itemXml.match(/<media:thumbnail[^>]+url="([^">]+)"/i) || itemXml.match(/<img[^>]+src="([^">]+)"/i);
@@ -545,6 +545,16 @@ function getVideos(page, limit) {
     for (var j = 0; j < headers.length; j++) {
       video[headers[j]] = row[j];
     }
+    
+    // Fallback if media_type is missing from sheet data
+    if (!video.media_type) {
+      if (video.video_id && video.video_id.length === 11) {
+        video.media_type = 'video';
+      } else {
+        video.media_type = 'article';
+      }
+    }
+    
     videos.push(video);
   }
 
