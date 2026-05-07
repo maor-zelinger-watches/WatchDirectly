@@ -393,17 +393,16 @@ async function revalidateFeed() {
       });
     }
 
-    // --- 4. Reorder existing cards if order changed ---
-    const desiredOrder = freshVideos.map(v => v.video_id);
-    const currentCards = [...container.querySelectorAll('.media-card')];
-    const currentOrder = currentCards.map(c => c.dataset.videoId);
-
-    if (desiredOrder.join(',') !== currentOrder.join(',')) {
-      // Reorder by re-appending in the correct order
-      for (const id of desiredOrder) {
-        const card = container.querySelector(`.media-card[data-video-id="${id}"]`);
-        if (card) container.appendChild(card);
-      }
+    // --- 4. Sort ALL cards chronologically (newest first) ---
+    const allCards = [...container.querySelectorAll('.media-card')];
+    allCards.sort((a, b) => {
+      const dateA = new Date(a.dataset.publishedAt || 0);
+      const dateB = new Date(b.dataset.publishedAt || 0);
+      return dateB - dateA; // newest first
+    });
+    // Re-append in sorted order (DOM moves, no re-render)
+    for (const card of allCards) {
+      container.appendChild(card);
     }
 
     // --- 5. Update state and cache ---

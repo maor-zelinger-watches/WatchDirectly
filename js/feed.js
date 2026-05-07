@@ -61,7 +61,7 @@ export function createMediaCard(item) {
   `;
 
   return `
-    <article class="${cardClass}" data-video-id="${escaped.videoId}">
+    <article class="${cardClass}" data-video-id="${escaped.videoId}" data-published-at="${item.published_at || ''}">
       <div class="media-card__grid">
         ${embedHtml}
         <div class="media-card__content">
