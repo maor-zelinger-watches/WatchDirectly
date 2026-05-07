@@ -272,21 +272,24 @@ function fetchAllFeeds() {
 
       for (var v = 0; v < videos.length; v++) {
         var video = videos[v];
-        if (!existingVideos[video.video_id]) {
-          videosSheet.appendRow([
-            video.video_id,
-            video.channel_name,
-            video.title,
-            video.url,
-            video.published_at,
-            new Date().toISOString(), // fetched_at
-            video.tier,
-            video.category,
-            0, // comment_count
-          ]);
-          existingVideos[video.video_id] = true;
-          newCount++;
+        if (existingVideos[video.video_id]) {
+          // RSS feeds are chronological. Hitting a known video means we are fully caught up for this channel.
+          break;
         }
+        
+        videosSheet.appendRow([
+          video.video_id,
+          video.channel_name,
+          video.title,
+          video.url,
+          video.published_at,
+          new Date().toISOString(), // fetched_at
+          video.tier,
+          video.category,
+          0, // comment_count
+        ]);
+        existingVideos[video.video_id] = true;
+        newCount++;
       }
 
       log('DEBUG', 'fetchAllFeeds', 'Fetched ' + videos.length + ' videos from ' + channelName);
