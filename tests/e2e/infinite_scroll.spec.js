@@ -10,7 +10,7 @@ test.describe('Infinite Scroll', () => {
     await page.goto('/');
 
     // Wait for initial cards to appear
-    await page.waitForSelector('.video-card', { timeout: 30000 });
+    await page.waitForSelector('.media-card', { timeout: 30000 });
 
     // Keep scrolling until we have at least 25 cards
     let expectedCards = 25;
@@ -20,7 +20,7 @@ test.describe('Infinite Scroll', () => {
     while (currentCards < expectedCards && attempts < 20) {
       await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
       await page.waitForTimeout(1000);
-      currentCards = await page.locator('.video-card').count();
+      currentCards = await page.locator('.media-card').count();
       console.log(`Cards loaded: ${currentCards}`);
       attempts++;
     }

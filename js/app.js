@@ -188,8 +188,25 @@ function appendCards(videos) {
     const feedContainer = document.getElementById('feed-container');
     const sorted = sortVideos(videos);
 
-    sorted.forEach((video, i) => {
+    // Deduplicate: skip items already rendered in the DOM
+    const deduped = sorted.filter(video => {
+      const id = video.video_id;
+      return id && !feedContainer.querySelector(`[data-video-id="${id}"]`);
+    });
+
+    if (deduped.length === 0) {
+      resolve();
+      return;
+    }
+
+    deduped.forEach((video, i) => {
       setTimeout(() => {
+        // Double-check dedup (guards against race from staggered timeouts)
+        if (feedContainer.querySelector(`[data-video-id="${video.video_id}"]`)) {
+          if (i === deduped.length - 1) setTimeout(resolve, 50);
+          return;
+        }
+
         const wrapper = document.createElement('div');
         wrapper.innerHTML = createMediaCard(video);
         const card = wrapper.firstElementChild;
@@ -214,7 +231,7 @@ function appendCards(videos) {
         }
 
         // Resolve when the last card is appended
-        if (i === sorted.length - 1) {
+        if (i === deduped.length - 1) {
           setTimeout(resolve, 50);
         }
       }, i * 60);
