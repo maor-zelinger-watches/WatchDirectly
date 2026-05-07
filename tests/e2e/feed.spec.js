@@ -100,24 +100,24 @@ test.describe('Feed View', () => {
   });
 
   test('renders feed cards after loading', async ({ page }) => {
-    await expect(page.locator('.video-card')).toHaveCount(3);
+    await expect(page.locator('.media-card')).toHaveCount(3);
   });
 
   test('each card has a YouTube iframe embed', async ({ page }) => {
-    const iframes = page.locator('.video-card__embed iframe');
+    const iframes = page.locator('.media-card__embed iframe');
     await expect(iframes).toHaveCount(3);
     const src = await iframes.first().getAttribute('src');
     expect(src).toContain('youtube-nocookie.com/embed/test_vid_1');
   });
 
   test('cards show channel name and time ago', async ({ page }) => {
-    const firstCard = page.locator('.video-card').first();
-    await expect(firstCard.locator('.video-card__channel')).toContainText('Teddy Baldassarre');
-    await expect(firstCard.locator('.video-card__time')).toBeVisible();
+    const firstCard = page.locator('.media-card').first();
+    await expect(firstCard.locator('.media-card__channel')).toContainText('Teddy Baldassarre');
+    await expect(firstCard.locator('.media-card__time')).toBeVisible();
   });
 
   test('cards do NOT show tier badges', async ({ page }) => {
-    const tierBadge = page.locator('.video-card__tier');
+    const tierBadge = page.locator('.media-card__tier');
     await expect(tierBadge).toHaveCount(0);
   });
 
@@ -127,62 +127,62 @@ test.describe('Feed View', () => {
   });
 
   test('cards show comment count toggle button', async ({ page }) => {
-    const firstCard = page.locator('.video-card').first();
-    await expect(firstCard.locator('.video-card__comments-toggle')).toContainText('5 comments');
+    const firstCard = page.locator('.media-card').first();
+    await expect(firstCard.locator('.media-card__comments-toggle')).toContainText('5 comments');
   });
 
   test('comments section is hidden by default', async ({ page }) => {
-    const body = page.locator('.video-card__comments-body').first();
+    const body = page.locator('.media-card__comments-body').first();
     await expect(body).toBeHidden();
   });
 
   test('clicking comments toggle expands inline comments', async ({ page }) => {
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
-    const body = page.locator('.video-card__comments-body').first();
+    const body = page.locator('.media-card__comments-body').first();
     await expect(body).toBeVisible();
   });
 
   test('expanded comments load from API', async ({ page }) => {
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
-    const commentThread = page.locator('.video-card').first().locator('.comment-thread');
+    const commentThread = page.locator('.media-card').first().locator('.comment-thread');
     await expect(commentThread).toHaveCount(1); // 1 top-level comment
   });
 
   test('expanded comments show comment text', async ({ page }) => {
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
-    const comment = page.locator('.video-card').first().locator('.comment__text').first();
+    const comment = page.locator('.media-card').first().locator('.comment__text').first();
     await expect(comment).toContainText('Great review');
   });
 
   test('expanded comments show nested replies', async ({ page }) => {
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
-    const reply = page.locator('.video-card').first().locator('.comment--depth-1');
+    const reply = page.locator('.media-card').first().locator('.comment--depth-1');
     await expect(reply).toHaveCount(1);
     await expect(reply).toContainText('Agreed, the finishing');
   });
 
   test('clicking toggle again collapses comments', async ({ page }) => {
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
-    await expect(page.locator('.video-card__comments-body').first()).toBeVisible();
+    await expect(page.locator('.media-card__comments-body').first()).toBeVisible();
 
     await toggle.click();
-    await expect(page.locator('.video-card__comments-body').first()).toBeHidden();
+    await expect(page.locator('.media-card__comments-body').first()).toBeHidden();
   });
 
   test('shows auth prompt for comment input when not signed in', async ({ page }) => {
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
-    const authPrompt = page.locator('.video-card__auth-prompt').first();
+    const authPrompt = page.locator('.media-card__auth-prompt').first();
     await expect(authPrompt).toBeVisible();
   });
 });

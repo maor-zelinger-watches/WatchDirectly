@@ -70,21 +70,21 @@ test.describe('Optimistic UI Comments', () => {
     });
 
     // Open comments
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
     // Type and submit comment
-    const textarea = page.locator('.video-card__textarea').first();
+    const textarea = page.locator('.media-card__textarea').first();
     await textarea.fill('This is an optimistic comment!');
     
-    const submitBtn = page.locator('.video-card__comment-form button[type="submit"]').first();
+    const submitBtn = page.locator('.media-card__comment-form button[type="submit"]').first();
     await submitBtn.click();
 
     // Verify textarea is cleared immediately
     await expect(textarea).toHaveValue('');
 
     // Verify optimistic comment appears immediately
-    const commentsList = page.locator('.video-card__comments-list').first();
+    const commentsList = page.locator('.media-card__comments-list').first();
     const newComment = commentsList.locator('.comment').first();
     
     await expect(newComment).toContainText('This is an optimistic comment!');
@@ -115,19 +115,19 @@ test.describe('Optimistic UI Comments', () => {
     });
 
     // Open comments
-    const toggle = page.locator('.video-card__comments-toggle').first();
+    const toggle = page.locator('.media-card__comments-toggle').first();
     await toggle.click();
 
     // Type and submit comment
-    const textarea = page.locator('.video-card__textarea').first();
+    const textarea = page.locator('.media-card__textarea').first();
     const commentText = 'This comment will fail.';
     await textarea.fill(commentText);
     
-    const submitBtn = page.locator('.video-card__comment-form button[type="submit"]').first();
+    const submitBtn = page.locator('.media-card__comment-form button[type="submit"]').first();
     await submitBtn.click();
 
     // Verify optimistic comment appears immediately
-    const commentsList = page.locator('.video-card__comments-list').first();
+    const commentsList = page.locator('.media-card__comments-list').first();
     const newComment = commentsList.locator('.comment').first();
     await expect(newComment).toBeVisible();
 

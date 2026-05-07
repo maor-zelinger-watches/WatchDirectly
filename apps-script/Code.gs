@@ -232,20 +232,26 @@ function fetchAllFeeds() {
   var videosSheet = getSheet('VIDEOS');
 
   var channelData = channelsSheet.getDataRange().getValues();
-  var headers = channelData[0];
-  var feedUrlCol = headers.indexOf('feed_url');
-  var channelNameCol = headers.indexOf('channel_name');
-  var tierCol = headers.indexOf('tier');
-  var categoryCol = headers.indexOf('category');
-  var enabledCol = headers.indexOf('enabled');
+  var cHeaders = channelData[0] || [];
+  var feedUrlCol = cHeaders.indexOf('feed_url');
+  var channelNameCol = cHeaders.indexOf('channel_name');
+  var tierCol = cHeaders.indexOf('tier');
+  var categoryCol = cHeaders.indexOf('category');
+  var enabledCol = cHeaders.indexOf('enabled');
 
   // Get existing video IDs for deduplication
   var existingVideos = {};
   var videoData = videosSheet.getDataRange().getValues();
+  var vHeaders = videoData.length > 0 ? videoData[0] : [];
+  
   if (videoData.length > 1) {
-    var videoIdCol = videoData[0].indexOf('video_id');
-    for (var i = 1; i < videoData.length; i++) {
-      existingVideos[videoData[i][videoIdCol]] = true;
+    var videoIdCol = vHeaders.indexOf('item_id');
+    if (videoIdCol === -1) videoIdCol = vHeaders.indexOf('video_id');
+    
+    if (videoIdCol !== -1) {
+      for (var i = 1; i < videoData.length; i++) {
+        existingVideos[videoData[i][videoIdCol]] = true;
+      }
     }
   }
 
@@ -272,33 +278,44 @@ function fetchAllFeeds() {
 
       for (var v = 0; v < videos.length; v++) {
         var video = videos[v];
-        if (existingVideos[video.video_id]) {
-          // RSS feeds are chronological. Hitting a known video means we are fully caught up for this channel.
-          break;
+        if (!existingVideos[video.video_id]) {
+          var newRow = [];
+          if (vHeaders.length === 0) {
+             // Fallback if sheet is totally empty
+             newRow = [
+               video.video_id, video.channel_name, video.title, video.url, video.published_at, new Date().toISOString(), video.tier, video.category, 0, video.media_type, video.preview_image
+             ];
+          } else {
+            for(var h = 0; h < vHeaders.length; h++) {
+              var hName = vHeaders[h];
+              if (hName === 'video_id' || hName === 'item_id') newRow.push(video.video_id);
+              else if (hName === 'channel_name') newRow.push(video.channel_name);
+              else if (hName === 'title') newRow.push(video.title);
+              else if (hName === 'url') newRow.push(video.url);
+              else if (hName === 'published_at') newRow.push(video.published_at);
+              else if (hName === 'fetched_at') newRow.push(new Date().toISOString());
+              else if (hName === 'tier') newRow.push(video.tier);
+              else if (hName === 'category') newRow.push(video.category);
+              else if (hName === 'comment_count') newRow.push(0);
+              else if (hName === 'media_type') newRow.push(video.media_type);
+              else if (hName === 'preview_image') newRow.push(video.preview_image);
+              else newRow.push('');
+            }
+          }
+          
+          videosSheet.appendRow(newRow);
+          existingVideos[video.video_id] = true;
+          newCount++;
         }
-        
-        videosSheet.appendRow([
-          video.video_id,
-          video.channel_name,
-          video.title,
-          video.url,
-          video.published_at,
-          new Date().toISOString(), // fetched_at
-          video.tier,
-          video.category,
-          0, // comment_count
-        ]);
-        existingVideos[video.video_id] = true;
-        newCount++;
       }
 
-      log('DEBUG', 'fetchAllFeeds', 'Fetched ' + videos.length + ' videos from ' + channelName);
+      log('DEBUG', 'fetchAllFeeds', 'Fetched ' + videos.length + ' items from ' + channelName);
     } catch (error) {
       log('ERROR', 'fetchAllFeeds', 'Failed to fetch ' + channelName + ': ' + error.message);
       errorCount++;
     }
 
-    // Be polite to YouTube
+    // Be polite
     Utilities.sleep(500);
   }
 
@@ -320,40 +337,190 @@ function fetchAndParseFeed(feedUrl, channelName, tier, category) {
   return parseRssFeed(xml, channelName, tier, category);
 }
 
-function parseRssFeed(xml, channelName, tier, category) {
-  var doc = XmlService.parse(xml);
-  var root = doc.getRootElement();
-  var ns = XmlService.getNamespace('http://www.w3.org/2005/Atom');
-  var ytNs = XmlService.getNamespace('yt', 'http://www.youtube.com/xml/schemas/2015');
+function extractYouTubeId(url) {
+  var match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([^&]{11})/);
+  return match ? match[1] : null;
+}
 
+function parseRssFeed(xml, channelName, tier, category) {
+  try {
+    var doc = XmlService.parse(xml);
+    var root = doc.getRootElement();
+    var name = root.getName().toLowerCase();
+    
+    if (name === 'rss') {
+      return parseRss2(root, channelName, tier, category);
+    } else if (name === 'feed') {
+      return parseAtom(root, channelName, tier, category);
+    } else {
+      throw new Error("Unknown feed format: " + name);
+    }
+  } catch (e) {
+    // Fallback to regex based parsing if XML is malformed
+    return parseRegex(xml, channelName, tier, category);
+  }
+}
+
+function parseRss2(root, channelName, tier, category) {
+  var channel = root.getChild('channel');
+  if (!channel) return [];
+  var items = channel.getChildren('item');
+  var videos = [];
+  
+  var mediaNs = XmlService.getNamespace('media', 'http://search.yahoo.com/mrss/');
+  var contentNs = XmlService.getNamespace('content', 'http://purl.org/rss/1.0/modules/content/');
+  
+  for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var title = item.getChildText('title') || '';
+    var link = item.getChildText('link') || '';
+    var pubDate = item.getChildText('pubDate') || new Date().toISOString();
+    var guid = item.getChildText('guid') || link;
+    
+    var videoId = extractYouTubeId(link);
+    var mediaType = videoId ? 'video' : 'article';
+    var itemId = videoId || Utilities.base64Encode(guid).substring(0, 15).replace(/[^a-zA-Z0-9]/g, '');
+    
+    var previewImage = '';
+    // Try media:content
+    if (mediaNs) {
+      var mediaContent = item.getChild('content', mediaNs);
+      if (mediaContent && mediaContent.getAttribute('url')) {
+        previewImage = mediaContent.getAttribute('url').getValue();
+      }
+      if (!previewImage) {
+        var mediaThumbnail = item.getChild('thumbnail', mediaNs);
+        if (mediaThumbnail && mediaThumbnail.getAttribute('url')) {
+          previewImage = mediaThumbnail.getAttribute('url').getValue();
+        }
+      }
+    }
+    // Try enclosure
+    if (!previewImage) {
+      var enclosure = item.getChild('enclosure');
+      if (enclosure && enclosure.getAttribute('type') && enclosure.getAttribute('type').getValue().indexOf('image') > -1) {
+        previewImage = enclosure.getAttribute('url').getValue();
+      }
+    }
+    // Try regexing from description or content:encoded
+    if (!previewImage) {
+      var desc = item.getChildText('description') || '';
+      var contentEncoded = contentNs ? item.getChildText('encoded', contentNs) || '' : '';
+      var imgMatch = (contentEncoded + desc).match(/<img[^>]+src="([^">]+)"/);
+      if (imgMatch) previewImage = imgMatch[1];
+    }
+    
+    videos.push({
+      video_id: itemId,
+      media_type: mediaType,
+      channel_name: channelName,
+      title: title,
+      url: link,
+      preview_image: previewImage,
+      published_at: new Date(pubDate).toISOString(),
+      tier: tier,
+      category: category,
+    });
+  }
+  return videos;
+}
+
+function parseAtom(root, channelName, tier, category) {
+  var ns = root.getNamespace();
+  var ytNs = XmlService.getNamespace('yt', 'http://www.youtube.com/xml/schemas/2015');
+  var mediaNs = XmlService.getNamespace('media', 'http://search.yahoo.com/mrss/');
+  
   var entries = root.getChildren('entry', ns);
   var videos = [];
 
   for (var i = 0; i < entries.length; i++) {
     var entry = entries[i];
-    var videoIdEl = entry.getChild('videoId', ytNs);
-    var titleEl = entry.getChild('title', ns);
-    var publishedEl = entry.getChild('published', ns);
+    var title = entry.getChildText('title', ns) || '';
+    
     var linkEl = entry.getChild('link', ns);
-
-    if (!videoIdEl || !titleEl) continue;
-
-    var videoId = videoIdEl.getText();
-    var title = titleEl.getText();
-    var published = publishedEl ? publishedEl.getText() : new Date().toISOString();
-    var url = linkEl ? linkEl.getAttribute('href').getValue() : 'https://www.youtube.com/watch?v=' + videoId;
-
+    var links = entry.getChildren('link', ns);
+    for (var j=0; j<links.length; j++) {
+      if (links[j].getAttribute('rel') && links[j].getAttribute('rel').getValue() === 'alternate') {
+        linkEl = links[j];
+      }
+    }
+    var link = linkEl ? linkEl.getAttribute('href').getValue() : '';
+    
+    var ytVideoIdEl = ytNs ? entry.getChild('videoId', ytNs) : null;
+    var published = entry.getChildText('published', ns) || entry.getChildText('updated', ns) || new Date().toISOString();
+    
+    var ytVideoId = ytVideoIdEl ? ytVideoIdEl.getText() : extractYouTubeId(link);
+    var mediaType = ytVideoId ? 'video' : 'article';
+    var itemId = ytVideoId || Utilities.base64Encode(link).substring(0, 15).replace(/[^a-zA-Z0-9]/g, '');
+    
+    var previewImage = '';
+    if (mediaNs) {
+      var mediaGroup = entry.getChild('group', mediaNs);
+      if (mediaGroup) {
+        var mediaThumbnail = mediaGroup.getChild('thumbnail', mediaNs);
+        if (mediaThumbnail && mediaThumbnail.getAttribute('url')) {
+          previewImage = mediaThumbnail.getAttribute('url').getValue();
+        }
+      }
+    }
+    
+    if (!previewImage) {
+      var content = entry.getChildText('content', ns) || entry.getChildText('summary', ns) || '';
+      var imgMatch = content.match(/<img[^>]+src="([^">]+)"/);
+      if (imgMatch) previewImage = imgMatch[1];
+    }
+    
     videos.push({
-      video_id: videoId,
+      video_id: itemId,
+      media_type: mediaType,
       channel_name: channelName,
       title: title,
-      url: url,
-      published_at: published,
+      url: link,
+      preview_image: previewImage,
+      published_at: new Date(published).toISOString(),
       tier: tier,
       category: category,
     });
   }
+  return videos;
+}
 
+function parseRegex(xml, channelName, tier, category) {
+  var videos = [];
+  var itemRegex = /<item>([\s\S]*?)<\/item>/gi;
+  var match;
+  while ((match = itemRegex.exec(xml)) !== null) {
+    var itemXml = match[1];
+    var titleMatch = itemXml.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>/i) || itemXml.match(/<title>([\s\S]*?)<\/title>/i);
+    var linkMatch = itemXml.match(/<link>([\s\S]*?)<\/link>/i);
+    var pubDateMatch = itemXml.match(/<pubDate>([\s\S]*?)<\/pubDate>/i);
+    
+    if (!titleMatch || !linkMatch) continue;
+    
+    var title = titleMatch[1].trim();
+    var link = linkMatch[1].trim();
+    var pubDate = pubDateMatch ? pubDateMatch[1].trim() : new Date().toISOString();
+    
+    var videoId = extractYouTubeId(link);
+    var mediaType = videoId ? 'video' : 'article';
+    var itemId = videoId || Utilities.base64Encode(link).substring(0, 15).replace(/[^a-zA-Z0-9]/g, '');
+    
+    var previewImage = '';
+    var imgMatch = itemXml.match(/<media:content[^>]+url="([^">]+)"/i) || itemXml.match(/<media:thumbnail[^>]+url="([^">]+)"/i) || itemXml.match(/<img[^>]+src="([^">]+)"/i);
+    if (imgMatch) previewImage = imgMatch[1];
+    
+    videos.push({
+      video_id: itemId,
+      media_type: mediaType,
+      channel_name: channelName,
+      title: title,
+      url: link,
+      preview_image: previewImage,
+      published_at: new Date(pubDate).toISOString(),
+      tier: tier,
+      category: category,
+    });
+  }
   return videos;
 }
 

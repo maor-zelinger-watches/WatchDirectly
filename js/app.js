@@ -6,7 +6,7 @@
  */
 
 import { createApiClient } from './api.js';
-import { createVideoCard, sortVideos } from './feed.js';
+import { createMediaCard, sortVideos } from './feed.js';
 import { buildCommentTree, createCommentThread, createCommentHtml } from './comments.js';
 import { initAuth, renderSignInButton, getCurrentUser, isSignedIn, getToken, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
@@ -191,16 +191,16 @@ function appendCards(videos) {
     sorted.forEach((video, i) => {
       setTimeout(() => {
         const wrapper = document.createElement('div');
-        wrapper.innerHTML = createVideoCard(video);
+        wrapper.innerHTML = createMediaCard(video);
         const card = wrapper.firstElementChild;
-        card.classList.add('video-card--entering');
+        card.classList.add('media-card--entering');
         feedContainer.appendChild(card);
 
         requestAnimationFrame(() => {
-          card.classList.remove('video-card--entering');
+          card.classList.remove('media-card--entering');
         });
 
-        const toggle = card.querySelector('.video-card__comments-toggle');
+        const toggle = card.querySelector('.media-card__comments-toggle');
         if (toggle) {
           toggle.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -270,7 +270,7 @@ async function revalidateCommentCounts() {
     const freshVideos = data.videos || [];
 
     for (const video of freshVideos) {
-      const toggle = document.querySelector(`.video-card__comments-toggle[data-video-id="${video.video_id}"]`);
+      const toggle = document.querySelector(`.media-card__comments-toggle[data-video-id="${video.video_id}"]`);
       if (toggle) {
         const currentCount = parseInt(toggle.textContent.replace(/[^0-9]/g, '')) || 0;
         const freshCount = video.comment_count || 0;
@@ -327,7 +327,7 @@ function setupInfiniteScroll() {
 // ============================================================
 
 function toggleComments(videoId) {
-  const body = document.querySelector(`.video-card__comments-body[data-video-id="${videoId}"]`);
+  const body = document.querySelector(`.media-card__comments-body[data-video-id="${videoId}"]`);
   if (!body) return;
 
   const isExpanded = body.style.display !== 'none';
@@ -344,7 +344,7 @@ function toggleComments(videoId) {
 }
 
 async function loadInlineComments(videoId) {
-  const listEl = document.querySelector(`.video-card__comments-list[data-video-id="${videoId}"]`);
+  const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${videoId}"]`);
   if (!listEl) return;
 
   listEl.innerHTML = '<div class="comments-loading-inline"><div class="spinner"></div></div>';
@@ -354,7 +354,7 @@ async function loadInlineComments(videoId) {
     const comments = data.comments || [];
     const tree = buildCommentTree(comments);
 
-    const toggleBtn = document.querySelector(`.video-card__comments-toggle[data-video-id="${videoId}"]`);
+    const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${videoId}"]`);
     if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
 
     if (tree.length === 0) {
@@ -370,8 +370,8 @@ async function loadInlineComments(videoId) {
 }
 
 function updateInlineCommentFormUI(videoId) {
-  const authPrompt = document.querySelector(`.video-card__auth-prompt[data-video-id="${videoId}"]`);
-  const form = document.querySelector(`.video-card__comment-form[data-video-id="${videoId}"]`);
+  const authPrompt = document.querySelector(`.media-card__auth-prompt[data-video-id="${videoId}"]`);
+  const form = document.querySelector(`.media-card__comment-form[data-video-id="${videoId}"]`);
   if (!authPrompt || !form) return;
 
   if (getCurrentUser()) {
@@ -384,12 +384,12 @@ function updateInlineCommentFormUI(videoId) {
 }
 
 function setupInlineCommentForm(videoId) {
-  const form = document.querySelector(`.video-card__comment-form[data-video-id="${videoId}"]`);
-  const textarea = document.querySelector(`.video-card__textarea[data-video-id="${videoId}"]`);
+  const form = document.querySelector(`.media-card__comment-form[data-video-id="${videoId}"]`);
+  const textarea = document.querySelector(`.media-card__textarea[data-video-id="${videoId}"]`);
   if (!form || !textarea || form.dataset.bound) return;
   form.dataset.bound = 'true';
 
-  const charcount = form.querySelector('.video-card__charcount');
+  const charcount = form.querySelector('.media-card__charcount');
   textarea.addEventListener('input', () => {
     if (charcount) charcount.textContent = `${textarea.value.length}/2000`;
   });
@@ -441,7 +441,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
       repliesContainer.insertAdjacentHTML('beforeend', html);
     }
   } else {
-    const listEl = document.querySelector(`.video-card__comments-list[data-video-id="${videoId}"]`);
+    const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${videoId}"]`);
     if (listEl) {
       const empty = listEl.querySelector('.comments-empty');
       if (empty) empty.remove();
@@ -450,7 +450,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
   }
 
   // Update comment count
-  const toggleBtn = document.querySelector(`.video-card__comments-toggle[data-video-id="${videoId}"]`);
+  const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${videoId}"]`);
   let previousCount = 0;
   if (toggleBtn) {
     previousCount = parseInt(toggleBtn.textContent.replace(/[^0-9]/g, '')) || 0;
@@ -523,7 +523,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
 }
 
 function attachReplyHandlers(videoId) {
-  const card = document.querySelector(`.video-card[data-video-id="${videoId}"]`);
+  const card = document.querySelector(`.media-card[data-video-id="${videoId}"]`);
   if (!card) return;
 
   card.querySelectorAll('.reply-btn').forEach(btn => {
@@ -534,7 +534,7 @@ function attachReplyHandlers(videoId) {
 }
 
 function toggleReplyForm(videoId, commentId) {
-  const card = document.querySelector(`.video-card[data-video-id="${videoId}"]`);
+  const card = document.querySelector(`.media-card[data-video-id="${videoId}"]`);
   if (card) card.querySelectorAll('.reply-form').forEach(f => f.remove());
 
   if (!isSignedIn()) {
