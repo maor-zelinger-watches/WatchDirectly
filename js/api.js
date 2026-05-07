@@ -123,6 +123,40 @@ export function createApiClient(baseUrl) {
      * @returns {Promise<{comments: Object[]}>}
      */
     async fetchComments(videoId) {
+      if ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && !navigator.webdriver) {
+        // Return fake comments for local dev server testing
+        return {
+          comments: [
+            {
+              comment_id: 'fake_1',
+              parent_id: '',
+              user_name: 'Local Tester',
+              user_avatar: 'https://ui-avatars.com/api/?name=Local+Tester&background=random',
+              body: 'This is a fake top-level comment to test the UI locally.',
+              created_at: new Date(Date.now() - 3600000).toISOString(),
+              depth: 0
+            },
+            {
+              comment_id: 'fake_2',
+              parent_id: 'fake_1',
+              user_name: 'Dev Reply',
+              user_avatar: 'https://ui-avatars.com/api/?name=Dev+Reply&background=random',
+              body: 'And this is a nested reply to make sure threading works!',
+              created_at: new Date(Date.now() - 1800000).toISOString(),
+              depth: 1
+            },
+            {
+              comment_id: 'fake_3',
+              parent_id: '',
+              user_name: 'Second User',
+              user_avatar: 'https://ui-avatars.com/api/?name=Second+User&background=random',
+              body: 'Here is another top-level comment. The UI should look great.',
+              created_at: new Date(Date.now() - 60000).toISOString(),
+              depth: 0
+            }
+          ]
+        };
+      }
       return get(`action=comments&videoId=${videoId}`);
     },
 

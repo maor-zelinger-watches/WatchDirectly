@@ -22,17 +22,18 @@ export function createVideoCard(video) {
     category: sanitizeHtml(video.category),
   };
 
+  const isEager = false; // app.js handles progressive loading
+
   return `
     <article class="video-card" data-video-id="${video.video_id}">
       <div class="video-card__grid">
         <div class="video-card__embed">
           <iframe
-            src="https://www.youtube-nocookie.com/embed/${video.video_id}"
+            data-src="https://www.youtube-nocookie.com/embed/${video.video_id}"
             title="${escaped.title}"
             frameborder="0"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
             allowfullscreen
-            loading="lazy"
           ></iframe>
         </div>
         <div class="video-card__content">
