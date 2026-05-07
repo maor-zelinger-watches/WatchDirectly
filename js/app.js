@@ -44,8 +44,17 @@ const api = createApiClient(CONFIG.APPS_SCRIPT_URL);
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', () => {
-  initAuth(CONFIG.GOOGLE_CLIENT_ID);
-  setupAuthUI();
+  // GSI SDK loads async — retry until it's available
+  function tryInitAuth() {
+    if (typeof google !== 'undefined' && google.accounts) {
+      initAuth(CONFIG.GOOGLE_CLIENT_ID);
+      setupAuthUI();
+    } else {
+      setTimeout(tryInitAuth, 200);
+    }
+  }
+  tryInitAuth();
+
   setupFilterTabs();
   setupLoadMore();
   setupCommentForm();
@@ -162,12 +171,15 @@ function renderFeed() {
   const hasMore = state.videos.length < state.totalVideos;
   loadMore.style.display = hasMore ? '' : 'none';
 
-  // Attach click handlers to comment buttons
-  feedContainer.querySelectorAll('.video-card__comments-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const videoId = e.currentTarget.dataset.videoId;
+  // Attach click handlers to entire video card (except iframe)
+  feedContainer.querySelectorAll('.video-card').forEach(card => {
+    card.addEventListener('click', (e) => {
+      // Don't navigate if clicking on the iframe itself
+      if (e.target.tagName === 'IFRAME') return;
+      const videoId = card.dataset.videoId;
       navigate(`#/post/${videoId}`);
     });
+    card.style.cursor = 'pointer';
   });
 }
 
