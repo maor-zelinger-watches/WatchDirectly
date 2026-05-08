@@ -339,14 +339,28 @@ function fetchAllFeeds() {
 }
 
 function fetchAndParseFeed(feedUrl, channelName, tier, category) {
-  var response = UrlFetchApp.fetch(feedUrl, { muteHttpExceptions: true });
+  var maxRetries = 4;
+  var lastError = null;
 
-  if (response.getResponseCode() !== 200) {
-    throw new Error('HTTP ' + response.getResponseCode());
+  for (var attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      var delay = Math.pow(2, attempt) * 1000; // 2s, 4s
+      log('WARN', 'fetchAndParseFeed', 'Retry ' + attempt + '/' + maxRetries + ' for ' + channelName + ' after ' + (delay/1000) + 's');
+      Utilities.sleep(delay);
+    }
+
+    var response = UrlFetchApp.fetch(feedUrl, { muteHttpExceptions: true });
+    var code = response.getResponseCode();
+
+    if (code === 200) {
+      var xml = response.getContentText();
+      return parseRssFeed(xml, channelName, tier, category);
+    }
+
+    lastError = 'HTTP ' + code;
   }
 
-  var xml = response.getContentText();
-  return parseRssFeed(xml, channelName, tier, category);
+  throw new Error(lastError);
 }
 
 function extractYouTubeId(url) {
