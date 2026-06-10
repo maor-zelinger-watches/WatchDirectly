@@ -110,6 +110,26 @@ export function createMediaCard(item) {
 }
 
 /**
+ * Filters videos by a free-text query (matched against title and channel
+ * name, case-insensitive) and/or an exact category.
+ * Returns a new array — does not mutate the input.
+ *
+ * @param {Object[]} videos - Media items from the API
+ * @param {{query?: string, category?: string}} filter
+ * @returns {Object[]} Matching videos, in their original order
+ */
+export function filterVideos(videos, { query = '', category = '' } = {}) {
+  const q = query.trim().toLowerCase();
+  return videos.filter(v => {
+    if (category && v.category !== category) return false;
+    if (!q) return true;
+    const title = (v.title || '').toLowerCase();
+    const channel = (v.channel_name || '').toLowerCase();
+    return title.includes(q) || channel.includes(q);
+  });
+}
+
+/**
  * Sorts videos in reverse chronological order (newest first).
  * Returns a new array — does not mutate the input.
  */

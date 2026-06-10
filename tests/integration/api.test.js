@@ -164,6 +164,48 @@ describe('API Client', () => {
     });
   });
 
+  describe('fetchCommentsBatch', () => {
+    it('calls the correct URL with comma-separated videoIds', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', byVideo: { v1: [], v2: [] } }),
+      });
+
+      await api.fetchCommentsBatch(['v1', 'v2']);
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${MOCK_APPS_SCRIPT_URL}?action=commentsBatch&videoIds=v1,v2`,
+        expect.any(Object)
+      );
+    });
+
+    it('URL-encodes video ids', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', byVideo: {} }),
+      });
+
+      await api.fetchCommentsBatch(['a&b', 'c d']);
+
+      const calledUrl = fetchMock.mock.calls[0][0];
+      expect(calledUrl).toContain('videoIds=a%26b,c%20d');
+    });
+
+    it('returns the byVideo map', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'ok',
+          byVideo: { v1: mockCommentsResponse.comments, v2: [] },
+        }),
+      });
+
+      const result = await api.fetchCommentsBatch(['v1', 'v2']);
+      expect(result.byVideo.v1).toHaveLength(1);
+      expect(result.byVideo.v2).toEqual([]);
+    });
+  });
+
   describe('postComment', () => {
     it('sends a POST request with token-only auth', async () => {
       fetchMock.mockResolvedValueOnce({

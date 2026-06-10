@@ -6,7 +6,7 @@
  */
 
 import { createApiClient } from './api.js';
-import { createMediaCard } from './feed.js';
+import { createMediaCard, filterVideos } from './feed.js';
 import { buildCommentTree, createCommentThread, createCommentHtml } from './comments.js';
 import { initAuth, renderSignInButton, getCurrentUser, isSignedIn, getToken, isTokenExpired, refreshToken, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
@@ -19,6 +19,8 @@ const CONFIG = {
   APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwyt7c8SWw9y0TnKq4RhcV7yLjS1JkXnNThYInpj-EnNYbA3ecgwVSX4gBIACNKHCqu0A/exec',
   GOOGLE_CLIENT_ID: '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com',
   PAGE_SIZE: 10,
+  COMMENT_BATCH_SIZE: 10,     // ids per commentsBatch request (backend caps at 20)
+  SEARCH_INDEX_LIMIT: 1000,   // one page big enough to hold the whole catalog
 };
 
 // ============================================================
@@ -34,6 +36,10 @@ const state = {
   expandedComments: new Set(),
   commentsCache: {},   // videoId -> { comments, tree } — prefetched comment data
   initialLoadComplete: false,
+  filter: { query: '', category: '' },
+  searchIndex: null,        // all videos, fetched lazily on first search/filter
+  searchIndexPromise: null, // in-flight index fetch (dedupes concurrent requests)
+  filterRenderToken: 0,     // invalidates stale filter renders after async index load
 };
 
 const api = createApiClient(CONFIG.APPS_SCRIPT_URL);
@@ -73,6 +79,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   tryInitAuth();
 
   setupInfiniteScroll();
+  setupFeedControls();
 
   const cached = await showCachedFeed();
   if (!cached) {
@@ -88,7 +95,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ============================================================
 
 async function loadNextPage() {
-  if (state.loading || !state.hasMore) return;
+  if (state.loading || !state.hasMore || isFilterActive()) return;
   state.loading = true;
 
   const skeleton = document.getElementById('feed-skeleton');
@@ -164,8 +171,8 @@ async function loadNextPage() {
   } finally {
     state.loading = false;
     skeleton.style.display = 'none';
-    
-    if (!state.hasMore) {
+
+    if (!state.hasMore || isFilterActive()) {
       sentinel.style.display = 'none';
     } else {
       sentinel.style.display = '';
@@ -183,12 +190,43 @@ async function loadNextPage() {
 }
 
 /**
+ * Builds a card element from a media item and wires up its comment
+ * toggle. Caller inserts it into the DOM, then calls observeLazyIframe —
+ * observing must happen after insertion so the first intersection
+ * snapshot already sees an attached, visible element.
+ */
+function buildCard(video) {
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = createMediaCard(video);
+  const card = wrapper.firstElementChild;
+
+  const toggle = card.querySelector('.media-card__comments-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleComments(toggle.dataset.videoId);
+    });
+  }
+
+  return card;
+}
+
+function observeLazyIframe(card) {
+  const iframe = card.querySelector('iframe[data-src]');
+  if (iframe) {
+    iframeObserver.observe(iframe);
+  }
+}
+
+/**
  * Append video cards one at a time with staggered timing.
  * Returns a Promise that resolves when all cards have been appended.
  */
 function appendCards(videos) {
   return new Promise((resolve) => {
-    if (videos.length === 0) {
+    // While a search/filter view is showing, the feed container holds
+    // filtered results — don't append paginated cards into it.
+    if (videos.length === 0 || isFilterActive()) {
       resolve();
       return;
     }
@@ -214,28 +252,14 @@ function appendCards(videos) {
           return;
         }
 
-        const wrapper = document.createElement('div');
-        wrapper.innerHTML = createMediaCard(video);
-        const card = wrapper.firstElementChild;
+        const card = buildCard(video);
         card.classList.add('media-card--entering');
         feedContainer.appendChild(card);
+        observeLazyIframe(card);
 
         requestAnimationFrame(() => {
           card.classList.remove('media-card--entering');
         });
-
-        const toggle = card.querySelector('.media-card__comments-toggle');
-        if (toggle) {
-          toggle.addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleComments(toggle.dataset.videoId);
-          });
-        }
-
-        const iframe = card.querySelector('iframe[data-src]');
-        if (iframe) {
-          iframeObserver.observe(iframe);
-        }
 
         // Resolve when the last card is appended
         if (i === deduped.length - 1) {
@@ -313,6 +337,20 @@ async function revalidateFeed() {
       return;
     }
 
+    // A search/filter view owns the container — update state and cache
+    // only, the normal feed re-renders when the filter clears.
+    if (isFilterActive()) {
+      state.videos = freshVideos;
+      state.totalVideos = data.total || freshVideos.length;
+      state.currentPage = 1;
+      state.hasMore = state.videos.length < state.totalVideos;
+      localStorage.setItem('wd_feed_cache', JSON.stringify({
+        videos: freshVideos,
+        total: state.totalVideos,
+      }));
+      return;
+    }
+
     const container = document.getElementById('feed-container');
     if (!container) return;
 
@@ -362,9 +400,7 @@ async function revalidateFeed() {
       const freshIndex = freshVideos.indexOf(video);
       const existingCards = container.querySelectorAll('.media-card');
 
-      const wrapper = document.createElement('div');
-      wrapper.innerHTML = createMediaCard(video);
-      const card = wrapper.firstElementChild;
+      const card = buildCard(video);
       card.classList.add('media-card--entering');
 
       // Insert at the correct position
@@ -373,19 +409,7 @@ async function revalidateFeed() {
       } else {
         container.insertBefore(card, existingCards[freshIndex]);
       }
-
-      // Wire up comment toggle
-      const toggle = card.querySelector('.media-card__comments-toggle');
-      if (toggle) {
-        toggle.addEventListener('click', (e) => {
-          e.stopPropagation();
-          toggleComments(toggle.dataset.videoId);
-        });
-      }
-
-      // Wire up lazy-load observer
-      const iframe = card.querySelector('iframe[data-src]');
-      if (iframe) iframeObserver.observe(iframe);
+      observeLazyIframe(card);
 
       // Trigger enter animation
       requestAnimationFrame(() => {
@@ -459,6 +483,145 @@ function setupInfiniteScroll() {
 }
 
 // ============================================================
+// SEARCH & CATEGORY FILTER
+// ============================================================
+
+function isFilterActive() {
+  return !!(state.filter.query.trim() || state.filter.category);
+}
+
+/**
+ * Loads the full catalog once (titles, channels, categories) so search
+ * and filters work across everything, not just the pages scrolled so far.
+ * The whole catalog is small (~300 items), so one request covers it.
+ */
+function ensureSearchIndex() {
+  if (state.searchIndex) return Promise.resolve(state.searchIndex);
+
+  if (!state.searchIndexPromise) {
+    state.searchIndexPromise = api.fetchFeed(1, CONFIG.SEARCH_INDEX_LIMIT)
+      .then(data => {
+        state.searchIndex = data.videos || [];
+        return state.searchIndex;
+      })
+      .catch(error => {
+        // Allow a retry on the next keystroke
+        state.searchIndexPromise = null;
+        throw error;
+      });
+  }
+
+  return state.searchIndexPromise;
+}
+
+function setupFeedControls() {
+  const input = document.getElementById('search-input');
+  const chipsContainer = document.getElementById('category-chips');
+  if (!input) return;
+
+  // Category chips come from the curated creator list
+  fetch('./creators.json')
+    .then(r => r.json())
+    .then(creators => {
+      const categories = [...new Set(creators.map(c => c.category))];
+      renderCategoryChips(chipsContainer, categories);
+    })
+    .catch(() => { /* chips are an enhancement — search still works without them */ });
+
+  // Warm the search index as soon as the user shows intent
+  input.addEventListener('focus', () => {
+    ensureSearchIndex().catch(() => {});
+  }, { once: true });
+
+  let debounceTimer;
+  input.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      state.filter.query = input.value;
+      applyFilter();
+    }, 250);
+  });
+}
+
+function renderCategoryChips(container, categories) {
+  if (!container) return;
+
+  container.innerHTML = ['All', ...categories].map(label => {
+    const value = label === 'All' ? '' : label;
+    const active = value === state.filter.category ? ' chip--active' : '';
+    return `<button type="button" class="chip${active}" data-category="${sanitizeHtml(value)}">${sanitizeHtml(label)}</button>`;
+  }).join('');
+
+  container.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      state.filter.category = chip.dataset.category;
+      container.querySelectorAll('.chip').forEach(c => {
+        c.classList.toggle('chip--active', c === chip);
+      });
+      applyFilter();
+    });
+  });
+}
+
+/**
+ * Renders the feed for the current filter state.
+ * Active filter: matches from the full search index, no infinite scroll.
+ * Cleared filter: restores the normal paginated feed from state.videos.
+ */
+async function applyFilter() {
+  const container = document.getElementById('feed-container');
+  const sentinel = document.getElementById('load-more-container');
+  const empty = document.getElementById('feed-empty');
+  if (!container) return;
+
+  const token = ++state.filterRenderToken;
+
+  if (!isFilterActive()) {
+    // Restore the normal infinite-scroll feed
+    container.innerHTML = '';
+    state.expandedComments.clear();
+    for (const video of state.videos) {
+      const card = buildCard(video);
+      container.appendChild(card);
+      observeLazyIframe(card);
+    }
+    empty.querySelector('p').textContent = 'No videos yet. Check back soon!';
+    empty.style.display = state.videos.length === 0 ? '' : 'none';
+    sentinel.style.display = state.hasMore ? '' : 'none';
+    return;
+  }
+
+  let index;
+  try {
+    index = await ensureSearchIndex();
+  } catch (error) {
+    console.error('Failed to load search index:', error);
+    showToast('Search is unavailable right now. Please try again.', 'error');
+    return;
+  }
+
+  // The filter may have changed while the index was loading
+  if (token !== state.filterRenderToken) return;
+
+  const matches = filterVideos(index, state.filter);
+
+  container.innerHTML = '';
+  state.expandedComments.clear();
+  sentinel.style.display = 'none';
+
+  for (const video of matches) {
+    const card = buildCard(video);
+    container.appendChild(card);
+    observeLazyIframe(card);
+  }
+
+  empty.querySelector('p').textContent = 'No videos match your search.';
+  empty.style.display = matches.length === 0 ? '' : 'none';
+
+  prefetchComments(matches.slice(0, CONFIG.PAGE_SIZE));
+}
+
+// ============================================================
 // INLINE COMMENTS
 // ============================================================
 
@@ -523,56 +686,66 @@ function renderComments(videoId, listEl, comments, tree) {
 }
 
 /**
- * Prefetches comments for a batch of videos in the background.
- * Uses sequential fetching with a small delay to avoid
- * hitting Google Apps Script rate limits (which strip CORS headers).
+ * Prefetches comments in the background so expanding a card is instant.
+ *
+ * Only videos with at least one comment are fetched — the feed payload
+ * already carries comment_count, and zero-count videos load on expand.
+ * IDs are grouped into commentsBatch requests so a page of cards costs
+ * one Apps Script execution instead of one per video (the web app caps
+ * simultaneous executions, and per-video prefetch was the main load).
  */
 function prefetchComments(videos) {
   const queue = videos
-    .filter(v => v.video_id && !state.commentsCache[v.video_id])
+    .filter(v => v.video_id && !state.commentsCache[v.video_id] && (v.comment_count || 0) > 0)
     .map(v => v.video_id);
 
   if (queue.length === 0) return;
 
+  const chunks = [];
+  for (let i = 0; i < queue.length; i += CONFIG.COMMENT_BATCH_SIZE) {
+    chunks.push(queue.slice(i, i + CONFIG.COMMENT_BATCH_SIZE));
+  }
+
   let index = 0;
 
-  function fetchNext() {
-    if (index >= queue.length) return;
+  function fetchNextChunk() {
+    if (index >= chunks.length) return;
 
-    const id = queue[index++];
-
-    // Skip if cached in the meantime (e.g. user expanded manually)
-    if (state.commentsCache[id]) {
-      fetchNext();
+    // Skip ids cached in the meantime (e.g. user expanded manually)
+    const ids = chunks[index++].filter(id => !state.commentsCache[id]);
+    if (ids.length === 0) {
+      fetchNextChunk();
       return;
     }
 
-    api.fetchComments(id)
+    api.fetchCommentsBatch(ids)
       .then(data => {
-        const comments = data.comments || [];
-        const tree = buildCommentTree(comments);
-        state.commentsCache[id] = { comments, tree };
+        // Backend without commentsBatch support — comments load on expand
+        if (!data.byVideo) return;
 
-        // If the user already expanded this card while we were fetching, render now
-        if (state.expandedComments.has(id)) {
-          const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${id}"]`);
-          if (listEl) renderComments(id, listEl, comments, tree);
+        for (const id of ids) {
+          const comments = data.byVideo[id] || [];
+          const tree = buildCommentTree(comments);
+          state.commentsCache[id] = { comments, tree };
+
+          // If the user already expanded this card while we were fetching, render now
+          if (state.expandedComments.has(id)) {
+            const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${id}"]`);
+            if (listEl) renderComments(id, listEl, comments, tree);
+          }
+
+          // Update the comment count badge from real data
+          const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${id}"]`);
+          if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
         }
 
-        // Update the comment count badge from real data
-        const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${id}"]`);
-        if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
+        // Stagger next batch to stay under rate limits
+        setTimeout(fetchNextChunk, 300);
       })
-      .catch(() => { /* silent — user can still load on expand */ })
-      .finally(() => {
-        // Stagger next request by 300ms to stay under rate limit
-        setTimeout(fetchNext, 300);
-      });
+      .catch(() => { /* silent — stop prefetching, comments still load on expand */ });
   }
 
-  // Start 2 concurrent workers
-  fetchNext();
-  fetchNext();
+  fetchNextChunk();
 }
 
 function updateInlineCommentFormUI(videoId) {

@@ -258,6 +258,79 @@ img {
 
 
 /* ============================================================
+   SEARCH & FILTER CONTROLS
+   ============================================================ */
+
+/* No horizontal padding — aligns with the full-bleed feed cards */
+.feed-controls {
+  padding: var(--sp-2) 0 0;
+}
+
+.feed-controls__search {
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  font-family: var(--font-family);
+  font-size: var(--fs-base);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.feed-controls__search:focus {
+  border-color: var(--accent);
+}
+
+.feed-controls__search::placeholder {
+  color: var(--text-muted);
+}
+
+.feed-controls__chips {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: var(--sp-1);
+}
+
+.feed-controls__chips::-webkit-scrollbar {
+  display: none;
+}
+
+.chip {
+  flex-shrink: 0;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+}
+
+.chip:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.chip--active {
+  color: var(--bg-canvas);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.chip--active:hover {
+  color: var(--bg-canvas);
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* ============================================================
    VIDEO CARD — Grid Layout (thumbnail left, info right)
    ============================================================ */
 

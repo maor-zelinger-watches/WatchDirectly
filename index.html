@@ -47,6 +47,19 @@
     <!-- Feed View -->
     <section class="feed-view" id="feed-view">
 
+      <!-- Search & Category Filters -->
+      <div class="feed-controls" id="feed-controls">
+        <input
+          type="search"
+          class="feed-controls__search"
+          id="search-input"
+          placeholder="Search videos or channels…"
+          autocomplete="off"
+          aria-label="Search videos or channels"
+        >
+        <div class="feed-controls__chips" id="category-chips" role="group" aria-label="Filter by category"></div>
+      </div>
+
       <!-- Feed Cards Container -->
       <div class="feed" id="feed-container">
         <!-- Video cards with inline comments rendered here by JS -->

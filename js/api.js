@@ -87,6 +87,18 @@ export function createApiClient(baseUrl) {
     },
 
     /**
+     * Fetches comments for multiple videos in one request.
+     * Costs a single Apps Script execution for the whole batch.
+     *
+     * @param {string[]} videoIds - YouTube video IDs / article item IDs (max 20)
+     * @returns {Promise<{byVideo: Object<string, Object[]>}>}
+     */
+    async fetchCommentsBatch(videoIds) {
+      const ids = videoIds.map(encodeURIComponent).join(',');
+      return get(`action=commentsBatch&videoIds=${ids}`);
+    },
+
+    /**
      * Posts a new comment. Requires a valid Google ID token.
      * Token is verified server-side via Google's tokeninfo endpoint.
      * 

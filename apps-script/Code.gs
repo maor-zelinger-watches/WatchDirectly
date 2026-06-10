@@ -93,6 +93,8 @@ function doGet(e) {
         return jsonResponse(handleFeed(e.parameter));
       case 'comments':
         return jsonResponse(handleComments(e.parameter));
+      case 'commentsBatch':
+        return jsonResponse(handleCommentsBatch(e.parameter));
       case 'refresh':
         return jsonResponse(handleRefresh());
       case 'logs':
@@ -813,6 +815,54 @@ function getComments(videoId) {
   });
 
   return { status: 'ok', comments: comments };
+}
+
+/**
+ * Returns comments for multiple videos in a single execution.
+ * One sheet read serves the whole batch, so prefetching N cards
+ * costs 1 web app execution instead of N.
+ *
+ * @param {Object} params - { videoIds: 'id1,id2,...' } (max 20 ids)
+ * @returns {Object} { status: 'ok', byVideo: { videoId: [comments] } }
+ */
+function handleCommentsBatch(params) {
+  var raw = params.videoIds || '';
+  var ids = raw.split(',').filter(function(id) { return id; }).slice(0, 20);
+
+  if (ids.length === 0) {
+    return { status: 'error', message: 'videoIds is required' };
+  }
+
+  var byVideo = {};
+  ids.forEach(function(id) { byVideo[id] = []; });
+
+  var sheet = getSheet('COMMENTS');
+  var data = sheet.getDataRange().getValues();
+
+  if (data.length > 1) {
+    var headers = data[0];
+    var videoIdCol = findVideoIdCol(headers);
+
+    for (var i = 1; i < data.length; i++) {
+      var vid = data[i][videoIdCol];
+      if (!byVideo[vid]) continue;
+
+      var comment = {};
+      for (var j = 0; j < headers.length; j++) {
+        comment[headers[j]] = data[i][j];
+      }
+      byVideo[vid].push(comment);
+    }
+
+    // Sort each video's comments by created_at ascending (oldest first for threading)
+    ids.forEach(function(id) {
+      byVideo[id].sort(function(a, b) {
+        return new Date(a.created_at) - new Date(b.created_at);
+      });
+    });
+  }
+
+  return { status: 'ok', byVideo: byVideo };
 }
 
 function handleAddComment(data) {

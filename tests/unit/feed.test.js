@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createMediaCard, sortVideos } from '../../js/feed.js';
+import { createMediaCard, sortVideos, filterVideos } from '../../js/feed.js';
 
 const mockVideo = {
   video_id: 'abc12345678',
@@ -102,6 +102,62 @@ describe('createMediaCard (article)', () => {
     const xssArticle = { ...mockArticle, url: 'javascript:alert(1)' };
     const html = createMediaCard(xssArticle);
     expect(html).not.toContain('javascript:');
+  });
+});
+
+describe('filterVideos', () => {
+  const catalog = [
+    { ...mockVideo, video_id: 'f1aaaaaaaaa', title: 'Tudor Black Bay 58 Review', channel_name: 'Teddy Baldassarre', category: 'The Heavyweights & Entertainment' },
+    { ...mockVideo, video_id: 'f2bbbbbbbbb', title: 'Best Budget Watches 2026', channel_name: 'Just One More Watch', category: 'The Affordable & "Value" Kings' },
+    { ...mockVideo, video_id: 'f3ccccccccc', title: 'Reacting to a $1M Collection', channel_name: 'Nico Leonard', category: 'The Heavyweights & Entertainment' },
+  ];
+
+  it('matches query against the title, case-insensitive', () => {
+    const result = filterVideos(catalog, { query: 'tudor' });
+    expect(result).toHaveLength(1);
+    expect(result[0].video_id).toBe('f1aaaaaaaaa');
+  });
+
+  it('matches query against the channel name', () => {
+    const result = filterVideos(catalog, { query: 'nico' });
+    expect(result).toHaveLength(1);
+    expect(result[0].video_id).toBe('f3ccccccccc');
+  });
+
+  it('filters by exact category', () => {
+    const result = filterVideos(catalog, { category: 'The Heavyweights & Entertainment' });
+    expect(result).toHaveLength(2);
+  });
+
+  it('combines query and category', () => {
+    const result = filterVideos(catalog, { query: 'collection', category: 'The Heavyweights & Entertainment' });
+    expect(result).toHaveLength(1);
+    expect(result[0].video_id).toBe('f3ccccccccc');
+  });
+
+  it('returns everything for an empty filter', () => {
+    expect(filterVideos(catalog, {})).toHaveLength(3);
+    expect(filterVideos(catalog)).toHaveLength(3);
+  });
+
+  it('treats whitespace-only query as empty', () => {
+    expect(filterVideos(catalog, { query: '   ' })).toHaveLength(3);
+  });
+
+  it('returns empty array when nothing matches', () => {
+    expect(filterVideos(catalog, { query: 'submariner' })).toEqual([]);
+  });
+
+  it('handles items with missing title or channel', () => {
+    const sparse = [{ video_id: 'x1', category: 'Misc' }];
+    expect(filterVideos(sparse, { query: 'anything' })).toEqual([]);
+    expect(filterVideos(sparse, { category: 'Misc' })).toHaveLength(1);
+  });
+
+  it('does not mutate the input array', () => {
+    const original = [...catalog];
+    filterVideos(catalog, { query: 'tudor' });
+    expect(catalog).toEqual(original);
   });
 });
 
