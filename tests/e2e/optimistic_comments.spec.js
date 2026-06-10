@@ -56,7 +56,7 @@ test.describe('Optimistic UI Comments', () => {
         name: 'Test User',
         email: 'test@example.com',
         picture: 'https://ui-avatars.com/api/?name=Test+User',
-        token: 'fake_token'
+        token: 'abc.eyJleHAiOjI1MjQ2MDgwMDB9.xyz'
       }));
     });
 

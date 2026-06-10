@@ -385,11 +385,10 @@ test.describe('Common Issues', () => {
     await page.goto('/');
     await waitForCards(page);
 
-    // The stale/deleted item is expected to show because the cache rendered it.
-    // This test documents the behavior — stale items persist until the cache is fully refreshed.
+    // The stale/deleted item should be removed after the cache is revalidated with fresh data.
     const ids = await getAllCardIds(page);
-    // We expect 3 cards from cache (including the stale one)
-    // This is documenting current behavior, not necessarily ideal behavior.
-    expect(ids).toContain('DELETED_01');
+    expect(ids).not.toContain('DELETED_01');
+    expect(ids).toContain('current_01');
+    expect(ids).toContain('current_02');
   });
 });
