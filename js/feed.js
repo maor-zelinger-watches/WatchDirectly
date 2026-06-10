@@ -42,12 +42,22 @@ export function createMediaCard(item) {
   const isArticle = item.media_type === 'article' || (item.video_id && item.video_id.length > 11);
   const cardClass = isArticle ? 'article-card media-card' : 'video-card media-card';
   
+  // The whole image is one link — hover overlays don't exist on touch.
+  // The "Read Article" pill is a span inside it (anchors can't nest).
+  const articleMedia = safeUrl(item.preview_image)
+    ? `<img src="${sanitizeHtml(safeUrl(item.preview_image))}" alt="${escaped.title}" class="article-card__img" loading="lazy">`
+    : `<div class="article-card__placeholder">📰</div>`;
+
   const embedHtml = isArticle ? `
     <div class="article-card__embed">
-      ${safeUrl(item.preview_image) ? `<img src="${sanitizeHtml(safeUrl(item.preview_image))}" alt="${escaped.title}" class="article-card__img" loading="lazy">` : `<div class="article-card__placeholder">📰</div>`}
-      <div class="article-card__overlay">
-        ${safeUrl(item.url) ? `<a href="${sanitizeHtml(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer" class="btn btn--primary btn--sm article-card__link-btn">Read Article</a>` : ''}
-      </div>
+      ${escaped.url ? `
+      <a href="${sanitizeHtml(escaped.url)}" target="_blank" rel="noopener noreferrer" class="article-card__embed-link" aria-label="Read article: ${escaped.title}">
+        ${articleMedia}
+        <div class="article-card__overlay">
+          <span class="btn btn--primary btn--sm article-card__link-btn">Read Article</span>
+        </div>
+      </a>
+      ` : articleMedia}
     </div>
   ` : `
     <div class="media-card__embed">

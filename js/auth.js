@@ -67,11 +67,16 @@ export function initAuth(clientId) {
 export function renderSignInButton(container) {
   if (typeof google === 'undefined' || !google.accounts) return;
 
+  // Icon-only on narrow screens — the full "Sign in with Google" pill
+  // overflows the mobile header and gets clipped
+  const compact = window.innerWidth < 480;
+
   google.accounts.id.renderButton(container, {
     theme: 'filled_black',
     size: 'medium',
     shape: 'pill',
     text: 'signin_with',
+    type: compact ? 'icon' : 'standard',
   });
 }
 

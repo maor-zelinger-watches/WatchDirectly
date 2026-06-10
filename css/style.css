@@ -453,6 +453,27 @@ img {
   .media-card__grid {
     grid-template-columns: 1fr;
   }
+
+  /* Small gutter so cards and controls don't touch the screen edge */
+  .main {
+    padding: var(--sp-3) var(--sp-2);
+  }
+
+  /* 16px inputs stop iOS Safari from auto-zooming on focus */
+  .feed-controls__search,
+  .media-card__textarea,
+  .reply-form__textarea {
+    font-size: 1rem;
+  }
+
+  /* Bigger touch targets */
+  .chip {
+    padding: var(--sp-2) var(--sp-4);
+  }
+
+  .comment__reply-btn {
+    padding: var(--sp-2) var(--sp-3);
+  }
 }
 
 /* ============================================================
@@ -991,6 +1012,13 @@ img {
   padding-top: 56.25%; /* 16:9 Aspect Ratio */
   background: var(--bg-input);
   overflow: hidden;
+}
+
+/* Covers the embed area so the whole image is one tap target */
+.article-card__embed-link {
+  position: absolute;
+  inset: 0;
+  display: block;
 }
 
 .article-card__img {
