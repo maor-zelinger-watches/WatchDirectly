@@ -88,9 +88,15 @@ export function createMediaCard(item) {
         </div>
       </div>
       <div class="media-card__comments-section" data-video-id="${escaped.videoId}">
-        <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}">
-          💬 ${item.comment_count || 0} comments
-        </button>
+        <div class="media-card__actionbar">
+          <button class="media-card__vote" data-video-id="${escaped.videoId}" aria-pressed="false" title="Upvote">
+            <span class="media-card__vote-icon" aria-hidden="true">▲</span>
+            <span class="media-card__vote-count">${item.vote_count || 0}</span>
+          </button>
+          <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}">
+            💬 ${item.comment_count || 0} comments
+          </button>
+        </div>
         <div class="media-card__comments-body" data-video-id="${escaped.videoId}" style="display: none;">
           <div class="media-card__comments-list" data-video-id="${escaped.videoId}">
             <!-- Comments rendered here -->

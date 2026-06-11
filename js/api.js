@@ -117,6 +117,39 @@ export function createApiClient(baseUrl) {
         token,
       });
     },
+
+    /**
+     * Fetches the top videos of the past week, ranked by upvotes.
+     *
+     * @param {number} [limit=50] - Max videos to return
+     * @returns {Promise<{videos: Object[], total: number}>}
+     */
+    async fetchTopWeek(limit = 50) {
+      return get(`action=topWeek&limit=${limit}`);
+    },
+
+    /**
+     * Toggles the signed-in user's upvote on a video.
+     * Requires a valid Google ID token.
+     *
+     * @param {string} videoId - YouTube video ID / article item ID
+     * @param {string} token - Google Sign-In ID token
+     * @returns {Promise<{voted: boolean, vote_count: number}>}
+     */
+    async vote(videoId, token) {
+      return post({ action: 'vote', videoId, token });
+    },
+
+    /**
+     * Fetches the set of video IDs the signed-in user has upvoted,
+     * so the UI can mark its buttons. Requires a valid Google ID token.
+     *
+     * @param {string} token - Google Sign-In ID token
+     * @returns {Promise<{video_ids: string[]}>}
+     */
+    async fetchMyVotes(token) {
+      return post({ action: 'myVotes', token });
+    },
   };
 }
 

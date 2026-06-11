@@ -258,6 +258,48 @@ img {
 
 
 /* ============================================================
+   VIEW TABS (Latest / Top This Week)
+   ============================================================ */
+
+.feed-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.feed-tab {
+  position: relative;
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-semibold);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.feed-tab:hover {
+  color: var(--text-primary);
+}
+
+.feed-tab--active {
+  color: var(--text-primary);
+}
+
+/* Accent underline under the active tab */
+.feed-tab--active::after {
+  content: '';
+  position: absolute;
+  left: var(--sp-4);
+  right: var(--sp-4);
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+}
+
+/* ============================================================
    SEARCH & FILTER CONTROLS
    ============================================================ */
 
@@ -484,6 +526,52 @@ img {
   border-top: 1px solid var(--separator);
 }
 
+/* Footer row holding the upvote button + comments toggle */
+.media-card__actionbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* Upvote button */
+.media-card__vote {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-3);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.media-card__vote:hover {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.media-card__vote-icon {
+  font-size: var(--fs-base);
+  line-height: 1;
+  transition: transform var(--transition-fast);
+}
+
+.media-card__vote--active {
+  color: var(--accent);
+}
+
+.media-card__vote--active .media-card__vote-icon {
+  transform: translateY(-1px) scale(1.1);
+}
+
+.media-card__vote-count {
+  min-width: 1ch;
+  font-variant-numeric: tabular-nums;
+}
+
 .media-card__comments-toggle {
   display: flex;
   align-items: center;
@@ -501,6 +589,12 @@ img {
 .media-card__comments-toggle:hover {
   color: var(--accent);
   background: var(--accent-dim);
+}
+
+/* In the footer row the toggle takes the remaining width, not 100% */
+.media-card__actionbar .media-card__comments-toggle {
+  width: auto;
+  flex: 1;
 }
 
 .media-card__comments-body {

@@ -40,6 +40,10 @@ const state = {
   searchIndex: null,        // all videos, fetched lazily on first search/filter
   searchIndexPromise: null, // in-flight index fetch (dedupes concurrent requests)
   filterRenderToken: 0,     // invalidates stale filter renders after async index load
+  view: 'latest',           // 'latest' (chronological feed) or 'top' (weekly upvotes)
+  topVideos: null,          // cached Top This Week list
+  topLoaded: false,         // whether the top list has been fetched
+  myVotes: new Set(),       // video IDs the signed-in user has upvoted
 };
 
 const api = createApiClient(CONFIG.APPS_SCRIPT_URL);
@@ -80,6 +84,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   setupInfiniteScroll();
   setupFeedControls();
+  setupTabs();
 
   const cached = await showCachedFeed();
   if (!cached) {
@@ -95,7 +100,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ============================================================
 
 async function loadNextPage() {
-  if (state.loading || !state.hasMore || isFilterActive()) return;
+  if (state.loading || !state.hasMore || isFilterActive() || state.view !== 'latest') return;
   state.loading = true;
 
   const skeleton = document.getElementById('feed-skeleton');
@@ -205,6 +210,18 @@ function buildCard(video) {
     toggle.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleComments(toggle.dataset.videoId);
+    });
+  }
+
+  const voteBtn = card.querySelector('.media-card__vote');
+  if (voteBtn) {
+    if (state.myVotes.has(voteBtn.dataset.videoId)) {
+      voteBtn.classList.add('media-card__vote--active');
+      voteBtn.setAttribute('aria-pressed', 'true');
+    }
+    voteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleVote(voteBtn.dataset.videoId);
     });
   }
 
@@ -538,9 +555,104 @@ function setupFeedControls() {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       state.filter.query = input.value;
-      applyFilter();
+      update();
     }, 250);
   });
+}
+
+/**
+ * Renders whichever view is active, honoring the current search/filter.
+ * Single entry point for the search box, chips, and tab switches.
+ */
+function update() {
+  if (state.view === 'top') {
+    renderTop();
+  } else {
+    applyFilter();
+  }
+}
+
+function setupTabs() {
+  document.querySelectorAll('.feed-tab').forEach(tab => {
+    tab.addEventListener('click', () => switchView(tab.dataset.view));
+  });
+}
+
+/**
+ * Switches between the chronological "Latest" feed and the "Top This Week"
+ * upvote ranking. The top list is fetched once, then cached for the session.
+ */
+async function switchView(view) {
+  if (view === state.view) return;
+  state.view = view;
+
+  document.querySelectorAll('.feed-tab').forEach(t => {
+    const active = t.dataset.view === view;
+    t.classList.toggle('feed-tab--active', active);
+    t.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  window.scrollTo({ top: 0 });
+
+  if (view === 'top' && !state.topLoaded) {
+    const container = document.getElementById('feed-container');
+    const skeleton = document.getElementById('feed-skeleton');
+    const sentinel = document.getElementById('load-more-container');
+    container.innerHTML = '';
+    state.expandedComments.clear();
+    sentinel.style.display = 'none';
+    skeleton.style.display = '';
+    try {
+      const data = await api.fetchTopWeek(50);
+      state.topVideos = data.videos || [];
+      state.topLoaded = true;
+    } catch (e) {
+      console.error('Failed to load top videos:', e);
+      showToast('Failed to load top videos. Please try again.', 'error');
+      state.view = 'latest';
+      document.querySelectorAll('.feed-tab').forEach(t => {
+        const active = t.dataset.view === 'latest';
+        t.classList.toggle('feed-tab--active', active);
+        t.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      skeleton.style.display = 'none';
+      applyFilter();
+      return;
+    }
+    skeleton.style.display = 'none';
+  }
+
+  update();
+}
+
+/**
+ * Renders the Top This Week list (already fetched), honoring any active filter.
+ * No infinite scroll — the weekly list is bounded.
+ */
+function renderTop() {
+  const container = document.getElementById('feed-container');
+  const sentinel = document.getElementById('load-more-container');
+  const empty = document.getElementById('feed-empty');
+  if (!container) return;
+
+  sentinel.style.display = 'none';
+
+  let list = state.topVideos || [];
+  if (isFilterActive()) list = filterVideos(list, state.filter);
+
+  container.innerHTML = '';
+  state.expandedComments.clear();
+  for (const video of list) {
+    const card = buildCard(video);
+    container.appendChild(card);
+    observeLazyIframe(card);
+  }
+
+  empty.querySelector('p').textContent = isFilterActive()
+    ? 'No videos match your search.'
+    : 'No videos yet this week. Check back soon!';
+  empty.style.display = list.length === 0 ? '' : 'none';
+
+  prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
 }
 
 function renderCategoryChips(container, categories) {
@@ -558,7 +670,7 @@ function renderCategoryChips(container, categories) {
       container.querySelectorAll('.chip').forEach(c => {
         c.classList.toggle('chip--active', c === chip);
       });
-      applyFilter();
+      update();
     });
   });
 }
@@ -619,6 +731,115 @@ async function applyFilter() {
   empty.style.display = matches.length === 0 ? '' : 'none';
 
   prefetchComments(matches.slice(0, CONFIG.PAGE_SIZE));
+}
+
+// ============================================================
+// VOTES (upvotes)
+// ============================================================
+
+/**
+ * Returns a valid (non-expired) Google ID token, refreshing if needed.
+ * Throws if the session can't be renewed.
+ */
+async function ensureToken() {
+  let token = getToken();
+  if (isTokenExpired()) {
+    const fresh = await refreshToken();
+    if (fresh) return fresh;
+    signOut();
+    throw new Error('Session expired. Please sign in again.');
+  }
+  return token;
+}
+
+/** Updates every vote button for a video (both views may have one rendered). */
+function setVoteButtons(videoId, voted, count) {
+  document.querySelectorAll(`.media-card__vote[data-video-id="${videoId}"]`).forEach(btn => {
+    btn.classList.toggle('media-card__vote--active', voted);
+    btn.setAttribute('aria-pressed', voted ? 'true' : 'false');
+    if (count != null) {
+      const countEl = btn.querySelector('.media-card__vote-count');
+      if (countEl) countEl.textContent = String(count);
+    }
+  });
+}
+
+/** Keeps vote counts in cached state + localStorage in sync after a vote. */
+function updateCachedVoteCount(videoId, count) {
+  const v = state.videos.find(x => x.video_id === videoId);
+  if (v) {
+    v.vote_count = count;
+    localStorage.setItem('wd_feed_cache', JSON.stringify({ videos: state.videos, total: state.totalVideos }));
+  }
+  if (state.topVideos) {
+    const tv = state.topVideos.find(x => x.video_id === videoId);
+    if (tv) tv.vote_count = count;
+  }
+}
+
+/**
+ * Toggles the current user's upvote on a video, optimistically.
+ * The server is the source of truth for the final count.
+ */
+async function toggleVote(videoId) {
+  if (!isSignedIn()) {
+    showToast('Please sign in to vote', 'info');
+    return;
+  }
+
+  const wasVoted = state.myVotes.has(videoId);
+  const sample = document.querySelector(`.media-card__vote[data-video-id="${videoId}"] .media-card__vote-count`);
+  const prevCount = sample ? (parseInt(sample.textContent, 10) || 0) : 0;
+  const optimisticCount = Math.max(0, prevCount + (wasVoted ? -1 : 1));
+
+  // Optimistic flip
+  if (wasVoted) state.myVotes.delete(videoId); else state.myVotes.add(videoId);
+  setVoteButtons(videoId, !wasVoted, optimisticCount);
+
+  try {
+    const token = await ensureToken();
+    const res = await api.vote(videoId, token);
+
+    // Reconcile with server truth
+    if (res.voted) state.myVotes.add(videoId); else state.myVotes.delete(videoId);
+    setVoteButtons(videoId, res.voted, res.vote_count);
+    updateCachedVoteCount(videoId, res.vote_count);
+  } catch (error) {
+    console.error('Failed to vote:', error);
+    // Rollback
+    if (wasVoted) state.myVotes.add(videoId); else state.myVotes.delete(videoId);
+    setVoteButtons(videoId, wasVoted, prevCount);
+    showToast(error.message || 'Failed to vote. Please try again.', 'error');
+  }
+}
+
+/**
+ * Loads the signed-in user's upvotes and marks their buttons.
+ * Called on sign-in so the UI reflects past votes.
+ */
+async function loadMyVotes() {
+  if (!isSignedIn()) return;
+  try {
+    const token = getToken();
+    const data = await api.fetchMyVotes(token);
+    state.myVotes = new Set(data.video_ids || []);
+    document.querySelectorAll('.media-card__vote').forEach(btn => {
+      const voted = state.myVotes.has(btn.dataset.videoId);
+      btn.classList.toggle('media-card__vote--active', voted);
+      btn.setAttribute('aria-pressed', voted ? 'true' : 'false');
+    });
+  } catch (e) {
+    /* silent — voting still works, buttons just won't show prior state */
+  }
+}
+
+/** Clears all vote markings (on sign-out). */
+function clearVoteMarkings() {
+  state.myVotes.clear();
+  document.querySelectorAll('.media-card__vote--active').forEach(btn => {
+    btn.classList.remove('media-card__vote--active');
+    btn.setAttribute('aria-pressed', 'false');
+  });
 }
 
 // ============================================================
@@ -973,11 +1194,17 @@ function setupAuthUI() {
   onAuthChange((user) => {
     updateAuthUI(user);
     state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
+    if (user) {
+      loadMyVotes();
+    } else {
+      clearVoteMarkings();
+    }
   });
 
   const user = getCurrentUser();
   if (user) {
     updateAuthUI(user);
+    loadMyVotes();
   } else {
     renderSignInButton(container);
   }

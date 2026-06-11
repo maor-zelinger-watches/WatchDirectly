@@ -95,6 +95,8 @@ function doGet(e) {
         return jsonResponse(handleComments(e.parameter));
       case 'commentsBatch':
         return jsonResponse(handleCommentsBatch(e.parameter));
+      case 'topWeek':
+        return jsonResponse(handleTopWeek(e.parameter));
       case 'refresh':
         return jsonResponse(handleRefresh());
       case 'logs':
@@ -116,6 +118,10 @@ function doPost(e) {
     switch (action) {
       case 'comment':
         return jsonResponse(handleAddComment(data));
+      case 'vote':
+        return jsonResponse(handleVote(data));
+      case 'myVotes':
+        return jsonResponse(handleMyVotes(data));
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -311,6 +317,7 @@ function fetchAllFeeds() {
               else if (hName === 'tier') newRow.push(video.tier);
               else if (hName === 'category') newRow.push(video.category);
               else if (hName === 'comment_count') newRow.push(0);
+              else if (hName === 'vote_count') newRow.push(0);
               else if (hName === 'media_type') newRow.push(video.media_type);
               else if (hName === 'preview_image') newRow.push(video.preview_image);
               else newRow.push('');
@@ -730,13 +737,16 @@ function parseRegex(xml, channelName, tier, category) {
 // VIDEOS
 // ============================================================
 
-function getVideos(page, limit) {
+/**
+ * Reads and normalizes every row from the Videos sheet.
+ * Shared by getVideos (paginated feed) and handleTopWeek (weekly ranking).
+ * @returns {Object[]} Normalized video objects (unsorted)
+ */
+function readAllVideos() {
   var sheet = getSheet('VIDEOS');
   var data = sheet.getDataRange().getValues();
 
-  if (data.length <= 1) {
-    return { status: 'ok', videos: [], total: 0, page: page };
-  }
+  if (data.length <= 1) return [];
 
   var headers = data[0];
   var videos = [];
@@ -747,15 +757,28 @@ function getVideos(page, limit) {
     for (var j = 0; j < headers.length; j++) {
       video[headers[j]] = row[j];
     }
-    
+
     // Legacy fallback: if media_type column is missing from older sheet data,
     // infer type from video_id length. YouTube IDs are always exactly 11 chars;
     // article IDs are base64-encoded URLs (much longer).
     if (!video.media_type) {
       video.media_type = (video.video_id && video.video_id.length === 11) ? 'video' : 'article';
     }
-    
+
+    // Normalize vote_count to an integer (column may be absent or blank)
+    video.vote_count = Number(video.vote_count) || 0;
+
     videos.push(video);
+  }
+
+  return videos;
+}
+
+function getVideos(page, limit) {
+  var videos = readAllVideos();
+
+  if (videos.length === 0) {
+    return { status: 'ok', videos: [], total: 0, page: page };
   }
 
   // Sort by published_at descending (newest first)
@@ -772,6 +795,41 @@ function getVideos(page, limit) {
     videos: paged,
     total: videos.length,
     page: page,
+  };
+}
+
+/**
+ * Returns videos published in the last 7 days, ranked by upvotes
+ * (most-voted first, newest as the tiebreak). When votes are sparse
+ * this gracefully degrades to the week's videos in reverse-chron order,
+ * so the tab is never empty.
+ */
+function handleTopWeek(params) {
+  // Refresh feeds if stale, same as the main feed
+  var lastFetch = getMeta('last_fetch');
+  var refreshHours = parseInt(getMeta('refresh_interval_hours')) || DEFAULT_REFRESH_HOURS;
+  var staleThreshold = refreshHours * 60 * 60 * 1000;
+  if (!lastFetch || (Date.now() - new Date(lastFetch).getTime()) > staleThreshold) {
+    fetchAllFeeds();
+  }
+
+  var limit = parseInt(params.limit) || 50;
+  var cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  var recent = readAllVideos().filter(function(v) {
+    var t = new Date(v.published_at).getTime();
+    return !isNaN(t) && t >= cutoff;
+  });
+
+  recent.sort(function(a, b) {
+    if (b.vote_count !== a.vote_count) return b.vote_count - a.vote_count;
+    return new Date(b.published_at) - new Date(a.published_at);
+  });
+
+  return {
+    status: 'ok',
+    videos: recent.slice(0, limit),
+    total: recent.length,
   };
 }
 
@@ -961,6 +1019,142 @@ function updateCommentCount(videoId) {
       break;
     }
   }
+}
+
+// ============================================================
+// VOTES — Reddit-style upvotes, one per Google account per video
+// ============================================================
+
+/**
+ * Gets (or creates) the "Votes" tab inside the Comments spreadsheet.
+ * Storing it as a named tab avoids provisioning a separate spreadsheet.
+ * @returns {Sheet}
+ */
+function getVotesSheet() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS);
+  var sheet = ss.getSheetByName('Votes');
+  if (!sheet) {
+    sheet = ss.insertSheet('Votes');
+    sheet.appendRow(['vote_id', 'video_id', 'user_email', 'created_at']);
+  }
+  return sheet;
+}
+
+/**
+ * Toggles a user's upvote on a video.
+ * If the user has already voted, the vote is removed (toggle off).
+ */
+function handleVote(data) {
+  var videoId = data.videoId;
+  var token = data.token;
+
+  if (!videoId || !token) {
+    return { status: 'error', message: 'videoId and token are required' };
+  }
+
+  var user = verifyGoogleToken(token);
+  if (!user) {
+    log('ERROR', 'vote', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+
+  var sheet = getVotesSheet();
+  var data2 = sheet.getDataRange().getValues();
+  var headers = data2[0];
+  var videoIdCol = headers.indexOf('video_id');
+  var emailCol = headers.indexOf('user_email');
+
+  // Find this user's existing vote on this video
+  var existingRow = -1;
+  for (var i = 1; i < data2.length; i++) {
+    if (data2[i][videoIdCol] === videoId && data2[i][emailCol] === user.email) {
+      existingRow = i + 1; // 1-based sheet row
+      break;
+    }
+  }
+
+  var voted;
+  if (existingRow !== -1) {
+    sheet.deleteRow(existingRow);
+    voted = false;
+  } else {
+    var voteId = 'v_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
+    sheet.appendRow([voteId, videoId, user.email, new Date().toISOString()]);
+    voted = true;
+  }
+
+  var count = updateVoteCount(videoId);
+  return { status: 'ok', voted: voted, vote_count: count };
+}
+
+/**
+ * Returns the list of video IDs the signed-in user has upvoted,
+ * so the client can mark its buttons as already-voted.
+ */
+function handleMyVotes(data) {
+  var token = data.token;
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = verifyGoogleToken(token);
+  if (!user) {
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  var sheet = getVotesSheet();
+  var rows = sheet.getDataRange().getValues();
+  var headers = rows[0];
+  var videoIdCol = headers.indexOf('video_id');
+  var emailCol = headers.indexOf('user_email');
+
+  var ids = [];
+  for (var i = 1; i < rows.length; i++) {
+    if (rows[i][emailCol] === user.email) ids.push(rows[i][videoIdCol]);
+  }
+
+  return { status: 'ok', video_ids: ids };
+}
+
+/**
+ * Recounts votes for a video from the Votes sheet and writes the total
+ * to the video's vote_count column, creating that column if it's missing.
+ * @returns {number} The new vote count
+ */
+function updateVoteCount(videoId) {
+  var votesSheet = getVotesSheet();
+  var votesData = votesSheet.getDataRange().getValues();
+  var vHeaders = votesData[0];
+  var voteVideoCol = vHeaders.indexOf('video_id');
+  var count = 0;
+  for (var i = 1; i < votesData.length; i++) {
+    if (votesData[i][voteVideoCol] === videoId) count++;
+  }
+
+  var videosSheet = getSheet('VIDEOS');
+  var videosData = videosSheet.getDataRange().getValues();
+  var headers = videosData[0];
+  var videoIdCol = findVideoIdCol(headers);
+  var voteCountCol = headers.indexOf('vote_count');
+
+  // Self-initialize: add the vote_count column if the sheet predates voting
+  if (voteCountCol === -1) {
+    voteCountCol = headers.length;
+    videosSheet.getRange(1, voteCountCol + 1).setValue('vote_count');
+  }
+
+  for (var i = 1; i < videosData.length; i++) {
+    if (videosData[i][videoIdCol] === videoId) {
+      videosSheet.getRange(i + 1, voteCountCol + 1).setValue(count);
+      break;
+    }
+  }
+
+  return count;
 }
 
 // ============================================================

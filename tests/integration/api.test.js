@@ -206,6 +206,80 @@ describe('API Client', () => {
     });
   });
 
+  describe('fetchTopWeek', () => {
+    it('calls the correct URL with action=topWeek and limit', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', videos: [], total: 0 }),
+      });
+
+      await api.fetchTopWeek(25);
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${MOCK_APPS_SCRIPT_URL}?action=topWeek&limit=25`,
+        expect.any(Object)
+      );
+    });
+
+    it('returns the ranked videos array', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          status: 'ok',
+          videos: [{ video_id: 'v1', vote_count: 9 }, { video_id: 'v2', vote_count: 4 }],
+          total: 2,
+        }),
+      });
+
+      const result = await api.fetchTopWeek();
+      expect(result.videos).toHaveLength(2);
+      expect(result.videos[0].vote_count).toBe(9);
+    });
+  });
+
+  describe('vote', () => {
+    it('POSTs a vote with the token and returns voted state + count', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', voted: true, vote_count: 3 }),
+      });
+
+      const result = await api.vote('v1', 'mock-token');
+      expect(result.voted).toBe(true);
+      expect(result.vote_count).toBe(3);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.action).toBe('vote');
+      expect(body.videoId).toBe('v1');
+      expect(body.token).toBe('mock-token');
+    });
+
+    it('propagates a server error (e.g. invalid token)', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'error', message: 'Invalid authentication token' }),
+      });
+
+      await expect(api.vote('v1', 'bad')).rejects.toThrow('Invalid authentication token');
+    });
+  });
+
+  describe('fetchMyVotes', () => {
+    it('POSTs the token and returns the voted video IDs', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', video_ids: ['v1', 'v3'] }),
+      });
+
+      const result = await api.fetchMyVotes('mock-token');
+      expect(result.video_ids).toEqual(['v1', 'v3']);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.action).toBe('myVotes');
+      expect(body.token).toBe('mock-token');
+    });
+  });
+
   describe('postComment', () => {
     it('sends a POST request with token-only auth', async () => {
       fetchMock.mockResolvedValueOnce({

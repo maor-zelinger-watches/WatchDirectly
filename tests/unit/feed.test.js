@@ -81,6 +81,20 @@ describe('createMediaCard (video)', () => {
     expect(html).not.toContain('<script>');
     expect(html).toContain('&lt;script&gt;');
   });
+
+  it('includes an upvote button showing the vote count', () => {
+    const html = createMediaCard({ ...mockVideo, vote_count: 7 });
+    expect(html).toContain('media-card__vote');
+    expect(html).toContain('media-card__vote-count');
+    expect(html).toContain('>7<');
+  });
+
+  it('defaults the vote count to 0 when absent', () => {
+    const { vote_count, ...noVotes } = mockVideo;
+    const html = createMediaCard(noVotes);
+    expect(html).toContain('media-card__vote-count');
+    expect(html).toMatch(/media-card__vote-count">0</);
+  });
 });
 
 describe('createMediaCard (article)', () => {
