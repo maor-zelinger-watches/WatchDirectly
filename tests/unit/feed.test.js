@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createMediaCard, sortVideos, filterVideos } from '../../js/feed.js';
+import { createMediaCard, sortVideos, filterVideos, isShort } from '../../js/feed.js';
 
 const mockVideo = {
   video_id: 'abc12345678',
@@ -95,6 +95,53 @@ describe('createMediaCard (video)', () => {
     expect(html).toContain('media-card__vote-count');
     expect(html).toMatch(/media-card__vote-count">0</);
   });
+
+  it('shows a formatted view count when present', () => {
+    const html = createMediaCard({ ...mockVideo, view_count: 52300 });
+    expect(html).toContain('media-card__views');
+    expect(html).toContain('52.3K views');
+  });
+
+  it('omits the views element when the count is absent or zero', () => {
+    expect(createMediaCard(mockVideo)).not.toContain('media-card__views');
+    expect(createMediaCard({ ...mockVideo, view_count: 0 })).not.toContain('media-card__views');
+  });
+
+  it('includes a star button carrying the channel name', () => {
+    const html = createMediaCard(mockVideo);
+    expect(html).toContain('media-card__star');
+    expect(html).toContain('data-channel="Teddy Baldassarre"');
+  });
+
+  it('includes an expand button', () => {
+    const html = createMediaCard(mockVideo);
+    expect(html).toContain('media-card__expand');
+  });
+
+  it('marks shorts with the media-card--short class', () => {
+    const short = { ...mockVideo, url: 'https://www.youtube.com/shorts/abc12345678' };
+    expect(createMediaCard(short)).toContain('media-card--short');
+    expect(createMediaCard(mockVideo)).not.toContain('media-card--short');
+  });
+});
+
+describe('isShort', () => {
+  it('detects shorts by their /shorts/ URL', () => {
+    expect(isShort({ ...mockVideo, url: 'https://www.youtube.com/shorts/abc12345678' })).toBe(true);
+  });
+
+  it('treats watch URLs as long-form', () => {
+    expect(isShort(mockVideo)).toBe(false);
+  });
+
+  it('never flags articles, even with shorts-like URLs', () => {
+    expect(isShort({ ...mockArticle, url: 'https://example.com/shorts/story' })).toBe(false);
+  });
+
+  it('handles missing url and null items', () => {
+    expect(isShort({ ...mockVideo, url: undefined })).toBe(false);
+    expect(isShort(null)).toBe(false);
+  });
 });
 
 describe('createMediaCard (article)', () => {
@@ -166,6 +213,23 @@ describe('filterVideos', () => {
     const sparse = [{ video_id: 'x1', category: 'Misc' }];
     expect(filterVideos(sparse, { query: 'anything' })).toEqual([]);
     expect(filterVideos(sparse, { category: 'Misc' })).toHaveLength(1);
+  });
+
+  it('matches the channel host via hostsByChannel ("Adrian" finds Bark and Jack)', () => {
+    const withHostChannel = [
+      ...catalog,
+      { ...mockVideo, video_id: 'f4ddddddddd', title: 'GMT Showdown', channel_name: 'Bark and Jack' },
+    ];
+    const hosts = { 'Bark and Jack': 'Adrian Barker' };
+
+    const result = filterVideos(withHostChannel, { query: 'adrian', hostsByChannel: hosts });
+    expect(result).toHaveLength(1);
+    expect(result[0].video_id).toBe('f4ddddddddd');
+  });
+
+  it('host matching is harmless when the map is missing or has no entry', () => {
+    expect(filterVideos(catalog, { query: 'adrian' })).toEqual([]);
+    expect(filterVideos(catalog, { query: 'adrian', hostsByChannel: {} })).toEqual([]);
   });
 
   it('does not mutate the input array', () => {

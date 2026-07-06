@@ -280,6 +280,48 @@ describe('API Client', () => {
     });
   });
 
+  describe('star', () => {
+    it('POSTs a star toggle with the token and returns starred state', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', starred: true }),
+      });
+
+      const result = await api.star('Bark and Jack', 'mock-token');
+      expect(result.starred).toBe(true);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.action).toBe('star');
+      expect(body.channel).toBe('Bark and Jack');
+      expect(body.token).toBe('mock-token');
+    });
+
+    it('propagates a server error (e.g. invalid token)', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'error', message: 'Invalid authentication token' }),
+      });
+
+      await expect(api.star('Bark and Jack', 'bad')).rejects.toThrow('Invalid authentication token');
+    });
+  });
+
+  describe('fetchMyStars', () => {
+    it('POSTs the token and returns the starred channels', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', channels: ['Bark and Jack', 'Hodinkee'] }),
+      });
+
+      const result = await api.fetchMyStars('mock-token');
+      expect(result.channels).toEqual(['Bark and Jack', 'Hodinkee']);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.action).toBe('myStars');
+      expect(body.token).toBe('mock-token');
+    });
+  });
+
   describe('postComment', () => {
     it('sends a POST request with token-only auth', async () => {
       fetchMock.mockResolvedValueOnce({

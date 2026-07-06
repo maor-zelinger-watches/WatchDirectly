@@ -47,10 +47,16 @@
     <!-- Feed View -->
     <section class="feed-view" id="feed-view">
 
-      <!-- View Tabs: Latest / Top This Week -->
+      <!-- View Tabs: Latest / Top This Week / Starred -->
       <div class="feed-tabs" id="feed-tabs" role="tablist" aria-label="Feed view">
         <button class="feed-tab feed-tab--active" data-view="latest" role="tab" aria-selected="true">Latest</button>
         <button class="feed-tab" data-view="top" role="tab" aria-selected="false">Top This Week</button>
+        <button class="feed-tab" data-view="starred" role="tab" aria-selected="false">Starred</button>
+        <label class="shorts-toggle" id="shorts-toggle" title="Show or hide Shorts">
+          <input type="checkbox" id="shorts-toggle-input" checked aria-label="Show Shorts">
+          <span class="shorts-toggle__track" aria-hidden="true"><span class="shorts-toggle__thumb"></span></span>
+          <span class="shorts-toggle__label">Shorts</span>
+        </label>
       </div>
 
       <!-- Search & Category Filters -->

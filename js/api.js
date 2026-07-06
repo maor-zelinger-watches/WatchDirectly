@@ -150,6 +150,29 @@ export function createApiClient(baseUrl) {
     async fetchMyVotes(token) {
       return post({ action: 'myVotes', token });
     },
+
+    /**
+     * Toggles the signed-in user's star on a creator (channel).
+     * Requires a valid Google ID token.
+     *
+     * @param {string} channel - Channel name as it appears on feed items
+     * @param {string} token - Google Sign-In ID token
+     * @returns {Promise<{starred: boolean}>}
+     */
+    async star(channel, token) {
+      return post({ action: 'star', channel, token });
+    },
+
+    /**
+     * Fetches the channel names the signed-in user has starred,
+     * so the UI can mark star buttons and build the Starred feed.
+     *
+     * @param {string} token - Google Sign-In ID token
+     * @returns {Promise<{channels: string[]}>}
+     */
+    async fetchMyStars(token) {
+      return post({ action: 'myStars', token });
+    },
   };
 }
 

@@ -122,6 +122,10 @@ function doPost(e) {
         return jsonResponse(handleVote(data));
       case 'myVotes':
         return jsonResponse(handleMyVotes(data));
+      case 'star':
+        return jsonResponse(handleStar(data));
+      case 'myStars':
+        return jsonResponse(handleMyStars(data));
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -256,16 +260,29 @@ function fetchAllFeeds() {
 
   // Get existing video IDs for deduplication
   var existingVideos = {};
+  var existingRowById = {}; // video_id -> 1-based sheet row, for view-count refresh
   var videoData = videosSheet.getDataRange().getValues();
   var vHeaders = videoData.length > 0 ? videoData[0] : [];
-  
+  // A blank sheet reads back as [['']] — treat that as "no headers" so the
+  // empty-sheet fallback path (below) runs instead of self-init corrupting it.
+  if (vHeaders.length === 1 && vHeaders[0] === '') vHeaders = [];
+
+  // Self-initialize: add the view_count column if the sheet predates view tracking
+  var viewCountCol = vHeaders.indexOf('view_count');
+  if (viewCountCol === -1 && vHeaders.length > 0) {
+    viewCountCol = vHeaders.length;
+    videosSheet.getRange(1, viewCountCol + 1).setValue('view_count');
+    vHeaders.push('view_count');
+  }
+
   if (videoData.length > 1) {
     var videoIdCol = vHeaders.indexOf('item_id');
     if (videoIdCol === -1) videoIdCol = vHeaders.indexOf('video_id');
-    
+
     if (videoIdCol !== -1) {
       for (var i = 1; i < videoData.length; i++) {
         existingVideos[videoData[i][videoIdCol]] = true;
+        existingRowById[videoData[i][videoIdCol]] = i + 1;
       }
     }
   }
@@ -301,9 +318,9 @@ function fetchAllFeeds() {
         if (!existingVideos[video.video_id]) {
           var newRow = [];
           if (vHeaders.length === 0) {
-             // Fallback if sheet is totally empty
+             // Fallback if sheet is totally empty (order matches the standard schema)
              newRow = [
-               video.video_id, video.channel_name, video.title, video.url, video.published_at, new Date().toISOString(), video.tier, video.category, 0, video.media_type, video.preview_image
+               video.video_id, video.channel_name, video.title, video.url, video.published_at, new Date().toISOString(), video.tier, video.category, 0, 0, video.media_type, video.preview_image, video.view_count || 0
              ];
           } else {
             for(var h = 0; h < vHeaders.length; h++) {
@@ -320,13 +337,19 @@ function fetchAllFeeds() {
               else if (hName === 'vote_count') newRow.push(0);
               else if (hName === 'media_type') newRow.push(video.media_type);
               else if (hName === 'preview_image') newRow.push(video.preview_image);
+              else if (hName === 'view_count') newRow.push(video.view_count || 0);
               else newRow.push('');
             }
           }
-          
+
           videosSheet.appendRow(newRow);
           existingVideos[video.video_id] = true;
           newCount++;
+        } else if (viewCountCol !== -1 && video.view_count && existingRowById[video.video_id]) {
+          // Views were captured at first ingest (hours after publish, when
+          // they're lowest) — refresh them while the video is still inside
+          // the ~15-entry RSS window. Older videos keep their last count.
+          videosSheet.getRange(existingRowById[video.video_id], viewCountCol + 1).setValue(video.view_count);
         }
       }
 
@@ -567,7 +590,9 @@ function parseRss2(root, channelName, tier, category) {
     
     var videoId = extractYouTubeId(link);
     var mediaType = videoId ? 'video' : 'article';
-    var itemId = videoId || Utilities.base64Encode(guid).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
+    // Use MD5 hash to guarantee uniqueness even if URLs share identical suffixes
+    var hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, guid);
+    var itemId = videoId || Utilities.base64EncodeWebSafe(hashBytes).replace(/[^a-zA-Z0-9]/g, '').slice(0, 15);
     
     var previewImage = '';
     // 1. Try media:content
@@ -649,16 +674,25 @@ function parseAtom(root, channelName, tier, category) {
     
     var ytVideoId = ytVideoIdEl ? ytVideoIdEl.getText() : extractYouTubeId(link);
     var mediaType = ytVideoId ? 'video' : 'article';
-    var itemId = ytVideoId || Utilities.base64Encode(link).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
+    var hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, link);
+    var itemId = ytVideoId || Utilities.base64EncodeWebSafe(hashBytes).replace(/[^a-zA-Z0-9]/g, '').slice(0, 15);
     
     var previewImage = '';
-    // 1. media:group > media:thumbnail (YouTube)
+    var viewCount = 0;
+    // 1. media:group > media:thumbnail (YouTube); media:community carries view counts
     if (mediaNs) {
       var mediaGroup = entry.getChild('group', mediaNs);
       if (mediaGroup) {
         var mediaThumbnail = mediaGroup.getChild('thumbnail', mediaNs);
         if (mediaThumbnail && mediaThumbnail.getAttribute('url')) {
           previewImage = mediaThumbnail.getAttribute('url').getValue();
+        }
+        var mediaCommunity = mediaGroup.getChild('community', mediaNs);
+        if (mediaCommunity) {
+          var mediaStats = mediaCommunity.getChild('statistics', mediaNs);
+          if (mediaStats && mediaStats.getAttribute('views')) {
+            viewCount = parseInt(mediaStats.getAttribute('views').getValue(), 10) || 0;
+          }
         }
       }
     }
@@ -682,6 +716,7 @@ function parseAtom(root, channelName, tier, category) {
       published_at: new Date(published).toISOString(),
       tier: tier,
       category: category,
+      view_count: viewCount,
     });
   }
   return videos;
@@ -705,7 +740,8 @@ function parseRegex(xml, channelName, tier, category) {
     
     var videoId = extractYouTubeId(link);
     var mediaType = videoId ? 'video' : 'article';
-    var itemId = videoId || Utilities.base64Encode(link).replace(/[^a-zA-Z0-9]/g, '').slice(-15);
+    var hashBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, link);
+    var itemId = videoId || Utilities.base64EncodeWebSafe(hashBytes).replace(/[^a-zA-Z0-9]/g, '').slice(0, 15);
     
     var previewImage = '';
     // 1. Try media tags
@@ -765,8 +801,9 @@ function readAllVideos() {
       video.media_type = (video.video_id && video.video_id.length === 11) ? 'video' : 'article';
     }
 
-    // Normalize vote_count to an integer (column may be absent or blank)
+    // Normalize counts to integers (columns may be absent or blank)
     video.vote_count = Number(video.vote_count) || 0;
+    video.view_count = Number(video.view_count) || 0;
 
     videos.push(video);
   }
@@ -805,14 +842,12 @@ function getVideos(page, limit) {
  * so the tab is never empty.
  */
 function handleTopWeek(params) {
-  // Refresh feeds if stale, same as the main feed
-  var lastFetch = getMeta('last_fetch');
-  var refreshHours = parseInt(getMeta('refresh_interval_hours')) || DEFAULT_REFRESH_HOURS;
-  var staleThreshold = refreshHours * 60 * 60 * 1000;
-  if (!lastFetch || (Date.now() - new Date(lastFetch).getTime()) > staleThreshold) {
-    fetchAllFeeds();
-  }
-
+  // Read-only by design. The Videos sheet is kept fresh by the feed request
+  // (handleFeed refreshes when stale) and the scheduled trigger — so this
+  // request just reads and ranks. Crawling RSS here (fetchAllFeeds, ~0.5s per
+  // channel plus retry backoff) made the request slow enough to time out, and
+  // unlike the feed the top-week tab has no cached fallback, so a slow crawl
+  // surfaced to the user as an outright failure.
   var limit = parseInt(params.limit) || 50;
   var cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
@@ -1062,33 +1097,46 @@ function handleVote(data) {
     return { status: 'error', message: 'You have been blocked' };
   }
 
-  var sheet = getVotesSheet();
-  var data2 = sheet.getDataRange().getValues();
-  var headers = data2[0];
-  var videoIdCol = headers.indexOf('video_id');
-  var emailCol = headers.indexOf('user_email');
+  // Serialize the read-find-mutate-recount so concurrent toggles from the
+  // same user can't double-insert or delete the wrong (shifted) row.
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
 
-  // Find this user's existing vote on this video
-  var existingRow = -1;
-  for (var i = 1; i < data2.length; i++) {
-    if (data2[i][videoIdCol] === videoId && data2[i][emailCol] === user.email) {
-      existingRow = i + 1; // 1-based sheet row
-      break;
+  try {
+    var sheet = getVotesSheet();
+    var data2 = sheet.getDataRange().getValues();
+    var headers = data2[0];
+    var videoIdCol = headers.indexOf('video_id');
+    var emailCol = headers.indexOf('user_email');
+
+    // Find this user's existing vote on this video
+    var existingRow = -1;
+    for (var i = 1; i < data2.length; i++) {
+      if (data2[i][videoIdCol] === videoId && data2[i][emailCol] === user.email) {
+        existingRow = i + 1; // 1-based sheet row
+        break;
+      }
     }
-  }
 
-  var voted;
-  if (existingRow !== -1) {
-    sheet.deleteRow(existingRow);
-    voted = false;
-  } else {
-    var voteId = 'v_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
-    sheet.appendRow([voteId, videoId, user.email, new Date().toISOString()]);
-    voted = true;
-  }
+    var voted;
+    if (existingRow !== -1) {
+      sheet.deleteRow(existingRow);
+      voted = false;
+    } else {
+      var voteId = 'v_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
+      sheet.appendRow([voteId, videoId, user.email, new Date().toISOString()]);
+      voted = true;
+    }
 
-  var count = updateVoteCount(videoId);
-  return { status: 'ok', voted: voted, vote_count: count };
+    var count = updateVoteCount(videoId);
+    return { status: 'ok', voted: voted, vote_count: count };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /**
@@ -1155,6 +1203,126 @@ function updateVoteCount(videoId) {
   }
 
   return count;
+}
+
+// ============================================================
+// STARS — starred creators, one per Google account per channel
+// ============================================================
+
+/**
+ * Gets (or creates) the "Stars" tab inside the Comments spreadsheet,
+ * following the same pattern as the Votes tab.
+ * @returns {Sheet}
+ */
+function getStarsSheet() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS);
+  var sheet = ss.getSheetByName('Stars');
+  if (!sheet) {
+    sheet = ss.insertSheet('Stars');
+    sheet.appendRow(['star_id', 'channel_name', 'user_email', 'created_at']);
+  }
+  return sheet;
+}
+
+/**
+ * Toggles a user's star on a creator (channel).
+ * If the user has already starred the channel, the star is removed.
+ */
+function handleStar(data) {
+  var channel = data.channel;
+  var token = data.token;
+
+  if (!channel || !token) {
+    return { status: 'error', message: 'channel and token are required' };
+  }
+
+  var user = verifyGoogleToken(token);
+  if (!user) {
+    log('ERROR', 'star', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+
+  // Serialize read-find-mutate so concurrent toggles can't double-insert
+  // or delete a row that shifted under a stale index.
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
+
+  try {
+    var sheet = getStarsSheet();
+    var rows = sheet.getDataRange().getValues();
+    var headers = rows[0];
+    var channelCol = headers.indexOf('channel_name');
+    var emailCol = headers.indexOf('user_email');
+
+    // Find this user's existing star on this channel. Compare as strings so
+    // a numeric/date-like channel name (Sheets type coercion) still matches.
+    var existingRow = -1;
+    for (var i = 1; i < rows.length; i++) {
+      if (String(rows[i][channelCol]) === channel && rows[i][emailCol] === user.email) {
+        existingRow = i + 1; // 1-based sheet row
+        break;
+      }
+    }
+
+    var starred;
+    if (existingRow !== -1) {
+      sheet.deleteRow(existingRow);
+      starred = false;
+    } else {
+      // Write as plain text so Sheets can't coerce a numeric-looking channel
+      var starId = 's_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
+      var newRowNum = sheet.getLastRow() + 1;
+      var range = sheet.getRange(newRowNum, 1, 1, 4);
+      range.setNumberFormat('@');
+      range.setValues([[starId, channel, user.email, new Date().toISOString()]]);
+      starred = true;
+    }
+
+    return { status: 'ok', starred: starred };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Returns the channel names the signed-in user has starred,
+ * so the client can mark star buttons and build the Starred feed.
+ */
+function handleMyStars(data) {
+  var token = data.token;
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = verifyGoogleToken(token);
+  if (!user) {
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  var sheet = getStarsSheet();
+  var rows = sheet.getDataRange().getValues();
+  var headers = rows[0];
+  var channelCol = headers.indexOf('channel_name');
+  var emailCol = headers.indexOf('user_email');
+
+  var channels = [];
+  for (var i = 1; i < rows.length; i++) {
+    // Coerce to string so numeric/date-like channel names round-trip intact
+    var ch = String(rows[i][channelCol]);
+    if (rows[i][emailCol] === user.email && channels.indexOf(ch) === -1) {
+      channels.push(ch);
+    }
+  }
+
+  return { status: 'ok', channels: channels };
 }
 
 // ============================================================

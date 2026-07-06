@@ -300,6 +300,81 @@ img {
 }
 
 /* ============================================================
+   SHORTS TOGGLE (in the tabs row)
+   ============================================================ */
+
+.shorts-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+  padding: var(--sp-2) var(--sp-2);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.shorts-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.shorts-toggle__track {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.shorts-toggle__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: var(--text-secondary);
+  border-radius: var(--radius-full);
+  transition: transform var(--transition-fast), background var(--transition-fast);
+}
+
+.shorts-toggle input:checked + .shorts-toggle__track {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.shorts-toggle input:checked + .shorts-toggle__track .shorts-toggle__thumb {
+  transform: translateX(14px);
+  background: var(--accent);
+}
+
+.shorts-toggle input:focus-visible + .shorts-toggle__track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.shorts-toggle__label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-secondary);
+}
+
+/* Shorts hidden: one class on the feed container, pure CSS */
+.feed--hide-shorts .media-card--short {
+  display: none;
+}
+
+/* Shorts slide in after the long-form cards have rendered */
+.media-card--short-entering {
+  opacity: 0;
+  transform: translateY(16px) scale(0.97);
+}
+
+/* ============================================================
    SEARCH & FILTER CONTROLS
    ============================================================ */
 
@@ -389,6 +464,8 @@ img {
   border-radius: var(--radius-md);
   overflow: hidden;
   transition: border-color var(--transition-normal), opacity 0.3s ease, transform 0.3s ease;
+  /* Post-fullscreen scroll restore lands below the sticky header */
+  scroll-margin-top: calc(var(--header-height) + var(--sp-2));
 }
 
 .media-card:hover {
@@ -471,6 +548,45 @@ img {
 
 .media-card__channel {
   font-weight: var(--fw-medium);
+  /* Let a long channel name shrink and ellipsize instead of pushing the
+     time/views onto a second row (min-width:0 overrides flex min-content) */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The fixed-width meta parts never wrap or shrink */
+.media-card__time,
+.media-card__views {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Star-a-creator button, inline with the channel name.
+   Negative margin keeps the visual footprint tight while the padding
+   gives it a ~30px tap target. */
+.media-card__star {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  margin: calc(-1 * var(--sp-2)) calc(-1 * var(--sp-1));
+  font-size: var(--fs-base);
+  line-height: 1;
+  color: var(--text-muted);
+  transition: color var(--transition-fast), transform var(--transition-fast);
+}
+
+.media-card__star:hover {
+  color: var(--accent);
+  transform: scale(1.15);
+}
+
+.media-card__star--active {
+  color: var(--accent);
 }
 
 .media-card__separator {
@@ -511,6 +627,21 @@ img {
   /* Bigger touch targets */
   .chip {
     padding: var(--sp-2) var(--sp-4);
+  }
+
+  /* Three tabs + the Shorts toggle share one narrow row */
+  .feed-tab {
+    padding: var(--sp-3) var(--sp-2);
+    font-size: var(--fs-sm);
+  }
+
+  .feed-tab--active::after {
+    left: var(--sp-2);
+    right: var(--sp-2);
+  }
+
+  .shorts-toggle {
+    padding: var(--sp-2) 0;
   }
 
   .comment__reply-btn {
@@ -595,6 +726,119 @@ img {
 .media-card__actionbar .media-card__comments-toggle {
   width: auto;
   flex: 1;
+  justify-content: flex-start;
+}
+
+/* Expand-to-fullscreen button, bottom right of every card */
+.media-card__expand {
+  display: flex;
+  align-items: center;
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-base);
+  line-height: 1;
+  color: var(--text-secondary);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.media-card__expand:hover {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* ============================================================
+   FULLSCREEN MODE
+   The expanded card becomes a fixed overlay covering the viewport;
+   everything else stays put underneath (scroll position intact).
+   ============================================================ */
+
+body.fullscreen-mode {
+  overflow: hidden;
+}
+
+.media-card--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  border: none;
+  border-radius: 0;
+  overflow-y: auto;
+  background: var(--bg-canvas);
+  animation: fullscreenIn 0.25s ease;
+  padding: 0 var(--sp-4) var(--sp-8);
+}
+
+/* Opacity only — a transform here would shrink the overlay mid-animation
+   and turn the card into the containing block for the fixed exit button */
+@keyframes fullscreenIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Single column: big player on top, meta below, comments underneath */
+.media-card--fullscreen .media-card__grid {
+  grid-template-columns: 1fr;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.media-card--fullscreen .media-card__embed,
+.media-card--fullscreen .article-card__embed {
+  margin-top: var(--sp-4);
+  border-radius: var(--radius-md);
+}
+
+.media-card--fullscreen .media-card__content {
+  padding: var(--sp-4) 0;
+}
+
+/* Align the comments with the title at the overlay's edge (the card's
+   own padding already provides the horizontal inset) */
+.media-card--fullscreen .media-card__comments-body {
+  padding: 0 0 var(--sp-4);
+}
+
+.media-card--fullscreen .media-card__title {
+  font-size: var(--fs-lg);
+  -webkit-line-clamp: unset;
+}
+
+.media-card--fullscreen .media-card__comments-section {
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+/* The expand button flips to an exit control, pinned to the top-right
+   corner of the 960px content column — not the viewport edge, or on wide
+   screens it strands out in the black margin, disconnected from the card.
+   right = distance from viewport edge to the column's right edge
+   (50% - 480px), inset slightly so it sits just inside the corner;
+   clamped to a gutter once the column fills the viewport. */
+.media-card--fullscreen .media-card__expand {
+  position: fixed;
+  top: 50px;
+  right: max(var(--sp-4), calc(50% - 480px + var(--sp-4)));
+  z-index: 310;
+  font-size: calc(var(--fs-base) * 1.1); /* X glyph 10% larger for a clearer target */
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  padding: var(--sp-2);
+}
+
+.media-card--fullscreen .media-card__expand:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* On narrow screens the player spans the full width, so give it clearance
+   below the fixed exit button (top --sp-8 + ~32px height + breathing room).
+   Placed after the base fullscreen rules — same specificity, so source
+   order decides. */
+@media (max-width: 540px) {
+  .media-card--fullscreen .media-card__embed,
+  .media-card--fullscreen .article-card__embed {
+    margin-top: 72px;
+  }
 }
 
 .media-card__comments-body {
@@ -603,6 +847,12 @@ img {
 
 .media-card__comments-list {
   margin-bottom: var(--sp-3);
+  transition: opacity 0.3s ease;
+}
+
+.media-card__comments-list.is-updating {
+  opacity: 0.3;
+  pointer-events: none;
 }
 
 .media-card__comment-input {
@@ -617,6 +867,12 @@ img {
   background: var(--bg-comment);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+}
+
+.media-card__auth-prompt-btn {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--sp-2);
 }
 
 .media-card__comment-form {
@@ -943,7 +1199,7 @@ img {
   bottom: var(--sp-6);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 200;
+  z-index: 400; /* above the fullscreen overlay (300) and its exit button (310) */
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);

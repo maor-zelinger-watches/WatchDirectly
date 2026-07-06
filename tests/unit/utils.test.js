@@ -7,7 +7,40 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { timeAgo, sanitizeHtml } from '../../js/utils.js';
+import { timeAgo, sanitizeHtml, formatCount } from '../../js/utils.js';
+
+describe('formatCount', () => {
+  it('leaves small numbers as-is', () => {
+    expect(formatCount(0)).toBe('0');
+    expect(formatCount(950)).toBe('950');
+  });
+
+  it('abbreviates thousands with one decimal', () => {
+    expect(formatCount(1234)).toBe('1.2K');
+    expect(formatCount(52300)).toBe('52.3K');
+  });
+
+  it('drops the decimal at 100K and above', () => {
+    expect(formatCount(153000)).toBe('153K');
+  });
+
+  it('abbreviates millions', () => {
+    expect(formatCount(3400000)).toBe('3.4M');
+    expect(formatCount(120000000)).toBe('120M');
+  });
+
+  it('promotes to the next unit at rounding boundaries instead of "1000K"', () => {
+    expect(formatCount(999973)).toBe('1M');
+    expect(formatCount(999500)).toBe('1M');
+    expect(formatCount(999499999)).toBe('999M');
+    expect(formatCount(999500000)).toBe('1B');
+  });
+
+  it('coerces junk to 0', () => {
+    expect(formatCount(undefined)).toBe('0');
+    expect(formatCount('nope')).toBe('0');
+  });
+});
 
 describe('timeAgo', () => {
   let now;

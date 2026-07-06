@@ -40,8 +40,18 @@ const MOCK_FEED = {
       category: 'The Affordable & "Value" Kings',
       comment_count: 0,
     },
+    {
+      video_id: 'test_vid_4',
+      channel_name: 'Bark and Jack',
+      title: 'GMT Showdown',
+      url: 'https://www.youtube.com/watch?v=test_vid_4',
+      published_at: new Date(Date.now() - 30 * 3600 * 1000).toISOString(),
+      tier: 1,
+      category: 'The Enthusiast & Lifestyle Favorites',
+      comment_count: 0,
+    },
   ],
-  total: 3,
+  total: 4,
   page: 1,
 };
 
@@ -77,7 +87,7 @@ test.describe('Search & Category Filter', () => {
     });
 
     await page.goto('/');
-    await expect(page.locator('.media-card')).toHaveCount(3);
+    await expect(page.locator('.media-card')).toHaveCount(4);
   });
 
   test('renders the search input and category chips', async ({ page }) => {
@@ -108,7 +118,16 @@ test.describe('Search & Category Filter', () => {
     await expect(page.locator('.media-card')).toHaveCount(1);
 
     await page.fill('#search-input', '');
-    await expect(page.locator('.media-card')).toHaveCount(3);
+    await expect(page.locator('.media-card')).toHaveCount(4);
+  });
+
+  test('query matches the channel host from creators.json', async ({ page }) => {
+    // "Adrian" appears nowhere in titles or channel names — the channel is
+    // "Bark and Jack", hosted by Adrian Barker (per creators.json).
+    await page.fill('#search-input', 'adrian');
+
+    await expect(page.locator('.media-card')).toHaveCount(1);
+    await expect(page.locator('.media-card__channel')).toContainText('Bark and Jack');
   });
 
   test('clicking a category chip filters the feed', async ({ page }) => {
@@ -123,7 +142,7 @@ test.describe('Search & Category Filter', () => {
     await expect(page.locator('.media-card')).toHaveCount(1);
 
     await page.locator('.chip', { hasText: 'All' }).click();
-    await expect(page.locator('.media-card')).toHaveCount(3);
+    await expect(page.locator('.media-card')).toHaveCount(4);
   });
 
   test('shows an empty message when nothing matches', async ({ page }) => {

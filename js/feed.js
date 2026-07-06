@@ -6,7 +6,20 @@
  * All functions are pure and testable — DOM manipulation happens in app.js.
  */
 
-import { timeAgo, sanitizeHtml } from './utils.js';
+import { timeAgo, sanitizeHtml, formatCount } from './utils.js';
+
+/**
+ * Detects YouTube Shorts from the stored URL — shorts entries in the
+ * channel RSS feed link to youtube.com/shorts/<id>. Articles and
+ * long-form videos never match.
+ *
+ * @param {Object} item - Media item from the API
+ * @returns {boolean}
+ */
+export function isShort(item) {
+  if (!item || item.media_type === 'article') return false;
+  return typeof item.url === 'string' && item.url.includes('/shorts/');
+}
 
 /**
  * Validates a URL is safe (only http/https protocols).
@@ -40,7 +53,14 @@ export function createMediaCard(item) {
 
   // Fallback: If media_type is missing but ID is > 11 chars (base64 or URL), it must be an article
   const isArticle = item.media_type === 'article' || (item.video_id && item.video_id.length > 11);
-  const cardClass = isArticle ? 'article-card media-card' : 'video-card media-card';
+  let cardClass = isArticle ? 'article-card media-card' : 'video-card media-card';
+  if (isShort(item)) cardClass += ' media-card--short';
+
+  const viewCount = Number(item.view_count) || 0;
+  const viewsHtml = viewCount > 0
+    ? `<span class="media-card__separator">·</span>
+            <span class="media-card__views">${formatCount(viewCount)} views</span>`
+    : '';
   
   // The whole image is one link — hover overlays don't exist on touch.
   // The "Read Article" pill is a span inside it (anchors can't nest).
@@ -79,8 +99,10 @@ export function createMediaCard(item) {
           <h3 class="media-card__title"><a href="${escaped.url}" target="_blank" rel="noopener noreferrer">${escaped.title}</a></h3>
           <div class="media-card__meta">
             <span class="media-card__channel">${isArticle ? '📰' : '🎬'} ${escaped.channel}</span>
+            <button class="media-card__star" data-channel="${escaped.channel}" aria-pressed="false" title="Star this creator" aria-label="Star ${escaped.channel}">☆</button>
             <span class="media-card__separator">·</span>
             <span class="media-card__time">${timeAgo(item.published_at)}</span>
+            ${viewsHtml}
           </div>
           <div class="media-card__tags">
             <span class="media-card__category">${escaped.category}</span>
@@ -95,6 +117,9 @@ export function createMediaCard(item) {
           </button>
           <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}">
             💬 ${item.comment_count || 0} comments
+          </button>
+          <button class="media-card__expand" data-video-id="${escaped.videoId}" title="Expand" aria-label="Expand ${escaped.title}">
+            <span class="media-card__expand-icon" aria-hidden="true">⛶</span>
           </button>
         </div>
         <div class="media-card__comments-body" data-video-id="${escaped.videoId}" style="display: none;">
@@ -126,22 +151,26 @@ export function createMediaCard(item) {
 }
 
 /**
- * Filters videos by a free-text query (matched against title and channel
- * name, case-insensitive) and/or an exact category.
+ * Filters videos by a free-text query (matched against title, channel
+ * name, and the channel's host name, case-insensitive) and/or an exact
+ * category. Host matching lets "Adrian" find Bark and Jack videos —
+ * feed items only carry channel_name, so hosts come in via a
+ * channel→host map built from creators.json.
  * Returns a new array — does not mutate the input.
  *
  * @param {Object[]} videos - Media items from the API
- * @param {{query?: string, category?: string}} filter
+ * @param {{query?: string, category?: string, hostsByChannel?: Object<string, string>}} filter
  * @returns {Object[]} Matching videos, in their original order
  */
-export function filterVideos(videos, { query = '', category = '' } = {}) {
+export function filterVideos(videos, { query = '', category = '', hostsByChannel = null } = {}) {
   const q = query.trim().toLowerCase();
   return videos.filter(v => {
     if (category && v.category !== category) return false;
     if (!q) return true;
     const title = (v.title || '').toLowerCase();
     const channel = (v.channel_name || '').toLowerCase();
-    return title.includes(q) || channel.includes(q);
+    const host = hostsByChannel ? (hostsByChannel[v.channel_name] || '').toLowerCase() : '';
+    return title.includes(q) || channel.includes(q) || host.includes(q);
   });
 }
 

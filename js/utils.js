@@ -37,6 +37,30 @@ export function timeAgo(date) {
 }
 
 /**
+ * Formats a count as a compact string (e.g., 950, "1.2K", "3.4M").
+ * Used for view counts on video cards.
+ *
+ * @param {number} n - The count
+ * @returns {string} Abbreviated count
+ */
+export function formatCount(n) {
+  const num = Number(n) || 0;
+  if (num < 1000) return String(num);
+  // Upper bounds are set just below each magnitude so values that would
+  // round up to "1000K"/"1000M" promote to the next unit ("1M"/"1B").
+  if (num < 999500) {
+    const k = num / 1000;
+    return `${k >= 100 ? Math.round(k) : Math.round(k * 10) / 10}K`;
+  }
+  if (num < 999500000) {
+    const m = num / 1000000;
+    return `${m >= 100 ? Math.round(m) : Math.round(m * 10) / 10}M`;
+  }
+  const b = num / 1000000000;
+  return `${b >= 100 ? Math.round(b) : Math.round(b * 10) / 10}B`;
+}
+
+/**
  * Escapes HTML special characters to prevent XSS in user-generated content.
  * Preserves newlines and spaces but escapes everything that could be interpreted as HTML.
  * 
