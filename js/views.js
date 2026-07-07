@@ -418,6 +418,13 @@ const TYPE_CHIPS = [
 ];
 const ALL_TYPE_VALUES = TYPE_CHIPS.filter(c => c.value).map(c => c.value);
 
+// Fired after every chip change, once visibility is applied. app.js registers
+// the Latest-feed top-up here (pull more pages when the filtered feed is
+// shallow) — registered rather than imported so views.js stays a dependency
+// of app.js, not the other way around.
+let onTypeFilterChanged = null;
+export function setOnTypeFilterChanged(cb) { onTypeFilterChanged = cb; }
+
 function renderTypeChips(container) {
   if (!container) return;
 
@@ -429,11 +436,34 @@ function renderTypeChips(container) {
     chip.addEventListener('click', () => {
       toggleType(chip.dataset.type);
       syncTypeChips(container);
-      update();
+      // Pure CSS visibility flip — no re-render, no search-index build.
+      // Re-rendering here is what froze the app: a type-only filter matches
+      // most of the catalog, and painting thousands of cards per click
+      // (again per index chunk) locked the main thread.
+      applyTypeVisibility();
+      if (onTypeFilterChanged) onTypeFilterChanged();
     });
   });
 
   syncTypeChips(container);
+  applyTypeVisibility();
+}
+
+/**
+ * Reflects state.filter.types onto the feed container as one
+ * feed--hide-<type> class per deselected type. Cards carry data-media-type,
+ * so hiding is pure CSS — instant, and it composes with every view (Latest,
+ * Top, Starred, search results) because they all render into this container
+ * and the container element itself is never replaced.
+ */
+export function applyTypeVisibility() {
+  const container = document.getElementById('feed-container');
+  if (!container) return;
+  const selected = new Set(state.filter.types);
+  const showAll = selected.size === 0;
+  for (const value of ALL_TYPE_VALUES) {
+    container.classList.toggle(`feed--hide-${value}`, !showAll && !selected.has(value));
+  }
 }
 
 /**

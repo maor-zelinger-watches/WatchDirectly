@@ -7,7 +7,7 @@
  */
 
 export const CONFIG = {
-  APP_VERSION: '1.1.0',       // frontend version (npm semver) — bump on every
+  APP_VERSION: '1.2.0',       // frontend version (npm semver) — bump on every
                               // user-visible change; shown in the header and
                               // logged at boot. Backend has its own VERSION
                               // in apps-script/Code.gs; package.json tracks
@@ -24,4 +24,11 @@ export const CONFIG = {
                               // normal limit (see ensureSearchIndex)
   PREFETCH_PAGES_AHEAD: 3,    // pages fetched ahead of the scroll position so
                               // infinite scroll renders instantly from memory
+  TYPE_FILTER_MIN_CARDS: 20,  // when the content-type chips leave fewer than
+                              // this many matching items loaded, more pages
+                              // are pulled automatically (Latest feed only)
+  TYPE_FILTER_TOP_UP_MAX_PAGES: 10, // per-interaction cap on those automatic
+                              // pulls — a near-empty type must not fetch the
+                              // whole catalog in one burst; scrolling (or the
+                              // next chip click) continues from where it left off
 };

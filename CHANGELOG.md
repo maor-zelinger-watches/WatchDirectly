@@ -21,6 +21,17 @@ that component's heading.
 
 ## Frontend
 
+### 1.2.0 — 2026-07-07
+- Content-type chips are now pure UI visibility filters (CSS hide/show over
+  already-rendered cards) instead of re-rendering through the search index —
+  a type-only filter matched most of the catalog and painting thousands of
+  cards per click froze the app. Cards carry `data-media-type`; deselected
+  types get a `feed--hide-<type>` class on the feed container.
+- Pagination and infinite scroll keep running under a type filter, and a new
+  top-up setting (`TYPE_FILTER_MIN_CARDS: 20`) automatically pulls more pages
+  when the filtered Latest feed has fewer than 20 matching items (bounded by
+  `TYPE_FILTER_TOP_UP_MAX_PAGES` per interaction).
+
 ### 1.1.0 — 2026-07-07
 - Replaced the creator-category chips and the Shorts on/off toggle with a
   multi-select content-type filter: **All / Videos / Articles / Shorts**.

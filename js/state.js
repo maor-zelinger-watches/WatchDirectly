@@ -23,7 +23,8 @@ export const state = {
   expandedComments: new Set(),
   commentsCache: {},   // videoId -> { comments, tree } — prefetched comment data
   initialLoadComplete: false,
-  filter: { query: '', types: [] }, // types: content-type multi-select ('video'|'article'|'short'); [] === All
+  filter: { query: '', types: [] }, // types: content-type multi-select ('video'|'article'|'short');
+                                    // [] === All. Applied as pure CSS visibility, never a re-render.
   searchIndex: null,        // videos available to search — seeded from memory/cache,
                             // grows as index chunks land (may be partial mid-build)
   searchIndexComplete: false, // true once the whole catalog is loaded (or restored
@@ -50,9 +51,10 @@ export const state = {
 };
 
 export function isFilterActive() {
-  // types collapses to [] whenever it would cover everything (All / all three),
-  // so any non-empty types array is a real narrowing filter.
-  return !!(state.filter.query.trim() || state.filter.types.length);
+  // Only the query counts: it re-routes rendering through the search index.
+  // The type chips (filter.types) are a pure CSS visibility filter and must
+  // NOT pause pagination — the feed keeps loading beneath them.
+  return !!state.filter.query.trim();
 }
 
 /** The current filter plus the channel→host map used for query matching. */

@@ -201,7 +201,7 @@ describe('filterVideos', () => {
   it('handles items with missing title or channel', () => {
     const sparse = [{ video_id: 'x1' }];
     expect(filterVideos(sparse, { query: 'anything' })).toEqual([]);
-    expect(filterVideos(sparse, { types: [] })).toHaveLength(1);
+    expect(filterVideos(sparse, {})).toHaveLength(1);
   });
 
   it('matches the channel host via hostsByChannel ("Adrian" finds Bark and Jack)', () => {
@@ -258,43 +258,20 @@ describe('mediaType', () => {
   });
 });
 
-describe('filterVideos (content types)', () => {
-  const video1 = { ...mockVideo, video_id: 'vidaaaaaaa1', title: 'Tudor Review', url: 'https://www.youtube.com/watch?v=vidaaaaaaa1' };
-  const video2 = { ...mockVideo, video_id: 'vidbbbbbbb2', title: 'Omega Deep Dive', url: 'https://www.youtube.com/watch?v=vidbbbbbbb2' };
-  const article1 = { ...mockArticle, video_id: 'YXJ0aWNsZTEx', title: 'Microbrand Feature', url: 'https://example.com/a1' };
-  const short1 = { ...mockVideo, video_id: 'shortvid001', title: 'Quick Take', url: 'https://www.youtube.com/shorts/shortvid001' };
-  const catalog = [video1, article1, video2, short1];
-
-  it('empty types array returns everything (the "All" state)', () => {
-    expect(filterVideos(catalog, { types: [] })).toHaveLength(4);
+describe('createMediaCard (content-type stamp)', () => {
+  // The type chips hide cards with pure CSS (.feed--hide-<type>), so every
+  // card must carry its classification as a data attribute.
+  it('stamps long-form videos with data-media-type="video"', () => {
+    expect(createMediaCard(mockVideo)).toContain('data-media-type="video"');
   });
 
-  it('filters to a single type', () => {
-    const videos = filterVideos(catalog, { types: ['video'] });
-    expect(videos.map(v => v.video_id)).toEqual(['vidaaaaaaa1', 'vidbbbbbbb2']);
-
-    expect(filterVideos(catalog, { types: ['article'] }).map(v => v.video_id)).toEqual(['YXJ0aWNsZTEx']);
-    expect(filterVideos(catalog, { types: ['short'] }).map(v => v.video_id)).toEqual(['shortvid001']);
+  it('stamps articles with data-media-type="article"', () => {
+    expect(createMediaCard(mockArticle)).toContain('data-media-type="article"');
   });
 
-  it('filters to multiple types (union), preserving order', () => {
-    const result = filterVideos(catalog, { types: ['article', 'short'] });
-    expect(result.map(v => v.video_id)).toEqual(['YXJ0aWNsZTEx', 'shortvid001']);
-  });
-
-  it('all three types is equivalent to "All"', () => {
-    expect(filterVideos(catalog, { types: ['video', 'article', 'short'] })).toHaveLength(4);
-  });
-
-  it('combines a query with a type filter', () => {
-    // "review" matches video1's title; the article/short are excluded by type.
-    const result = filterVideos(catalog, { query: 'review', types: ['video'] });
-    expect(result.map(v => v.video_id)).toEqual(['vidaaaaaaa1']);
-  });
-
-  it('a query that matches only an excluded type returns nothing', () => {
-    const result = filterVideos(catalog, { query: 'microbrand', types: ['video'] });
-    expect(result).toEqual([]);
+  it('stamps shorts with data-media-type="short"', () => {
+    const short = { ...mockVideo, video_id: 'sh0rtvid001', url: 'https://www.youtube.com/shorts/sh0rtvid001' };
+    expect(createMediaCard(short)).toContain('data-media-type="short"');
   });
 });
 

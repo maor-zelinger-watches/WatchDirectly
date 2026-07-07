@@ -43,16 +43,6 @@ export function mediaType(item) {
 }
 
 /**
- * Normalizes a requested type list into a Set to filter by, or null for "no
- * filter". Empty (the "All" chip) and the full set are both "show everything".
- */
-function typeFilterSet(types) {
-  if (!Array.isArray(types) || types.length === 0) return null;
-  const set = new Set(types);
-  return set.size >= CONTENT_TYPES.length ? null : set;
-}
-
-/**
  * Creates an HTML string for a media card (video or article) in the feed.
  * Uses CSS Grid: thumbnail left, info right, comments below.
  * 
@@ -109,7 +99,7 @@ export function createMediaCard(item) {
   `;
 
   return `
-    <article class="${cardClass}" data-video-id="${escaped.videoId}" data-published-at="${sanitizeHtml(item.published_at || '')}">
+    <article class="${cardClass}" data-video-id="${escaped.videoId}" data-media-type="${mediaType(item)}" data-published-at="${sanitizeHtml(item.published_at || '')}">
       <div class="media-card__grid">
         ${embedHtml}
         <div class="media-card__content">
@@ -267,7 +257,7 @@ function scoreVideo(v, queryTokens, hostsByChannel) {
 }
 
 /**
- * Filters videos by a free-text query and/or a set of content types.
+ * Filters videos by a free-text query.
  *
  * The query is tokenized and fuzzily matched against each video's title,
  * channel name, and the channel's host name (typo-tolerant, diacritic-
@@ -275,30 +265,29 @@ function scoreVideo(v, queryTokens, hostsByChannel) {
  * feed items only carry channel_name, so hosts come in via a channel→host
  * map built from creators.json.
  *
- * `types` is the multi-select content-type filter (any of 'video',
- * 'article', 'short'). Empty or the full set means "All" — no type filtering.
+ * Content-type filtering (the Videos/Articles/Shorts chips) is deliberately
+ * NOT handled here: it's a pure CSS visibility filter over already-rendered
+ * cards (views.applyTypeVisibility), so it composes with these results in
+ * the DOM without triggering a re-render.
  *
  * With a query present, results are ranked by relevance (best first), ties
  * broken by original order. With no query, order is preserved exactly.
  * Returns a new array — does not mutate the input.
  *
  * @param {Object[]} videos - Media items from the API
- * @param {{query?: string, types?: string[], hostsByChannel?: Object<string, string>}} filter
+ * @param {{query?: string, hostsByChannel?: Object<string, string>}} filter
  * @returns {Object[]} Matching videos, ranked by relevance when a query is set
  */
-export function filterVideos(videos, { query = '', types = null, hostsByChannel = null } = {}) {
+export function filterVideos(videos, { query = '', hostsByChannel = null } = {}) {
   const queryTokens = tokenize(query);
-  const typeSet = typeFilterSet(types);
 
   if (queryTokens.length === 0) {
-    // Type-only (or no filter): keep the caller's order untouched.
-    return typeSet ? videos.filter(v => typeSet.has(mediaType(v))) : videos.slice();
+    return videos.slice(); // no filter: keep the caller's order untouched
   }
 
   const scored = [];
   for (let i = 0; i < videos.length; i++) {
     const v = videos[i];
-    if (typeSet && !typeSet.has(mediaType(v))) continue;
     const score = scoreVideo(v, queryTokens, hostsByChannel);
     if (score > 0) scored.push({ v, score, i });
   }

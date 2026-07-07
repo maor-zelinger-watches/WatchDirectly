@@ -306,6 +306,18 @@ img {
   border-radius: 2px 2px 0 0;
 }
 
+/* ============================================================
+   CONTENT-TYPE FILTER (Videos / Articles / Shorts chips)
+   Pure CSS visibility: one class per hidden type on the feed
+   container, cards carry data-media-type — nothing re-renders.
+   ============================================================ */
+
+.feed--hide-video [data-media-type="video"],
+.feed--hide-article [data-media-type="article"],
+.feed--hide-short [data-media-type="short"] {
+  display: none;
+}
+
 /* Shorts slide in after the long-form cards have rendered */
 .media-card--short-entering {
   opacity: 0;

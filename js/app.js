@@ -17,7 +17,7 @@
 import { CONFIG } from './config.js';
 import { state, isFilterActive } from './state.js';
 import { api } from './api-client.js';
-import { isShort } from './feed.js';
+import { isShort, mediaType } from './feed.js';
 import { loadFeedCache, saveFeedCache } from './cache.js';
 import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
@@ -32,12 +32,18 @@ import { prefetchComments, updateInlineCommentFormUI } from './comments-ui.js';
 import { loadMyVotes, clearVoteMarkings } from './votes.js';
 import { loadStarsFromStorage, loadMyStars, clearStarMarkings, setOnStarsChanged } from './stars.js';
 import { setupFullscreenKeys } from './fullscreen.js';
-import { update, setupTabs, setupFeedControls } from './views.js';
+import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged } from './views.js';
 
 // The Starred view repaints when a star lands or the server reconciles —
 // registered here (not in stars.js) so stars.js stays view-agnostic.
 setOnStarsChanged(() => {
   if (state.view === 'starred') update();
+});
+
+// A content-type chip change may leave the filtered Latest feed too shallow —
+// registered here (not in views.js) because pagination lives in this module.
+setOnTypeFilterChanged(() => {
+  topUpTypeFilter();
 });
 
 // ============================================================
@@ -586,6 +592,45 @@ function setupInfiniteScroll() {
   }, { rootMargin: '600px' });
 
   scrollObserver.observe(sentinel);
+}
+
+// ============================================================
+// CONTENT-TYPE FILTER TOP-UP
+// The chips only hide cards (CSS), so a filtered feed can look
+// nearly empty even though the catalog has plenty more of that
+// type. After each chip change, keep pulling pages until at
+// least TYPE_FILTER_MIN_CARDS matching items are loaded —
+// bounded per interaction by TYPE_FILTER_TOP_UP_MAX_PAGES so a
+// sparse type can't trigger a request storm. Infinite scroll
+// stays live under the filter and continues from wherever the
+// top-up stopped.
+// ============================================================
+
+let topUpToken = 0; // a newer chip click supersedes an in-flight top-up loop
+
+/** How many already-loaded items the current type selection keeps visible. */
+function selectedTypeCount() {
+  const selected = new Set(state.filter.types);
+  return state.videos.reduce((n, v) => n + (selected.has(mediaType(v)) ? 1 : 0), 0);
+}
+
+async function topUpTypeFilter() {
+  const token = ++topUpToken;
+  let pulled = 0;
+  while (
+    token === topUpToken &&
+    state.view === 'latest' &&
+    !isFilterActive() &&                // a query owns rendering — no top-up
+    state.filter.types.length > 0 &&    // "All" needs no help
+    state.hasMore &&
+    pulled < CONFIG.TYPE_FILTER_TOP_UP_MAX_PAGES &&
+    selectedTypeCount() < CONFIG.TYPE_FILTER_MIN_CARDS
+  ) {
+    const before = state.videos.length;
+    await loadNextPage();
+    if (state.videos.length === before) break; // stalled (mid-load / revalidating / error)
+    pulled++;
+  }
 }
 
 // ============================================================
