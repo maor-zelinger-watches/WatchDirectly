@@ -370,7 +370,7 @@ async function renderStarred() {
     state.renderToken++;
     container.innerHTML = '';
     state.expandedComments.clear();
-    empty.querySelector('p').textContent = 'Sign in to see videos from your starred creators.';
+    empty.querySelector('p').textContent = 'Sign in to see videos from your favorite creators.';
     empty.style.display = '';
     return;
   }
@@ -380,13 +380,13 @@ async function renderStarred() {
     index = await ensureSearchIndex();
   } catch (error) {
     console.error('Failed to load starred feed:', error);
-    showToast('Starred feed is unavailable right now. Please try again.', 'error');
+    showToast('Favorite feed is unavailable right now. Please try again.', 'error');
     // Show a visible fallback instead of a dead blank screen
     if (state.view === 'starred') {
       state.renderToken++;
       container.innerHTML = '';
       state.expandedComments.clear();
-      empty.querySelector('p').textContent = 'Starred feed is unavailable right now. Please try again.';
+      empty.querySelector('p').textContent = 'Favorite feed is unavailable right now. Please try again.';
       empty.style.display = '';
     }
     return;
@@ -406,10 +406,10 @@ async function renderStarred() {
   renderList(container, list);
 
   empty.querySelector('p').textContent = state.myStars.size === 0
-    ? 'No starred creators yet. Tap the ☆ next to a channel name to build your feed.'
+    ? 'No favorite creators yet. Tap the ☆ next to a channel name to build your feed.'
     : (isFilterActive()
       ? 'No videos match your search.'
-      : 'No videos from your starred creators yet.');
+      : 'No videos from your favorite creators yet.');
   empty.style.display = list.length === 0 ? '' : 'none';
 
   prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));

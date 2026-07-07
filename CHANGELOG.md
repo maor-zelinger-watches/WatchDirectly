@@ -21,6 +21,13 @@ that component's heading.
 
 ## Frontend
 
+### 1.6.1 — 2026-07-07
+- Renamed the "Starred" feed tab to **Favorite** (the ☆/★ icons are unchanged).
+  The empty-state and error copy for the feed now read "favorite creators" to
+  match. Internal identifiers (`data-view="starred"`, the `star`/`myStars` API
+  actions, localStorage keys) are untouched, so no data migration or backend
+  change is needed.
+
 ### 1.6.0 — 2026-07-07
 - Removed the category tag from media cards. The `.media-card__category` chip (and
   its `.media-card__tags` wrapper) added visual noise without earning its space —
@@ -162,6 +169,11 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.1.4 — 2026-07-07
+- Updated the Starred-tab e2e spec for the "Favorite" rename: the tab is now
+  selected by its new visible text and the empty-state assertion matches the new
+  "no favorite creators" copy.
 
 ### 1.1.3 — 2026-07-07
 - Updated the feed unit test for the removed category chip: it now asserts the

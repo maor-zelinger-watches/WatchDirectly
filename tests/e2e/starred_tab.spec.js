@@ -126,7 +126,7 @@ test.describe('Starring creators', () => {
 test.describe('Starred tab', () => {
   test('shows a sign-in prompt when signed out', async ({ page }) => {
     await setup(page);
-    await page.locator('.feed-tab', { hasText: 'Starred' }).click();
+    await page.locator('.feed-tab', { hasText: 'Favorite' }).click();
 
     await expect(page.locator('.media-card')).toHaveCount(0);
     await expect(page.locator('#feed-empty')).toContainText(/sign in/i);
@@ -134,7 +134,7 @@ test.describe('Starred tab', () => {
 
   test('shows only videos from starred creators', async ({ page }) => {
     await setup(page, { signedIn: true });
-    await page.locator('.feed-tab', { hasText: 'Starred' }).click();
+    await page.locator('.feed-tab', { hasText: 'Favorite' }).click();
 
     await expect(page.locator('.media-card')).toHaveCount(2);
     const channels = await page.$$eval('.media-card__channel', els => els.map(e => e.textContent));
@@ -143,15 +143,15 @@ test.describe('Starred tab', () => {
 
   test('prompts to star creators when none are starred yet', async ({ page }) => {
     await setup(page, { signedIn: true, myStars: [] });
-    await page.locator('.feed-tab', { hasText: 'Starred' }).click();
+    await page.locator('.feed-tab', { hasText: 'Favorite' }).click();
 
     await expect(page.locator('.media-card')).toHaveCount(0);
-    await expect(page.locator('#feed-empty')).toContainText(/no starred creators/i);
+    await expect(page.locator('#feed-empty')).toContainText(/no favorite creators/i);
   });
 
   test('switching back to Latest restores the full feed', async ({ page }) => {
     await setup(page, { signedIn: true });
-    await page.locator('.feed-tab', { hasText: 'Starred' }).click();
+    await page.locator('.feed-tab', { hasText: 'Favorite' }).click();
     await expect(page.locator('.media-card')).toHaveCount(2);
 
     await page.locator('.feed-tab', { hasText: 'Latest' }).click();
@@ -160,7 +160,7 @@ test.describe('Starred tab', () => {
 
   test('unstarring from a fullscreen card exits fullscreen instead of freezing the page', async ({ page }) => {
     await setup(page, { signedIn: true });
-    await page.locator('.feed-tab', { hasText: 'Starred' }).click();
+    await page.locator('.feed-tab', { hasText: 'Favorite' }).click();
     await expect(page.locator('.media-card')).toHaveCount(2);
 
     // Expand a starred card, then unstar it from inside the overlay — the
