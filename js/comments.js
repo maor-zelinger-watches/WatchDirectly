@@ -5,7 +5,7 @@
  * Max depth: 1 (top-level + one reply level).
  */
 
-import { timeAgo, sanitizeHtml } from './utils.js';
+import { timeAgo, sanitizeHtml, safeUrl } from './utils.js';
 
 const MAX_DEPTH = 1;
 
@@ -13,7 +13,12 @@ const MAX_DEPTH = 1;
  * Builds a nested comment tree from a flat array of comments.
  * Top-level comments (depth 0, no parent_id) become root nodes.
  * Replies (depth 1, with parent_id) are nested under their parent.
- * 
+ *
+ * Replies whose parent isn't a root — a reply-to-reply, or a reply whose
+ * parent is missing from this batch — attach to the nearest known
+ * ancestor instead of being dropped; with no known ancestor at all they
+ * surface as their own thread. A comment must never silently vanish.
+ *
  * @param {Object[]} comments - Flat array of comment objects
  * @returns {Object[]} Tree of comments with `.replies` arrays
  */
@@ -21,35 +26,51 @@ export function buildCommentTree(comments) {
   if (!comments || comments.length === 0) return [];
 
   // Separate top-level and replies
+  const rootMap = new Map(); // root comment_id -> tree node
   const topLevel = [];
   const replies = [];
 
   for (const comment of comments) {
     if (!comment.parent_id) {
-      topLevel.push({ ...comment, replies: [] });
+      const node = { ...comment, replies: [] };
+      topLevel.push(node);
+      rootMap.set(node.comment_id, node);
     } else {
       replies.push(comment);
     }
   }
 
-  // Sort top-level by created_at (chronological)
-  topLevel.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-
-  // Create a map for quick lookup
-  const commentMap = new Map();
-  for (const comment of topLevel) {
-    commentMap.set(comment.comment_id, comment);
+  // parent chain lookup across ALL comments, roots or not
+  const parentOf = new Map();
+  for (const comment of comments) {
+    parentOf.set(comment.comment_id, comment.parent_id || '');
   }
 
-  // Attach replies to their parents (sorted chronologically)
+  // Attach replies (sorted chronologically) to their nearest known root
   replies.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   for (const reply of replies) {
-    const parent = commentMap.get(reply.parent_id);
-    if (parent) {
-      parent.replies.push(reply);
+    let ancestorId = reply.parent_id;
+    const seen = new Set();
+    while (ancestorId && !rootMap.has(ancestorId) && parentOf.has(ancestorId) && !seen.has(ancestorId)) {
+      seen.add(ancestorId);
+      ancestorId = parentOf.get(ancestorId);
+    }
+
+    const root = rootMap.get(ancestorId);
+    if (root) {
+      root.replies.push(reply);
+    } else {
+      // Orphan — parent paginated out or deleted. Promote to its own
+      // thread (and register it so its own replies can find it).
+      const node = { ...reply, replies: [] };
+      topLevel.push(node);
+      rootMap.set(node.comment_id, node);
     }
   }
+
+  // Sort roots by created_at (chronological), promoted orphans included
+  topLevel.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   return topLevel;
 }
@@ -76,7 +97,8 @@ export function createCommentHtml(comment) {
   const escapedBody = sanitizeHtml(comment.body);
   const escapedName = sanitizeHtml(comment.user_name);
   const escapedId = sanitizeHtml(comment.comment_id);
-  const escapedAvatar = sanitizeHtml(comment.user_avatar);
+  // http(s) only — a javascript:/data: avatar URL must not reach <img src>
+  const escapedAvatar = sanitizeHtml(safeUrl(comment.user_avatar));
   const depth = comment.depth || 0;
 
   const replyButton = (depth === 0 && !comment.isOptimistic)
@@ -88,7 +110,9 @@ export function createCommentHtml(comment) {
   return `
     <div class="comment comment--depth-${depth}${optimisticClass}" data-comment-id="${escapedId}">
       <div class="comment__avatar">
-        <img src="${escapedAvatar}" alt="${escapedName}" class="comment__avatar-img" referrerpolicy="no-referrer" />
+        ${escapedAvatar
+          ? `<img src="${escapedAvatar}" alt="${escapedName}" class="comment__avatar-img" referrerpolicy="no-referrer" />`
+          : `<span class="comment__avatar-img" aria-hidden="true"></span>`}
       </div>
       <div class="comment__body">
         <div class="comment__header">

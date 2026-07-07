@@ -6,7 +6,7 @@
  * All functions are pure and testable — DOM manipulation happens in app.js.
  */
 
-import { timeAgo, sanitizeHtml, formatCount } from './utils.js';
+import { timeAgo, sanitizeHtml, formatCount, safeUrl } from './utils.js';
 
 /**
  * Detects YouTube Shorts from the stored URL — shorts entries in the
@@ -19,20 +19,6 @@ import { timeAgo, sanitizeHtml, formatCount } from './utils.js';
 export function isShort(item) {
   if (!item || item.media_type === 'article') return false;
   return typeof item.url === 'string' && item.url.includes('/shorts/');
-}
-
-/**
- * Validates a URL is safe (only http/https protocols).
- * @param {string} url - URL to validate
- * @returns {string} The URL if safe, or empty string
- */
-function safeUrl(url) {
-  if (!url) return '';
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return url;
-  } catch (e) { /* invalid URL */ }
-  return '';
 }
 
 /**
@@ -92,11 +78,11 @@ export function createMediaCard(item) {
   `;
 
   return `
-    <article class="${cardClass}" data-video-id="${escaped.videoId}" data-published-at="${item.published_at || ''}">
+    <article class="${cardClass}" data-video-id="${escaped.videoId}" data-published-at="${sanitizeHtml(item.published_at || '')}">
       <div class="media-card__grid">
         ${embedHtml}
         <div class="media-card__content">
-          <h3 class="media-card__title"><a href="${escaped.url}" target="_blank" rel="noopener noreferrer">${escaped.title}</a></h3>
+          <h3 class="media-card__title"><a href="${sanitizeHtml(escaped.url)}" target="_blank" rel="noopener noreferrer">${escaped.title}</a></h3>
           <div class="media-card__meta">
             <span class="media-card__channel">${isArticle ? '📰' : '🎬'} ${escaped.channel}</span>
             <button class="media-card__star" data-channel="${escaped.channel}" aria-pressed="false" title="Star this creator" aria-label="Star ${escaped.channel}">☆</button>
@@ -174,12 +160,54 @@ export function filterVideos(videos, { query = '', category = '', hostsByChannel
   });
 }
 
+/** Engagement weight for dedupe tiebreaks: votes dominate, comments break ties. */
+function engagementScore(v) {
+  return (Number(v.vote_count) || 0) * 1000 + (Number(v.comment_count) || 0);
+}
+
+/**
+ * Collapses items that resolve to the same URL down to a single entry.
+ *
+ * The backend derived article IDs two different ways over time (base64 of the
+ * URL, then base64 of an MD5 hash of it), so the same article can arrive twice
+ * under two different video_ids — same url, different id. The id-based dedupe
+ * used everywhere else can't catch that, which is why every article rendered
+ * doubled. Keyed on the url, we keep the most-engaged copy (votes first, then
+ * comments) — the row users have actually interacted with. Items without a url
+ * key on their video_id, so distinct id-less items are never merged.
+ *
+ * First occurrence keeps its slot in the output; only its value is upgraded to
+ * the most-engaged duplicate. Returns a new array — does not mutate the input.
+ *
+ * @param {Object[]} videos - Media items from the API
+ * @returns {Object[]} Deduplicated items, in first-seen order
+ */
+export function dedupeVideos(videos) {
+  const byKey = new Map();
+  for (const v of videos) {
+    const key = v && v.url ? String(v.url).trim().toLowerCase() : `id:${v && v.video_id}`;
+    const existing = byKey.get(key);
+    if (!existing || engagementScore(v) > engagementScore(existing)) {
+      byKey.set(key, v);
+    }
+  }
+  return [...byKey.values()];
+}
+
 /**
  * Sorts videos in reverse chronological order (newest first).
+ * Invalid dates sort oldest, and video_id breaks timestamp ties, so the
+ * order is deterministic (and matches the server's pagination order).
  * Returns a new array — does not mutate the input.
  */
 export function sortVideos(videos) {
+  const time = (v) => {
+    const t = new Date(v.published_at).getTime();
+    return Number.isFinite(t) ? t : 0;
+  };
   return [...videos].sort((a, b) => {
-    return new Date(b.published_at).getTime() - new Date(a.published_at).getTime();
+    const diff = time(b) - time(a);
+    if (diff !== 0) return diff;
+    return String(b.video_id || '').localeCompare(String(a.video_id || ''));
   });
 }

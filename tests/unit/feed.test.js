@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createMediaCard, sortVideos, filterVideos, isShort } from '../../js/feed.js';
+import { createMediaCard, sortVideos, filterVideos, isShort, dedupeVideos } from '../../js/feed.js';
 
 const mockVideo = {
   video_id: 'abc12345678',
@@ -262,5 +262,77 @@ describe('sortVideos', () => {
   it('handles single item', () => {
     const result = sortVideos([mockVideo]);
     expect(result).toHaveLength(1);
+  });
+});
+
+describe('dedupeVideos (same article under two ids)', () => {
+  // The real-world bug: an article-ID scheme change orphaned old rows, so the
+  // same url arrived twice under different video_ids and rendered doubled.
+  const chopardOld = { video_id: 'tLz9wPTMxMzA2MQ', url: 'https://monochrome-watches.com/2026-chopard-mille/', vote_count: 1, comment_count: 0, published_at: '2026-07-07T00:00:00Z' };
+  const chopardNew = { video_id: 'Ic50sgzdI3jc5Kt', url: 'https://monochrome-watches.com/2026-chopard-mille/', vote_count: 0, comment_count: 0, published_at: '2026-07-07T00:00:00Z' };
+
+  it('collapses two ids that share a url into one entry', () => {
+    const result = dedupeVideos([chopardOld, chopardNew]);
+    expect(result).toHaveLength(1);
+  });
+
+  it('keeps the most-engaged copy (votes win)', () => {
+    // Order-independent: the vote-1 row survives whether it is seen first or last.
+    expect(dedupeVideos([chopardOld, chopardNew])[0].video_id).toBe('tLz9wPTMxMzA2MQ');
+    expect(dedupeVideos([chopardNew, chopardOld])[0].video_id).toBe('tLz9wPTMxMzA2MQ');
+  });
+
+  it('breaks vote ties by comment count', () => {
+    const a = { video_id: 'a', url: 'https://x/1', vote_count: 0, comment_count: 5 };
+    const b = { video_id: 'b', url: 'https://x/1', vote_count: 0, comment_count: 2 };
+    expect(dedupeVideos([b, a])[0].video_id).toBe('a');
+  });
+
+  it('treats urls case/whitespace-insensitively', () => {
+    const a = { video_id: 'a', url: 'https://X/1 ', vote_count: 0 };
+    const b = { video_id: 'b', url: 'https://x/1', vote_count: 1 };
+    const result = dedupeVideos([a, b]);
+    expect(result).toHaveLength(1);
+    expect(result[0].video_id).toBe('b');
+  });
+
+  it('never merges distinct urls, and preserves first-seen order', () => {
+    const one = { video_id: '1', url: 'https://x/1', vote_count: 0 };
+    const two = { video_id: '2', url: 'https://x/2', vote_count: 0 };
+    const result = dedupeVideos([one, two]);
+    expect(result.map(v => v.video_id)).toEqual(['1', '2']);
+  });
+
+  it('keeps url-less items apart by keying on their id', () => {
+    const a = { video_id: 'a', url: '', vote_count: 0 };
+    const b = { video_id: 'b', url: '', vote_count: 0 };
+    expect(dedupeVideos([a, b])).toHaveLength(2);
+  });
+
+  it('leaves YouTube items (distinct stable ids, distinct urls) untouched', () => {
+    const distinct = mockVideos.map(v => ({ ...v, url: `https://www.youtube.com/watch?v=${v.video_id}` }));
+    const result = dedupeVideos(distinct);
+    expect(result).toHaveLength(distinct.length);
+  });
+});
+
+describe('createMediaCard (XSS — finding #5)', () => {
+  it('escapes a quote-breakout payload in the video title-link href', () => {
+    const html = createMediaCard({ ...mockVideo, url: 'https://evil.example/"><img src=x onerror=alert(1)>' });
+    // The raw breakout must not survive into the markup...
+    expect(html).not.toContain('"><img src=x onerror=alert(1)>');
+    // ...it must be entity-escaped so it stays inside the href attribute.
+    expect(html).toContain('&quot;&gt;&lt;img');
+  });
+
+  it('escapes a quote-breakout payload in data-published-at', () => {
+    const html = createMediaCard({ ...mockVideo, published_at: '2026"><script>alert(1)</script>' });
+    expect(html).not.toContain('"><script>');
+    expect(html).toContain('data-published-at="2026&quot;&gt;&lt;script&gt;');
+  });
+
+  it('leaves a normal https URL intact in the href', () => {
+    const html = createMediaCard(mockVideo);
+    expect(html).toContain('href="https://www.youtube.com/watch?v=abc12345678"');
   });
 });

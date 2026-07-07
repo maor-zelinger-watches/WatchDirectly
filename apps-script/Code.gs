@@ -36,6 +36,13 @@ const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
 
+// OAuth client ID this app's Google Sign-In tokens are minted for. Every ID
+// token MUST carry this as its `aud` claim, or it was issued to a different
+// site and must be rejected — Google's tokeninfo endpoint validates the token
+// signature and expiry but NOT the audience. Keep in sync with GOOGLE_CLIENT_ID
+// in js/app.js.
+const GOOGLE_CLIENT_ID = '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com';
+
 const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
 // Cache per execution
@@ -69,15 +76,33 @@ function findVideoIdCol(headers) {
  */
 function decodeHtmlEntities(text) {
   if (!text) return '';
+  // &amp; is decoded FIRST: feeds routinely double-escape (&amp;#39;,
+  // &amp;quot;), and the numeric/named passes below can only decode the
+  // inner entity once the &amp; wrapper is unwrapped. With &amp; in the
+  // middle (as before), &amp;#39; came out as the literal text "&#39;".
   var decoded = text
+    .replace(/&amp;/g, '&')
     .replace(/&#(\d+);/g, function(_, n) { return String.fromCharCode(parseInt(n, 10)); })
     .replace(/&#x([0-9a-fA-F]+);/g, function(_, h) { return String.fromCharCode(parseInt(h, 16)); })
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'");
   return decoded;
+}
+
+/**
+ * Parses a feed date string to an ISO timestamp, falling back to "now" for a
+ * missing or malformed date. new Date(bad).toISOString() throws RangeError,
+ * which previously propagated up and dropped the ENTIRE channel's items for
+ * that run (for Atom feeds the regex fallback finds no <item> and returns []).
+ * One unparseable pubDate must not lose the other ~14 videos in the same feed.
+ * @param {string} dateStr
+ * @returns {string} ISO 8601 timestamp
+ */
+function toIsoDate(dateStr) {
+  var d = new Date(dateStr);
+  return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
 }
 
 // ============================================================
@@ -190,7 +215,7 @@ function handleFeed(params) {
   var page = parseInt(params.page) || 1;
   var limit = parseInt(params.limit) || DEFAULT_PAGE_LIMIT;
 
-  return getVideos(page, limit);
+  return getVideos(page, limit, params.cursor || '');
 }
 
 function handleRefresh() {
@@ -247,6 +272,39 @@ function scheduledFetchAllFeeds() {
 // ============================================================
 
 function fetchAllFeeds() {
+  // One crawl at a time. Concurrent runs (scheduled trigger + stale-feed
+  // web requests) raced each other: both self-initialized columns, both
+  // appended rows against the same stale dedup snapshot, and both wrote
+  // last_fetch (duplicate Meta rows / lost updates). The script lock is
+  // held only around the marker check-and-set — holding it for the whole
+  // multi-minute crawl would starve comment/vote posts, which share it.
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(5000);
+  } catch (e) {
+    return { new_videos: 0, errors: 0, skipped: true };
+  }
+  try {
+    var inProgress = getMeta('fetch_in_progress');
+    // A marker older than 10 min is a crashed run — Apps Script hard-caps
+    // executions at 6 min, so it can't still be crawling.
+    if (inProgress && (Date.now() - new Date(inProgress).getTime()) < 10 * 60 * 1000) {
+      log('INFO', 'fetchAllFeeds', 'Refresh already running — skipping');
+      return { new_videos: 0, errors: 0, skipped: true };
+    }
+    setMeta('fetch_in_progress', new Date().toISOString());
+  } finally {
+    lock.releaseLock();
+  }
+
+  try {
+    return crawlAllFeeds();
+  } finally {
+    setMeta('fetch_in_progress', '');
+  }
+}
+
+function crawlAllFeeds() {
   var channelsSheet = getSheet('CHANNELS');
   var videosSheet = getSheet('VIDEOS');
 
@@ -396,7 +454,7 @@ function fetchAndParseFeed(feedUrl, channelName, tier, category) {
 }
 
 function extractYouTubeId(url) {
-  var match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([^&]{11})/);
+  var match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/|live\/))([^&]{11})/);
   return match ? match[1] : null;
 }
 
@@ -491,8 +549,64 @@ function extractImageFromHtml(html) {
  * @returns {string} og:image URL or empty string
  */
 /**
+ * Parses an IPv4 host written in any inet_aton form — dotted decimal,
+ * plain decimal (2130706433), octal (017700000001), hex (0x7f000001),
+ * or fewer-than-4 dotted parts — into a 32-bit number.
+ *
+ * @param {string} host - Hostname to try as an IPv4 literal
+ * @returns {number|null} The address as a number, or null if not numeric
+ */
+function parseIpv4(host) {
+  if (!/^[0-9a-fA-FxX.]+$/.test(host)) return null;
+  var parts = host.split('.');
+  if (parts.length > 4) return null;
+
+  var nums = [];
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    var n;
+    if (/^0[xX][0-9a-fA-F]+$/.test(p)) n = parseInt(p, 16);
+    else if (/^0[0-7]*$/.test(p)) n = parseInt(p, 8);
+    else if (/^[0-9]+$/.test(p)) n = parseInt(p, 10);
+    else return null; // e.g. bare hex without 0x — not an inet_aton form
+    if (isNaN(n)) return null;
+    nums.push(n);
+  }
+
+  // inet_aton semantics: the last part fills all remaining bytes
+  var lastBytes = 5 - nums.length;
+  if (nums[nums.length - 1] >= Math.pow(256, lastBytes)) return null;
+  for (var j = 0; j < nums.length - 1; j++) {
+    if (nums[j] > 255) return null;
+  }
+
+  var ip = 0;
+  for (var k = 0; k < nums.length - 1; k++) {
+    ip = ip * 256 + nums[k];
+  }
+  return ip * Math.pow(256, lastBytes) + nums[nums.length - 1];
+}
+
+/**
+ * Whether a 32-bit IPv4 address is publicly routable (not loopback,
+ * private, link-local/metadata, CGNAT, multicast, or reserved).
+ */
+function isPublicIpv4(ip) {
+  var b0 = Math.floor(ip / 16777216) % 256;
+  var b1 = Math.floor(ip / 65536) % 256;
+  if (b0 === 0 || b0 === 10 || b0 === 127) return false;
+  if (b0 === 100 && b1 >= 64 && b1 <= 127) return false;  // CGNAT
+  if (b0 === 169 && b1 === 254) return false;             // link-local + cloud metadata
+  if (b0 === 172 && b1 >= 16 && b1 <= 31) return false;
+  if (b0 === 192 && b1 === 168) return false;
+  if (b0 >= 224) return false;                            // multicast/reserved/broadcast
+  return true;
+}
+
+/**
  * Validates that a URL is safe to fetch server-side.
- * Blocks private/internal IPs, non-HTTPS protocols, and cloud metadata endpoints.
+ * Blocks private/internal IPs (in dotted, decimal, octal, and hex forms),
+ * IPv6 literals, cloud metadata hosts, and non-HTTPS protocols.
  *
  * @param {string} url - URL to validate
  * @returns {boolean} True if safe to fetch
@@ -501,37 +615,70 @@ function isSafeUrl(url) {
   if (!url) return false;
   // Only allow HTTPS
   if (!/^https:\/\//i.test(url)) return false;
-  // Extract hostname
-  var hostMatch = url.match(/^https:\/\/([^/:]+)/i);
+  // Extract host (may include credentials/port — strip both)
+  var hostMatch = url.match(/^https:\/\/([^/?#]+)/i);
   if (!hostMatch) return false;
   var host = hostMatch[1].toLowerCase();
-  // Block private/internal ranges and cloud metadata
-  var blocked = [
-    /^localhost$/,
-    /^127\./,
-    /^10\./,
-    /^172\.(1[6-9]|2[0-9]|3[01])\./,
-    /^192\.168\./,
-    /^169\.254\./,
-    /^metadata\.google/,
-    /^0\./,
-    /^\[/,  // IPv6
-  ];
-  for (var i = 0; i < blocked.length; i++) {
-    if (blocked[i].test(host)) return false;
-  }
+  var at = host.lastIndexOf('@');
+  if (at !== -1) host = host.slice(at + 1);
+  // IPv6 literals — no legitimate article lives at one
+  if (host.indexOf('[') !== -1 || host.indexOf(']') !== -1) return false;
+  var colon = host.indexOf(':');
+  if (colon !== -1) host = host.slice(0, colon);
+  host = host.replace(/\.$/, ''); // "127.0.0.1." is a valid FQDN spelling
+  if (!host) return false;
+
+  if (host === 'localhost' || /\.localhost$/.test(host) || /\.local$/.test(host)) return false;
+  if (/^metadata\.google/.test(host) || host === 'metadata.google.internal') return false;
+
+  // Numeric hosts: normalize every inet_aton spelling to one 32-bit
+  // address before range-checking — 0x7f000001, 2130706433, and
+  // 017700000001 are all 127.0.0.1.
+  var ip = parseIpv4(host);
+  if (ip !== null) return isPublicIpv4(ip);
+
   return true;
 }
 
 function fetchOgImage(articleUrl) {
-  if (!articleUrl || !isSafeUrl(articleUrl)) return '';
+  if (!articleUrl) return '';
+
+  // Follow redirects MANUALLY so every hop is re-validated. With
+  // followRedirects:true only the first URL was checked — a malicious
+  // or compromised feed could 302 the fetch into internal addresses.
+  var url = articleUrl;
+  var response = null;
+  var maxHops = 4;
   try {
-    var response = UrlFetchApp.fetch(articleUrl, {
-      muteHttpExceptions: true,
-      followRedirects: true,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)' },
-    });
-    if (response.getResponseCode() !== 200) return '';
+    for (var hop = 0; hop <= maxHops; hop++) {
+      if (!isSafeUrl(url)) return '';
+      response = UrlFetchApp.fetch(url, {
+        muteHttpExceptions: true,
+        followRedirects: false,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)' },
+      });
+
+      var code = response.getResponseCode();
+      if (code >= 300 && code < 400) {
+        var headers = response.getAllHeaders();
+        var location = headers['Location'] || headers['location'] || '';
+        if (Array.isArray(location)) location = location[0] || '';
+        if (!location) return '';
+        if (/^https:\/\//i.test(location)) {
+          url = location;
+        } else if (location.charAt(0) === '/' && location.charAt(1) !== '/') {
+          var origin = url.match(/^https:\/\/[^/?#]+/i);
+          if (!origin) return '';
+          url = origin[0] + location;
+        } else {
+          // http:// downgrade, protocol-relative, or exotic form — give up
+          return '';
+        }
+        continue;
+      }
+      break;
+    }
+    if (!response || response.getResponseCode() !== 200) return '';
 
     var html = response.getContentText().substring(0, 50000); // Only scan first 50KB
 
@@ -640,7 +787,7 @@ function parseRss2(root, channelName, tier, category) {
       title: title,
       url: link,
       preview_image: previewImage,
-      published_at: new Date(pubDate).toISOString(),
+      published_at: toIsoDate(pubDate),
       tier: tier,
       category: category,
     });
@@ -713,7 +860,7 @@ function parseAtom(root, channelName, tier, category) {
       title: title,
       url: link,
       preview_image: previewImage,
-      published_at: new Date(published).toISOString(),
+      published_at: toIsoDate(published),
       tier: tier,
       category: category,
       view_count: viewCount,
@@ -761,7 +908,7 @@ function parseRegex(xml, channelName, tier, category) {
       title: title,
       url: link,
       preview_image: previewImage,
-      published_at: new Date(pubDate).toISOString(),
+      published_at: toIsoDate(pubDate),
       tier: tier,
       category: category,
     });
@@ -808,23 +955,100 @@ function readAllVideos() {
     videos.push(video);
   }
 
-  return videos;
+  return dedupeByUrl(videos);
 }
 
-function getVideos(page, limit) {
+/** Engagement weight for dedupe tiebreaks: votes dominate, comments break ties. */
+function videoEngagement(v) {
+  return (Number(v.vote_count) || 0) * 1000 + (Number(v.comment_count) || 0);
+}
+
+/**
+ * Collapses rows that point at the same URL down to a single entry.
+ *
+ * Article IDs were derived two different ways over the project's life (base64
+ * of the URL string, then base64 of an MD5 hash of the guid). The pre-change
+ * rows were orphaned: re-crawls no longer matched them by id, so crawlAllFeeds
+ * appended every still-in-feed article a second time under its new id. Both
+ * rows carry the same url, so we key on that and keep the most-engaged copy
+ * (votes first, then comments) — the row users have actually voted/commented
+ * on. YouTube items are unaffected (their id is the stable YouTube id) and
+ * rows without a url fall back to their id so distinct items never merge.
+ *
+ * This corrects the served feed, the total count, and pagination without
+ * touching the sheet. (crawlAllFeeds won't re-double: the new-scheme id now
+ * exists, so future crawls dedupe against it.)
+ */
+function dedupeByUrl(videos) {
+  var byKey = {};
+  var order = [];
+  for (var i = 0; i < videos.length; i++) {
+    var v = videos[i];
+    var key = v.url ? String(v.url).trim().toLowerCase() : 'id:' + v.video_id;
+    if (!byKey.hasOwnProperty(key)) {
+      byKey[key] = v;
+      order.push(key);
+    } else if (videoEngagement(v) > videoEngagement(byKey[key])) {
+      byKey[key] = v;
+    }
+  }
+  return order.map(function(k) { return byKey[k]; });
+}
+
+/** Millisecond publish time for sorting/cursoring; invalid dates sort oldest. */
+function pubTime(video) {
+  var t = new Date(video.published_at).getTime();
+  return isNaN(t) ? 0 : t;
+}
+
+/**
+ * Total order for the feed: published_at descending, video_id descending
+ * as the tiebreak. Deterministic so cursor pagination never skips or
+ * repeats items whose timestamps collide.
+ */
+function compareVideos(a, b) {
+  var diff = pubTime(b) - pubTime(a);
+  if (diff !== 0) return diff;
+  var aId = String(a.video_id || '');
+  var bId = String(b.video_id || '');
+  return aId < bId ? 1 : (aId > bId ? -1 : 0);
+}
+
+/** Opaque pagination cursor for the position AFTER this video. */
+function cursorFor(video) {
+  return new Date(pubTime(video)).toISOString() + '|' + video.video_id;
+}
+
+function getVideos(page, limit, cursor) {
   var videos = readAllVideos();
 
   if (videos.length === 0) {
-    return { status: 'ok', videos: [], total: 0, page: page };
+    return { status: 'ok', videos: [], total: 0, page: page, next_cursor: '' };
   }
 
-  // Sort by published_at descending (newest first)
-  videos.sort(function(a, b) {
-    return new Date(b.published_at) - new Date(a.published_at);
-  });
+  // Sort by published_at descending (newest first), video_id tiebreak
+  videos.sort(compareVideos);
 
-  // Paginate
   var start = (page - 1) * limit;
+
+  // Cursor pagination: resume strictly after the (published_at, video_id)
+  // position the client last saw. Unlike the page offset above, items
+  // prepended by a feed ingest mid-session can't shift this window —
+  // offset pages made forward scrolling skip (or repeat) shifted items.
+  if (cursor) {
+    var sep = cursor.indexOf('|');
+    var cursorTime = new Date(sep === -1 ? cursor : cursor.slice(0, sep)).getTime();
+    var cursorId = sep === -1 ? '' : String(cursor.slice(sep + 1));
+    if (!isNaN(cursorTime)) {
+      start = 0;
+      while (start < videos.length) {
+        var t = pubTime(videos[start]);
+        if (t < cursorTime || (t === cursorTime && String(videos[start].video_id || '') < cursorId)) break;
+        start++;
+      }
+    }
+  }
+
   var paged = videos.slice(start, start + limit);
 
   return {
@@ -832,6 +1056,10 @@ function getVideos(page, limit) {
     videos: paged,
     total: videos.length,
     page: page,
+    // Where the next request should resume; '' when the catalog is done
+    next_cursor: (paged.length > 0 && start + paged.length < videos.length)
+      ? cursorFor(paged[paged.length - 1])
+      : '',
   };
 }
 
@@ -987,42 +1215,61 @@ function handleAddComment(data) {
     return { status: 'error', message: 'You have been blocked from commenting' };
   }
 
-  // 5. Check rate limit
-  if (isRateLimited(user.email)) {
-    log('WARN', 'addComment', 'Rate limited: ' + user.email);
-    return { status: 'error', message: 'Please wait before posting another comment' };
-  }
-
-  // 6. Determine depth
+  // 5. Determine depth
   var depth = 0;
   if (parentId) {
     depth = 1;
   }
 
-  // 7. Generate comment ID
+  // 6. Generate comment ID
   var commentId = 'c_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
 
-  // 8. Append to Comments sheet
-  var sheet = getSheet('COMMENTS');
-  var now = new Date().toISOString();
+  // Serialize the rate-limit check + append + recount. The rate limit is
+  // checked INSIDE the lock: two simultaneous posts otherwise both read a
+  // stale last-comment time, both pass the 30s check, and both post.
+  // updateCommentCount also re-reads the whole Comments sheet to total this
+  // video's comments; without a lock, two simultaneous posts on the same
+  // video race and the second recount can overwrite comment_count with a
+  // stale total (lost update), so the stored count drifts permanently below
+  // the real number. Mirrors handleVote/handleStar.
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
 
-  sheet.appendRow([
-    commentId,
-    videoId,
-    parentId || '',
-    user.name,
-    user.email,
-    user.picture,
-    body,
-    depth,
-    now,
-  ]);
+  try {
+    // 7. Check rate limit (see lock comment above)
+    if (isRateLimited(user.email)) {
+      log('WARN', 'addComment', 'Rate limited: ' + user.email);
+      return { status: 'error', message: 'Please wait before posting another comment' };
+    }
 
-  // 9. Record for rate limiting
-  recordCommentTime(user.email);
+    // 8. Append to Comments sheet
+    var sheet = getSheet('COMMENTS');
+    var now = new Date().toISOString();
 
-  // 10. Update comment count on the video
-  updateCommentCount(videoId);
+    sheet.appendRow([
+      commentId,
+      videoId,
+      parentId || '',
+      user.name,
+      user.email,
+      user.picture,
+      body,
+      depth,
+      now,
+    ]);
+
+    // 9. Record for rate limiting
+    recordCommentTime(user.email);
+
+    // 10. Update comment count on the video
+    updateCommentCount(videoId);
+  } finally {
+    lock.releaseLock();
+  }
 
   log('INFO', 'addComment', 'Comment added by ' + user.email + ' on video ' + videoId);
 
@@ -1341,7 +1588,7 @@ function handleMyStars(data) {
 function verifyGoogleToken(idToken) {
   try {
     var response = UrlFetchApp.fetch(
-      'https://oauth2.googleapis.com/tokeninfo?id_token=' + idToken,
+      'https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(idToken),
       { muteHttpExceptions: true }
     );
 
@@ -1350,6 +1597,28 @@ function verifyGoogleToken(idToken) {
     }
 
     var payload = JSON.parse(response.getContentText());
+
+    // tokeninfo confirms the token is a valid, unexpired, Google-signed ID
+    // token — but it returns 200 for a token minted for ANY OAuth client.
+    // Without the audience check below, a token issued to any other Google
+    // Sign-In site could be replayed here to act as its owner. Verify
+    // audience, issuer, expiry, and a verified email before trusting it.
+    if (payload.aud !== GOOGLE_CLIENT_ID) {
+      log('ERROR', 'verifyGoogleToken', 'Token audience mismatch');
+      return null;
+    }
+    if (payload.iss !== 'accounts.google.com' && payload.iss !== 'https://accounts.google.com') {
+      log('ERROR', 'verifyGoogleToken', 'Token issuer invalid: ' + payload.iss);
+      return null;
+    }
+    if (!payload.exp || parseInt(payload.exp, 10) * 1000 <= Date.now()) {
+      log('ERROR', 'verifyGoogleToken', 'Token expired');
+      return null;
+    }
+    if (!payload.email || String(payload.email_verified) !== 'true') {
+      log('ERROR', 'verifyGoogleToken', 'Email not present or not verified');
+      return null;
+    }
 
     return {
       email: payload.email,
@@ -1396,6 +1665,11 @@ function getMeta(key) {
   return null;
 }
 
+// Read-modify-write with no lock of its own: callers that can race on the
+// SAME key must serialize around it (rate stamps run inside the
+// handleAddComment lock; last_fetch / fetch_in_progress are single-writer
+// via the fetchAllFeeds guard). LockService is not reentrant, so taking
+// the script lock here would deadlock those callers.
 function setMeta(key, value) {
   var sheet = getSheet('META');
   var data = sheet.getDataRange().getValues();
@@ -1444,9 +1718,11 @@ function log(level, source, message) {
 }
 
 function handleLogs(params) {
-  // Require admin token from Meta sheet
+  // Require admin token from Meta sheet. Fail CLOSED when it isn't
+  // configured — logs carry user emails, and an unset token must mean
+  // "nobody gets in", not "everybody does".
   var adminToken = getMeta('admin_token');
-  if (adminToken && params.token !== adminToken) {
+  if (!adminToken || params.token !== adminToken) {
     return { status: 'error', message: 'Unauthorized' };
   }
 

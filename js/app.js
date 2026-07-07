@@ -39,6 +39,9 @@ const state = {
   videos: [],          // All loaded videos so far
   currentPage: 0,      // Last page that was loaded
   totalVideos: 0,      // Total available from API
+  nextCursor: undefined, // server cursor after the last rendered page:
+                         // string = resume here ('' = end of catalog),
+                         // undefined = backend without cursors (page math)
   loading: false,      // Prevents concurrent fetches
   hasMore: true,       // Whether more pages exist
   expandedComments: new Set(),
@@ -149,8 +152,9 @@ async function loadNextPage() {
       const data = await api.fetchFeed(1, initialLimit);
       const newVideos = data.videos || [];
       state.totalVideos = data.total || 0;
+      state.nextCursor = data.next_cursor;
       state.videos = state.videos.concat(newVideos);
-      
+
       skeleton.style.display = 'none';
       await appendCards(newVideos);
       state.initialLoadComplete = true;
@@ -160,16 +164,17 @@ async function loadNextPage() {
         const fullPageData = await api.fetchFeed(1, CONFIG.PAGE_SIZE);
         const fullVideos = fullPageData.videos || [];
         const remainingVideos = fullVideos.slice(initialLimit);
-        
+        state.nextCursor = fullPageData.next_cursor;
+
         // Filter out videos already in state
         const uniqueRemaining = remainingVideos.filter(nv => !state.videos.some(sv => sv.video_id === nv.video_id));
-        
+
         state.videos = state.videos.concat(uniqueRemaining);
         await appendCards(uniqueRemaining);
       }
 
       state.currentPage = 1;
-      state.hasMore = state.videos.length < state.totalVideos;
+      state.hasMore = serverHasMore();
       saveFeedCache(state.videos, state.totalVideos);
 
       // Prefetch comments for all loaded cards in the background
@@ -186,9 +191,9 @@ async function loadNextPage() {
       // Normal infinite scroll for page 2 onwards. The read-ahead buffer
       // usually has this page already — render it with zero network wait.
       const nextPage = state.currentPage + 1;
-      let newVideos = takeBufferedPage(nextPage);
+      let batch = takeBufferedPage(nextPage);
 
-      if (!newVideos) {
+      if (!batch) {
         // Outscrolled the prefetch — fall back to fetching on demand.
         // pendingFetchPage stops a concurrent refill response for this same
         // page from poisoning the buffer head (currentPage only advances
@@ -197,9 +202,9 @@ async function loadNextPage() {
         const epoch = state.prefetchToken;
         state.pendingFetchPage = nextPage;
         try {
-          const data = await api.fetchFeed(nextPage, CONFIG.PAGE_SIZE);
+          const data = await api.fetchFeed(nextPage, CONFIG.PAGE_SIZE, state.nextCursor || '');
           if (epoch !== state.prefetchToken) return;
-          newVideos = data.videos || [];
+          batch = { videos: data.videos || [], nextCursor: data.next_cursor };
           state.totalVideos = data.total || 0;
         } finally {
           state.pendingFetchPage = 0;
@@ -207,17 +212,20 @@ async function loadNextPage() {
       }
 
       state.currentPage = nextPage;
+      state.nextCursor = batch.nextCursor;
+      const newVideos = batch.videos;
 
       // Filter out items already in state to handle pagination overlap (e.g., when new items were added since last fetch)
       const uniqueNewVideos = newVideos.filter(nv => !state.videos.some(sv => sv.video_id === nv.video_id));
 
       state.videos = state.videos.concat(uniqueNewVideos);
       // An empty page means we've walked past the real end of the catalog.
-      // The server total can overcount what forward pagination can reach
-      // (items prepended mid-session shift pages; the dedupe above drops
-      // the duplicates), so an unreachable total must not keep hasMore
-      // true — that would spin the retrigger loop on empty fetches forever.
-      state.hasMore = newVideos.length > 0 && state.videos.length < state.totalVideos;
+      // Without cursors the server total can overcount what forward
+      // pagination can reach (items prepended mid-session shift pages;
+      // the dedupe above drops the duplicates), so an unreachable total
+      // must not keep hasMore true — that would spin the retrigger loop
+      // on empty fetches forever.
+      state.hasMore = newVideos.length > 0 && serverHasMore();
 
       await appendCards(uniqueNewVideos);
 
@@ -271,6 +279,45 @@ function hasUnfetchedPages() {
   return state.videos.length + bufferedVideoCount() < state.totalVideos;
 }
 
+/**
+ * Whether more pages exist beyond what's rendered. Prefers the server's
+ * cursor (exact — prepended items can't skew it); backends without
+ * cursor support fall back to the count math.
+ */
+function serverHasMore() {
+  if (typeof state.nextCursor === 'string') return state.nextCursor !== '';
+  return state.videos.length < state.totalVideos;
+}
+
+/**
+ * Derives the pagination cursor that resumes after the last item of
+ * `videos` (same format the backend emits: "<ISO time>|<video_id>").
+ * Used when restoring a cached feed, where no server cursor was kept.
+ * Returns undefined when it can't be derived — page-offset fallback.
+ */
+function cursorAfter(videos) {
+  if (!videos || videos.length === 0) return undefined;
+  const last = videos[videos.length - 1];
+  if (!last || !last.video_id) return undefined;
+  const t = new Date(last.published_at).getTime();
+  return `${new Date(Number.isFinite(t) ? t : 0).toISOString()}|${last.video_id}`;
+}
+
+/** The cursor the refill loop should continue from (after the last
+ *  buffered page, or after the rendered feed when the buffer is empty).
+ *  undefined = backend without cursor support — use page numbers. */
+function nextCursorToFetch() {
+  const last = state.prefetchBuffer[state.prefetchBuffer.length - 1];
+  return last ? last.nextCursor : state.nextCursor;
+}
+
+/** Whether the refill loop has anything left to prefetch. */
+function hasMoreToPrefetch() {
+  const cursor = nextCursorToFetch();
+  if (typeof cursor === 'string') return cursor !== '';
+  return hasUnfetchedPages();
+}
+
 /** The next page the refill loop should fetch: after the last buffered page.
  *  Counts a page being direct-fetched by loadNextPage as taken, so a refill
  *  response for it is discarded instead of poisoning the buffer head. */
@@ -286,14 +333,15 @@ function invalidatePrefetchBuffer() {
 }
 
 /**
- * Takes the buffered videos for `page` if they're at the head of the
- * buffer. Anything else means the buffer no longer lines up with the
- * feed's pagination — discard it rather than render out-of-order pages.
+ * Takes the buffered entry ({videos, nextCursor}) for `page` if it's at
+ * the head of the buffer. Anything else means the buffer no longer lines
+ * up with the feed's pagination — discard it rather than render
+ * out-of-order pages.
  */
 function takeBufferedPage(page) {
   if (state.prefetchBuffer.length === 0) return null;
   if (state.prefetchBuffer[0].page === page) {
-    return state.prefetchBuffer.shift().videos;
+    return state.prefetchBuffer.shift();
   }
   invalidatePrefetchBuffer();
   return null;
@@ -315,10 +363,17 @@ async function refillPrefetchBuffer() {
     while (
       token === state.prefetchToken &&
       state.prefetchBuffer.length < CONFIG.PREFETCH_PAGES_AHEAD &&
-      hasUnfetchedPages()
+      hasMoreToPrefetch()
     ) {
       const page = nextPageToFetch();
-      const data = await api.fetchFeed(page, CONFIG.PAGE_SIZE);
+      const cursor = nextCursorToFetch();
+
+      // Cursor mode can't leapfrog a page loadNextPage is direct-fetching:
+      // the cursor to continue from is inside that response. Stop here —
+      // loadNextPage refills again once its fetch lands.
+      if (typeof cursor === 'string' && state.prefetchBuffer.length === 0 && state.pendingFetchPage) return;
+
+      const data = await api.fetchFeed(page, CONFIG.PAGE_SIZE, cursor || '');
       if (token !== state.prefetchToken) return;
 
       if (data.total) state.totalVideos = data.total;
@@ -330,6 +385,9 @@ async function refillPrefetchBuffer() {
         // scrolling drains the remaining buffer, then stops cleanly.
         state.totalVideos = state.videos.length + bufferedVideoCount();
         state.hasMore = state.videos.length < state.totalVideos;
+        // Nothing buffered and the server confirmed the end — mark the
+        // rendered feed's cursor exhausted too.
+        if (data.next_cursor === '' && state.prefetchBuffer.length === 0) state.nextCursor = '';
         if (!state.hasMore && state.view === 'latest' && !isFilterActive()) {
           const sentinel = document.getElementById('load-more-container');
           if (sentinel) sentinel.style.display = 'none';
@@ -340,7 +398,7 @@ async function refillPrefetchBuffer() {
       // A scroll may have consumed pages while this fetch was in flight;
       // only append if the response still extends the buffer contiguously.
       if (page === nextPageToFetch()) {
-        state.prefetchBuffer.push({ page, videos });
+        state.prefetchBuffer.push({ page, videos, nextCursor: data.next_cursor });
       }
     }
   } catch (e) {
@@ -569,16 +627,20 @@ async function showCachedFeed() {
   // and votes) — derive the page cursor from its size so the read-ahead
   // buffer prefetches genuinely new pages, not duplicates of what's shown.
   state.currentPage = Math.max(1, Math.ceil(cached.videos.length / CONFIG.PAGE_SIZE));
+  state.nextCursor = cursorAfter(cached.videos);
   state.hasMore = state.videos.length < state.totalVideos;
   state.initialLoadComplete = true;
 
-  // Make sentinel visible so the IntersectionObserver can fire for page 2
+  await appendCards(cached.videos);
+
+  // Reveal the sentinel only AFTER the cached cards are in. While the
+  // container is still empty the sentinel sits at the top of the viewport,
+  // and the observer's first snapshot would fire loadNextPage with zero
+  // user intent — auto-fetching pages past a cache nobody scrolled yet.
   if (state.hasMore) {
     const sentinel = document.getElementById('load-more-container');
     if (sentinel) sentinel.style.display = '';
   }
-
-  await appendCards(cached.videos);
   return true;
 }
 
@@ -592,6 +654,13 @@ async function showCachedFeed() {
  * 5. Reorder if necessary
  */
 async function revalidateFeed() {
+  // Claim the feed before the first await. The fetch below races any
+  // loadNextPage the scroll observer fires, and pagination's only interlock
+  // with revalidation is this flag; setting it AFTER the await (as before)
+  // left a window where loadNextPage advanced currentPage and state.videos,
+  // which this function then clobbered by resetting to fresh page 1 — dropping
+  // the just-loaded page and regressing pagination. Reset in the finally below.
+  state.revalidating = true;
   try {
     const data = await api.fetchFeed(1, CONFIG.PAGE_SIZE);
     const freshVideos = data.videos || [];
@@ -607,7 +676,9 @@ async function revalidateFeed() {
 
     if (cachedIds === freshIds && !countsChanged) {
       // Content identical — the cached pagination is still valid, so the
-      // read-ahead buffer can start filling from it as-is.
+      // read-ahead buffer can start filling from it as-is. Adopt the
+      // server's cursor: it's exact where a derived one is best-effort.
+      state.nextCursor = data.next_cursor;
       prefetchComments(state.videos);
       refillPrefetchBuffer();
       return;
@@ -619,7 +690,8 @@ async function revalidateFeed() {
       state.videos = freshVideos;
       state.totalVideos = data.total || freshVideos.length;
       state.currentPage = 1;
-      state.hasMore = state.videos.length < state.totalVideos;
+      state.nextCursor = data.next_cursor;
+      state.hasMore = serverHasMore();
       saveFeedCache(freshVideos, state.totalVideos);
       // Page 1 was replaced — pages buffered against the old pagination
       // no longer line up.
@@ -631,14 +703,10 @@ async function revalidateFeed() {
     const container = document.getElementById('feed-container');
     if (!container) return;
 
-    // The diff owns the container from here: pause pagination (a buffered
-    // page consumed mid-diff would be clobbered by the state replacement
-    // below) and invalidate the buffer eagerly — the old pagination died
-    // the moment we decided fresh page 1 differs.
-    state.revalidating = true;
+    // The diff owns the container from here: invalidate the buffer eagerly —
+    // the old pagination died the moment we decided fresh page 1 differs.
+    // Pagination is already paused: state.revalidating was claimed at entry.
     invalidatePrefetchBuffer();
-
-    try {
 
     // Cancel any deferred inserts still pending from the cached render —
     // they'd re-add cards this diff is about to reconcile or drop.
@@ -732,8 +800,16 @@ async function revalidateFeed() {
     state.videos = freshVideos;
     state.totalVideos = data.total || freshVideos.length;
     state.currentPage = 1;
-    state.hasMore = state.videos.length < state.totalVideos;
-    state.commentsCache = {};
+    state.nextCursor = data.next_cursor;
+    state.hasMore = serverHasMore();
+    // Drop prefetched comments only where the server reports a different
+    // count — wiping the whole cache defeated the prefetch entirely.
+    for (const fv of freshVideos) {
+      const cachedComments = state.commentsCache[fv.video_id];
+      if (cachedComments && cachedComments.comments.length !== (fv.comment_count || 0)) {
+        delete state.commentsCache[fv.video_id];
+      }
+    }
     // Invalidate again: a refill restarted during the diff would have
     // buffered pages against the pre-reset currentPage.
     invalidatePrefetchBuffer();
@@ -746,16 +822,29 @@ async function revalidateFeed() {
     // Prefetch comments for all cards
     prefetchComments(freshVideos);
 
-    } finally {
-      state.revalidating = false;
-    }
-
     refillPrefetchBuffer();
   } catch (e) {
     // Silent fail — stale cache is still visible
     prefetchComments(state.videos);
     // The cached pagination is still what's on screen — buffer from it
     refillPrefetchBuffer();
+  } finally {
+    // Release pagination on every path — including the early returns above,
+    // which claimed the flag at entry but return before reaching here.
+    state.revalidating = false;
+    // The observer only fires on intersection CHANGES. If the sentinel sat
+    // inside its margin the whole time pagination was paused (scrolled to
+    // the bottom during the diff, or the diff shrank the feed under the
+    // viewport), nothing would ever re-trigger it — nudge it here.
+    requestAnimationFrame(() => {
+      if (!state.hasMore || state.view !== 'latest' || isFilterActive()) return;
+      const sentinel = document.getElementById('load-more-container');
+      if (!sentinel || sentinel.style.display === 'none') return;
+      const rect = sentinel.getBoundingClientRect();
+      if (rect.top > 0 && rect.top <= window.innerHeight + 600) {
+        loadNextPage();
+      }
+    });
   }
 }
 
@@ -896,12 +985,18 @@ function setupTabs() {
   });
 }
 
+// Bumped on every tab switch so an older switch's async work (top list,
+// starred index) can't repaint — or error-revert — the tab the user has
+// since moved on from.
+let viewToken = 0;
+
 /**
  * Switches between the chronological "Latest" feed and the "Top This Week"
  * upvote ranking. The top list is fetched once, then cached for the session.
  */
 async function switchView(view) {
   if (view === state.view) return;
+  const token = ++viewToken;
   state.view = view;
 
   document.querySelectorAll('.feed-tab').forEach(t => {
@@ -910,6 +1005,10 @@ async function switchView(view) {
     t.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   window.scrollTo({ top: 0 });
+
+  // A superseded switch bails before its skeleton cleanup — clear any
+  // skeleton it left showing before this view takes over the container.
+  document.getElementById('feed-skeleton').style.display = 'none';
 
   if (view === 'top' && !state.topLoaded) {
     const container = document.getElementById('feed-container');
@@ -922,6 +1021,8 @@ async function switchView(view) {
     skeleton.style.display = '';
     try {
       const data = await api.fetchTopWeek(50);
+      // Cache the list even if this switch is stale — reopening the tab
+      // then renders instantly. Only the DOM work below needs the guard.
       state.topVideos = data.videos || [];
       // Don't freeze an empty result for the whole session. An empty list can
       // come from a transient hiccup or a refresh still in flight; leaving
@@ -929,6 +1030,9 @@ async function switchView(view) {
       state.topLoaded = state.topVideos.length > 0;
     } catch (e) {
       console.error('Failed to load top videos:', e);
+      // A newer switch owns the tabs and container now — don't yank the
+      // user to Latest over a request they've already navigated away from.
+      if (token !== viewToken) return;
       showToast('Failed to load top videos. Please try again.', 'error');
       state.view = 'latest';
       document.querySelectorAll('.feed-tab').forEach(t => {
@@ -940,6 +1044,7 @@ async function switchView(view) {
       applyFilter();
       return;
     }
+    if (token !== viewToken) return;
     skeleton.style.display = 'none';
   }
 
@@ -959,9 +1064,13 @@ async function switchView(view) {
     } catch (e) {
       /* renderStarred surfaces the error toast */
     }
+    if (token !== viewToken) return;
     skeleton.style.display = 'none';
   }
 
+  // Only the most recent switch may repaint — a stale update() here
+  // caused redundant re-renders and lost scroll on rapid tab flips.
+  if (token !== viewToken) return;
   update();
 }
 
@@ -1209,7 +1318,11 @@ async function toggleVote(videoId) {
     if (isSignedIn()) {
       voteEpoch++;
       if (wasVoted) state.myVotes.add(videoId); else state.myVotes.delete(videoId);
-      setVoteButtons(videoId, wasVoted, prevCount);
+      // Undo exactly our optimistic delta from whatever count is displayed
+      // NOW — a concurrent update may have replaced prevCount already.
+      const countEl = document.querySelector(`.media-card__vote[data-video-id="${videoId}"] .media-card__vote-count`);
+      const shownCount = countEl ? (parseInt(countEl.textContent, 10) || 0) : optimisticCount;
+      setVoteButtons(videoId, wasVoted, Math.max(0, shownCount - (wasVoted ? -1 : 1)));
     }
     showToast(error.message || 'Failed to vote. Please try again.', 'error');
   }
@@ -1727,7 +1840,11 @@ async function submitInlineComment(videoId, parentId, textarea) {
   
   // Inject into DOM
   if (parentId) {
-    const parentThread = document.querySelector(`.comment[data-comment-id="${parentId}"]`).closest('.comment-thread');
+    // The parent node can be gone if the list re-rendered (prefetch
+    // refresh, revalidation) while the reply form was open — the post
+    // below still goes through, only the optimistic paint is skipped.
+    const parentEl = document.querySelector(`.comment[data-comment-id="${parentId}"]`);
+    const parentThread = parentEl ? parentEl.closest('.comment-thread') : null;
     if (parentThread) {
       let repliesContainer = parentThread.querySelector('.comment-thread__replies');
       if (!repliesContainer) {
@@ -1940,3 +2057,11 @@ function showToast(message, type = 'info') {
   container.appendChild(toast);
   setTimeout(() => toast.remove(), 3000);
 }
+
+// ============================================================
+// TEST-ONLY EXPORTS
+// Consumed by tests/unit/revalidate_race.test.js to drive the internal feed
+// state machine directly. In the browser, app.js is loaded as a plain
+// <script type="module"> and nothing imports this binding, so it is inert.
+// ============================================================
+export const __test__ = { state, revalidateFeed, loadNextPage };

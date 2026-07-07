@@ -8,6 +8,8 @@
  * which is verified server-side.
  */
 
+import { dedupeVideos } from './feed.js';
+
 /**
  * Creates an API client bound to a specific Apps Script URL.
  * 
@@ -32,7 +34,14 @@ export function createApiClient(baseUrl) {
       throw new Error(`API error: ${response.status} ${response.statusText}`);
     }
 
-    return response.json();
+    const data = await response.json();
+
+    // Apps Script returns 200 even for app-level errors
+    if (data.status === 'error') {
+      throw new Error(data.message || 'Unknown error');
+    }
+
+    return data;
   }
 
   /**
@@ -67,13 +76,25 @@ export function createApiClient(baseUrl) {
   return {
     /**
      * Fetches the video feed. Triggers server-side RSS refresh if stale.
-     * 
+     *
+     * When `cursor` is given, the server resumes strictly after that
+     * (published_at, video_id) position — new items ingested mid-session
+     * can't shift the window the way page offsets do. `page` is still
+     * sent so older backends (which ignore cursors) keep working.
+     *
      * @param {number} [page=1] - Page number for pagination
      * @param {number} [limit=20] - Videos per page
-     * @returns {Promise<{videos: Object[], total: number, page: number}>}
+     * @param {string} [cursor=''] - "published_at|video_id" of the last item seen
+     * @returns {Promise<{videos: Object[], total: number, page: number, next_cursor?: string}>}
      */
-    async fetchFeed(page = 1, limit = 20) {
-      return get(`action=feed&page=${page}&limit=${limit}`);
+    async fetchFeed(page = 1, limit = 20, cursor = '') {
+      const cursorParam = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+      const data = await get(`action=feed&page=${page}&limit=${limit}${cursorParam}`);
+      // Defense in depth: a backend that hasn't yet deduped its store can
+      // return the same article twice under two ids (same url). Collapse them
+      // here so the feed never renders doubled, even against an old deployment.
+      if (Array.isArray(data.videos)) data.videos = dedupeVideos(data.videos);
+      return data;
     },
 
     /**
@@ -83,7 +104,7 @@ export function createApiClient(baseUrl) {
      * @returns {Promise<{comments: Object[]}>}
      */
     async fetchComments(videoId) {
-      return get(`action=comments&videoId=${videoId}`);
+      return get(`action=comments&videoId=${encodeURIComponent(videoId)}`);
     },
 
     /**
@@ -125,7 +146,9 @@ export function createApiClient(baseUrl) {
      * @returns {Promise<{videos: Object[], total: number}>}
      */
     async fetchTopWeek(limit = 50) {
-      return get(`action=topWeek&limit=${limit}`);
+      const data = await get(`action=topWeek&limit=${limit}`);
+      if (Array.isArray(data.videos)) data.videos = dedupeVideos(data.videos);
+      return data;
     },
 
     /**
