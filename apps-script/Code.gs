@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -51,6 +51,19 @@ const DEFAULT_PAGE_LIMIT = 20;
 const FEED_HEAD_COUNT = 50;
 const FEED_HEAD_CACHE_KEY = 'feed_head_v1';
 const FEED_HEAD_CACHE_SECONDS = 300;
+
+// Top-This-Week cache: the ranked last-7-days window is kept in CacheService so
+// repeat opens of the tab skip the full Videos-sheet scan + sort — the same
+// dominant cost the feed head avoids. handleTopWeek is read-only and has no
+// cached fallback, so a cold scan of an ever-growing sheet is exactly the cost
+// that once timed the request out. Invalidated by every writer that changes the
+// ranking (crawl completions add rows; vote/comment recounts change the counts
+// baked into the cached rows). The window rarely exceeds a few dozen items; cap
+// the stored slice well inside CacheService's 100KB/key limit and fall through
+// to a live scan for the rare request that asks for more than the cap.
+const TOP_WEEK_CACHE_COUNT = 50;
+const TOP_WEEK_CACHE_KEY = 'top_week_v1';
+const TOP_WEEK_CACHE_SECONDS = 300;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
 
 // Grace window applied to a premiere/live entry's expiry. A scheduled premiere
@@ -559,8 +572,9 @@ function crawlAllFeeds() {
   setMeta('last_fetch', new Date().toISOString());
 
   // The crawl appended rows and refreshed view counts / live state in place —
-  // the cached head no longer reflects the sheet.
+  // the cached head and the cached top-week window no longer reflect the sheet.
   invalidateFeedHead();
+  invalidateTopWeek();
 
   log('INFO', 'fetchAllFeeds', 'Refresh complete. New: ' + newCount + ', Errors: ' + errorCount);
   return { new_videos: newCount, errors: errorCount };
@@ -1368,6 +1382,47 @@ function invalidateFeedHead() {
 }
 
 /**
+ * Reads the cached Top-This-Week payload, or null on any miss/problem. Mirrors
+ * readFeedHead: a cached entry holding a provisional premiere/live item whose
+ * expiry has passed is treated as a miss rather than served — the live path
+ * re-derives the ranked window cleanly from readAllVideos (which drops expired
+ * rows), so dropping one here would just desync the count.
+ */
+function readTopWeek() {
+  try {
+    var raw = CacheService.getScriptCache().get(TOP_WEEK_CACHE_KEY);
+    if (!raw) return null;
+    var payload = JSON.parse(raw);
+    if (!payload || !Array.isArray(payload.videos) || typeof payload.total !== 'number') return null;
+    var nowMs = Date.now();
+    for (var i = 0; i < payload.videos.length; i++) {
+      var exp = payload.videos[i].expires_at;
+      if (exp) {
+        var expMs = new Date(exp).getTime();
+        if (!isNaN(expMs) && expMs < nowMs) return null;
+      }
+    }
+    return payload;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Drops the cached Top-This-Week payload. Called from the same writers that
+ * invalidate the feed head: crawl completions add rows to the window, and
+ * vote/comment recounts change counts baked into the cached rows (votes also
+ * reorder the ranking). Cheap enough to call unconditionally.
+ */
+function invalidateTopWeek() {
+  try {
+    CacheService.getScriptCache().remove(TOP_WEEK_CACHE_KEY);
+  } catch (e) {
+    /* best-effort */
+  }
+}
+
+/**
  * Returns videos published in the last 7 days, ranked by upvotes
  * (most-voted first, newest as the tiebreak). When votes are sparse
  * this gracefully degrades to the week's videos in reverse-chron order,
@@ -1381,6 +1436,16 @@ function handleTopWeek(params) {
   // unlike the feed the top-week tab has no cached fallback, so a slow crawl
   // surfaced to the user as an outright failure.
   var limit = parseInt(params.limit) || 50;
+
+  // Fast path: serve the ranked window from cache and skip the full sheet scan
+  // + sort. Only usable when the cached slice can satisfy the request — it holds
+  // at least `limit` rows, or it already holds the entire week (fewer rows than
+  // the stored cap). A larger request falls through to a live scan below.
+  var cached = readTopWeek();
+  if (cached && (limit <= cached.videos.length || cached.videos.length >= cached.total)) {
+    return { status: 'ok', videos: cached.videos.slice(0, limit), total: cached.total };
+  }
+
   var cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
   var recent = readAllVideos().filter(function(v) {
@@ -1392,6 +1457,17 @@ function handleTopWeek(params) {
     if (b.vote_count !== a.vote_count) return b.vote_count - a.vote_count;
     return new Date(b.published_at) - new Date(a.published_at);
   });
+
+  // Read-through populate for the next caller. Best-effort — an oversized value
+  // or cache hiccup just means the next request scans the sheet again.
+  try {
+    CacheService.getScriptCache().put(TOP_WEEK_CACHE_KEY, JSON.stringify({
+      videos: recent.slice(0, TOP_WEEK_CACHE_COUNT),
+      total: recent.length,
+    }), TOP_WEEK_CACHE_SECONDS);
+  } catch (e) {
+    /* cache write is optional */
+  }
 
   return {
     status: 'ok',
@@ -1606,9 +1682,10 @@ function updateCommentCount(videoId) {
     }
   }
 
-  // comment_count is baked into the cached feed head — drop it so the next
-  // feed request serves the new count instead of a stale cached row.
+  // comment_count is baked into both the cached feed head and the cached
+  // top-week rows — drop them so the next request serves the new count.
   invalidateFeedHead();
+  invalidateTopWeek();
 }
 
 // ============================================================
@@ -1761,9 +1838,10 @@ function updateVoteCount(videoId) {
     }
   }
 
-  // vote_count is baked into the cached feed head — drop it so the next feed
-  // request serves the new count instead of a stale cached row.
+  // vote_count is baked into the cached feed head AND drives the top-week
+  // ranking — drop both so the next request serves the new count and order.
   invalidateFeedHead();
+  invalidateTopWeek();
 
   return count;
 }

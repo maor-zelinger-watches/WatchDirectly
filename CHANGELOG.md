@@ -122,6 +122,18 @@ that component's heading.
 
 ## Backend
 
+### 1.3.0 — 2026-07-08
+- Top-week cache: `handleTopWeek` now serves the ranked last-7-days window from
+  `CacheService` (50 rows, 5 min TTL) instead of rescanning the whole Videos
+  sheet on every request. The window logic was always a rolling 7 days ranked by
+  upvotes, but `readAllVideos` scanned the full, ever-growing sheet live on each
+  open — the read-only cost that once timed the request out. Populated
+  read-through on a cache miss; explicitly invalidated by the same writers that
+  drop the feed head (crawl completion, vote recounts, comment recounts) so the
+  ranking and counts stay live. A request larger than the cached slice falls
+  through to a live scan, and a cached window holding an expired premiere/live
+  entry is treated as a miss rather than served stale.
+
 ### 1.2.0 — 2026-07-07
 - Feed requests no longer crawl inline. `handleFeed` used to run the full
   `fetchAllFeeds` crawl (14 feeds, per-channel sleeps, retry backoff, YouTube

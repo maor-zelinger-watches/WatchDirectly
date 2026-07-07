@@ -87,7 +87,7 @@ function loadBackend(mocks = {}) {
   const names = [
     'verifyGoogleToken', 'toIsoDate', 'handleAddComment', 'decodeHtmlEntities',
     'handleFeed', 'handleBootstrap', 'kickoffRefresh',
-    'getVideos', 'updateVoteCount', 'updateCommentCount',
+    'getVideos', 'updateVoteCount', 'updateCommentCount', 'handleTopWeek',
   ];
   const factory = new Function(...Object.keys(globals), `${SRC}\nreturn { ${names.join(', ')} };`);
   return factory(...Object.values(globals));
@@ -409,5 +409,105 @@ describe('getVideos feed-head cache (skip the sheet scan on early pages)', () =>
     const res = be.getVideos(1, 10, '');
     expect(reads()).toBe(1);                          // went to the sheet
     expect(res.videos.map((v) => v.video_id)).toEqual(['vid1', 'vid2']); // no ghost
+  });
+});
+
+describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
+  const HEADERS = ['video_id', 'url', 'published_at', 'vote_count', 'comment_count', 'channel_name'];
+  // Dates are relative to now so the rolling window is exercised, not a fixed
+  // date that would drift out of range as real time passes.
+  const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+
+  /** A videos sheet that counts full reads — the scan the cache exists to skip. */
+  function setup(rows) {
+    let reads = 0;
+    const sheet = blankSheet({
+      getDataRange: () => ({ getValues: () => { reads++; return [HEADERS, ...rows]; } }),
+    });
+    const cacheService = memoryCache();
+    const be = loadBackend({ sheet, CacheService: cacheService });
+    return { be, cacheService, reads: () => reads };
+  }
+
+  it('pulls items from across the entire 7-day window and excludes older ones', () => {
+    // One video per day for the last 7 days (0..6 days old), each with more votes
+    // than the day before, plus a high-voted item 8 days old that must NOT leak in.
+    const rows = [];
+    for (let d = 0; d <= 6; d++) rows.push(['d' + d, 'https://x/' + d, daysAgo(d), d, 0, 'Chan']);
+    rows.push(['old', 'https://x/old', daysAgo(8), 99, 0, 'Chan']); // outside the window
+    const { be } = setup(rows);
+
+    const res = be.handleTopWeek({ limit: 50 });
+    const ids = res.videos.map((v) => v.video_id);
+    expect(res.total).toBe(7);                          // all 7 in-window days
+    expect(ids).not.toContain('old');                   // 99 votes can't override the window
+    expect(ids).toContain('d6');                        // the ~6-day-old edge item is still pulled
+    expect(ids).toEqual(['d6', 'd5', 'd4', 'd3', 'd2', 'd1', 'd0']); // votes desc
+  });
+
+  it('serves a repeat request from cache without re-scanning the sheet', () => {
+    const rows = [['a', 'https://a', daysAgo(1), 5, 0, 'Chan'], ['b', 'https://b', daysAgo(2), 3, 0, 'Chan']];
+    const { be, reads } = setup(rows);
+
+    const first = be.handleTopWeek({ limit: 50 });
+    expect(reads()).toBe(1);
+    const second = be.handleTopWeek({ limit: 50 });
+    expect(reads()).toBe(1);                            // cache hit — no second scan
+    expect(second.videos.map((v) => v.video_id)).toEqual(first.videos.map((v) => v.video_id));
+    expect(second.total).toBe(first.total);
+  });
+
+  it('a vote recount invalidates the cached window so the next read re-scans', () => {
+    const rows = [['a', 'https://a', daysAgo(1), 5, 0, 'Chan'], ['b', 'https://b', daysAgo(2), 3, 0, 'Chan']];
+    const { be, reads } = setup(rows);
+
+    be.handleTopWeek({ limit: 50 });                    // 1 read — populates cache
+    be.updateVoteCount('a');                            // +2 reads (votes tab + videos sheet)
+    be.handleTopWeek({ limit: 50 });                    // must re-scan: ranking changed
+    expect(reads()).toBe(4);                            // 3 would mean a stale cached ranking was served
+  });
+
+  it('a comment recount invalidates the cached window too', () => {
+    const rows = [['a', 'https://a', daysAgo(1), 5, 0, 'Chan'], ['b', 'https://b', daysAgo(2), 3, 0, 'Chan']];
+    const { be, reads } = setup(rows);
+
+    be.handleTopWeek({ limit: 50 });                    // 1 read
+    be.updateCommentCount('a');                         // +2 reads (comments + videos)
+    be.handleTopWeek({ limit: 50 });                    // must re-scan
+    expect(reads()).toBe(4);
+  });
+
+  it('a cached window holding an expired premiere is a miss, not served stale', () => {
+    const rows = [['a', 'https://a', daysAgo(1), 5, 0, 'Chan']];
+    const { be, cacheService, reads } = setup(rows);
+    // Seed a window whose entry expired between populate and read. Serving it
+    // would resurface a premiere that never aired; fall through to a live scan.
+    cacheService._store.set('top_week_v1', JSON.stringify({
+      videos: [{ video_id: 'ghost', url: 'https://g', published_at: daysAgo(1), expires_at: new Date(Date.now() - 1000).toISOString() }],
+      total: 1,
+    }));
+    const res = be.handleTopWeek({ limit: 50 });
+    expect(reads()).toBe(1);                            // went to the sheet
+    expect(res.videos.map((v) => v.video_id)).toEqual(['a']); // no ghost
+  });
+
+  it('falls through to a live scan when the request exceeds the cached slice', () => {
+    // Populate a cache of TOP_WEEK_CACHE_COUNT rows against a larger window, then
+    // ask for more than the cap: the cache can't satisfy it, so re-scan.
+    const rows = [];
+    for (let i = 0; i < 60; i++) rows.push(['v' + i, 'https://x/' + i, daysAgo(1), 60 - i, 0, 'Chan']);
+    const { be, reads } = setup(rows);
+
+    const first = be.handleTopWeek({ limit: 50 });      // caches 50, total 60
+    expect(reads()).toBe(1);
+    expect(first.total).toBe(60);
+
+    const big = be.handleTopWeek({ limit: 60 });        // 60 > cached 50 → live scan
+    expect(reads()).toBe(2);
+    expect(big.videos.length).toBe(60);
+
+    const small = be.handleTopWeek({ limit: 50 });      // satisfiable from cache again
+    expect(reads()).toBe(2);                            // no extra scan
+    expect(small.videos.length).toBe(50);
   });
 });
