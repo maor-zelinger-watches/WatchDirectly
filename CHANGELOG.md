@@ -21,6 +21,13 @@ that component's heading.
 
 ## Frontend
 
+### 1.3.1 — 2026-07-07
+- Toast notifications are now larger and anchored to the top-center of the
+  viewport instead of the bottom. Bigger type (18px, semibold), roomier
+  padding, a wider max-width, and a drop shadow make transient messages
+  easier to notice; the entrance animation now slides down from the top to
+  match the new position.
+
 ### 1.3.0 — 2026-07-07
 - Sign-in now reconciles votes and stars in a single `bootstrap` request
   instead of two back-to-back POSTs. Apps Script serializes a user's requests,

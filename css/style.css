@@ -36,7 +36,7 @@
   --tier-3: #818384;
 
   --danger: #ff4444;
-  --success: #4caf50;
+  --success: #318b34;
 
   /* Typography */
   --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -1175,25 +1175,26 @@ body.fullscreen-mode {
 
 .toast-container {
   position: fixed;
-  bottom: var(--sp-6);
+  top: var(--sp-8);
   left: 50%;
   transform: translateX(-50%);
   z-index: 400; /* above the fullscreen overlay (300) and its exit button (310) */
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   pointer-events: none;
 }
 
 .toast {
-  padding: var(--sp-3) var(--sp-5);
-  border-radius: var(--radius-md);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
+  padding: var(--sp-4) var(--sp-6);
+  border-radius: var(--radius-lg);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
   pointer-events: auto;
   animation: toastIn 0.3s ease, toastOut 0.3s ease 2.7s forwards;
-  max-width: 340px;
+  max-width: 480px;
   text-align: center;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
 }
 
 .toast--error {
@@ -1213,7 +1214,7 @@ body.fullscreen-mode {
 }
 
 @keyframes toastIn {
-  from { opacity: 0; transform: translateY(20px); }
+  from { opacity: 0; transform: translateY(-20px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
