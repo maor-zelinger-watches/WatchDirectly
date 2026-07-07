@@ -232,9 +232,18 @@ img {
   display: flex;
   align-items: center;
   gap: var(--sp-4);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.header__nav::-webkit-scrollbar {
+  display: none;
 }
 
 .header__nav-link {
+  flex-shrink: 0;
+  white-space: nowrap;
   font-size: var(--fs-sm);
   color: var(--text-muted);
   text-decoration: none;
@@ -581,19 +590,6 @@ img {
 
 .media-card__separator {
   color: var(--text-muted);
-}
-
-.media-card__tags {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-size: var(--fs-xs);
-}
-
-.media-card__category {
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 /* Stack on narrow mobile */

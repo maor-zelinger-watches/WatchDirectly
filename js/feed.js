@@ -53,7 +53,6 @@ export function createMediaCard(item) {
   const escaped = {
     title: sanitizeHtml(item.title),
     channel: sanitizeHtml(item.channel_name),
-    category: sanitizeHtml(item.category),
     videoId: sanitizeHtml(item.video_id),
     url: safeUrl(item.url || (item.video_id && item.video_id.length === 11 ? `https://www.youtube.com/watch?v=${item.video_id}` : '')),
   };
@@ -110,9 +109,6 @@ export function createMediaCard(item) {
             <span class="media-card__separator">·</span>
             <span class="media-card__time">${timeAgo(item.published_at)}</span>
             ${viewsHtml}
-          </div>
-          <div class="media-card__tags">
-            <span class="media-card__category">${escaped.category}</span>
           </div>
         </div>
       </div>

@@ -21,6 +21,16 @@ that component's heading.
 
 ## Frontend
 
+### 1.6.0 — 2026-07-07
+- Removed the category tag from media cards. The `.media-card__category` chip (and
+  its `.media-card__tags` wrapper) added visual noise without earning its space —
+  the channel and time already frame each item — so it's gone from the markup and
+  the stylesheet.
+- The header nav now scrolls horizontally instead of wrapping when the links
+  overflow on narrow viewports: `.header__nav` gains momentum touch-scroll with a
+  hidden scrollbar, and links no longer shrink or wrap. Keeps the header a single
+  clean row on mobile.
+
 ### 1.5.0 — 2026-07-07
 - Rebranded the UI to the Andrew Morgan Watches design system: swapped the type
   from Inter to **Poppins** (across the app and the Terms/Privacy pages) and
@@ -152,6 +162,11 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.1.3 — 2026-07-07
+- Updated the feed unit test for the removed category chip: it now asserts the
+  card renders neither the `media-card__category` class nor the category text,
+  instead of asserting the category appears.
 
 ### 1.1.2 — 2026-07-07
 - Search e2e now covers the loading state: a delayed index-build fetch proves

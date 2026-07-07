@@ -65,9 +65,10 @@ describe('createMediaCard (video)', () => {
     expect(html).toContain('12');
   });
 
-  it('includes the category', () => {
+  it('does not render the category chip', () => {
     const html = createMediaCard(mockVideo);
-    expect(html).toContain('Heavyweights');
+    expect(html).not.toContain('media-card__category');
+    expect(html).not.toContain('Heavyweights');
   });
 
   it('includes data-video-id attribute', () => {
