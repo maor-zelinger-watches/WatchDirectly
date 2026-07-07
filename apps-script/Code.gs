@@ -32,6 +32,12 @@ const SPREADSHEET_IDS = {
 // CONFIGURATION
 // ============================================================
 
+// Backend version (npm semver) — bump on every deployed change. Stamped into
+// every JSON response and served via ?action=version, so the live deployment
+// is always identifiable. The frontend has its own APP_VERSION in
+// js/config.js; see CHANGELOG.md at the repo root.
+const VERSION = '1.0.0';
+
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
@@ -126,6 +132,8 @@ function doGet(e) {
         return jsonResponse(handleRefresh());
       case 'logs':
         return jsonResponse(handleLogs(e.parameter));
+      case 'version':
+        return jsonResponse({ status: 'ok' });
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -161,6 +169,11 @@ function doPost(e) {
 }
 
 function jsonResponse(data) {
+  // Every response carries the deployed backend version, so any client (or
+  // a plain curl) can tell which deployment answered.
+  if (data && typeof data === 'object' && !('version' in data)) {
+    data.version = VERSION;
+  }
   return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);

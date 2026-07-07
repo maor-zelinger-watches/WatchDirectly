@@ -7,6 +7,11 @@
  */
 
 export const CONFIG = {
+  APP_VERSION: '1.0.0',       // frontend version (npm semver) — bump on every
+                              // user-visible change; shown in the header and
+                              // logged at boot. Backend has its own VERSION
+                              // in apps-script/Code.gs; package.json tracks
+                              // the repo/tooling. See CHANGELOG.md.
   APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwyt7c8SWw9y0TnKq4RhcV7yLjS1JkXnNThYInpj-EnNYbA3ecgwVSX4gBIACNKHCqu0A/exec',
   GOOGLE_CLIENT_ID: '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com',
   PAGE_SIZE: 10,

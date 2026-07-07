@@ -45,6 +45,10 @@ setOnStarsChanged(() => {
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', async () => {
+  console.info(`WatchDirectly frontend v${CONFIG.APP_VERSION}`);
+  const versionEl = document.getElementById('app-version');
+  if (versionEl) versionEl.textContent = `v${CONFIG.APP_VERSION}`;
+
   let authRetries = 0;
   function tryInitAuth() {
     if (typeof google !== 'undefined' && google.accounts) {

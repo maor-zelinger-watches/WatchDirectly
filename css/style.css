@@ -235,6 +235,13 @@ img {
   color: var(--text-secondary);
 }
 
+/* Version badge — filled from CONFIG.APP_VERSION at boot */
+.header__version {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
 .header__title-link {
   text-decoration: none;
   color: inherit;

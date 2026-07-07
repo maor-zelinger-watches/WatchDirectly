@@ -35,7 +35,8 @@ fi
 
 echo "🚀 Deploying backend (deployment $DEPLOYMENT_ID)..."
 (cd "$CLASP_DIR" && npx clasp push -f)
-desc="auto-deploy $(git rev-parse --short HEAD 2>/dev/null || echo '?') $(date '+%Y-%m-%d %H:%M')"
+backend_version=$(grep -oE "^const VERSION = '[^']+'" "$CLASP_DIR"/Code.gs | cut -d"'" -f2)
+desc="v${backend_version:-?} auto-deploy $(git rev-parse --short HEAD 2>/dev/null || echo '?') $(date '+%Y-%m-%d %H:%M')"
 (cd "$CLASP_DIR" && npx clasp deploy -i "$DEPLOYMENT_ID" -d "$desc")
 
 echo "$current_hash" > "$HASH_FILE"
