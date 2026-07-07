@@ -1203,7 +1203,7 @@ body.fullscreen-mode {
   font-size: var(--fs-lg);
   font-weight: var(--fw-semibold);
   pointer-events: auto;
-  animation: toastIn 0.3s ease, toastOut 0.3s ease 2.7s forwards;
+  animation: toastIn 0.3s ease, toastOut 0.3s ease 3.6s forwards;
   max-width: 480px;
   text-align: center;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);

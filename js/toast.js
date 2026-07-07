@@ -8,5 +8,5 @@ export function showToast(message, type = 'info') {
   toast.className = `toast toast--${type}`;
   toast.textContent = message;
   container.appendChild(toast);
-  setTimeout(() => toast.remove(), 3000);
+  setTimeout(() => toast.remove(), 3900);
 }

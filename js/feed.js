@@ -105,7 +105,7 @@ export function createMediaCard(item) {
           <h3 class="media-card__title"><a href="${sanitizeHtml(escaped.url)}" target="_blank" rel="noopener noreferrer">${escaped.title}</a></h3>
           <div class="media-card__meta">
             <span class="media-card__channel">${isArticle ? '📰' : '🎬'} ${escaped.channel}</span>
-            <button class="media-card__star" data-channel="${escaped.channel}" aria-pressed="false" title="Star this creator" aria-label="Star ${escaped.channel}">☆</button>
+            <button class="media-card__star" data-channel="${escaped.channel}" aria-pressed="false" title="Favorite this creator" aria-label="Favorite ${escaped.channel}">☆</button>
             <span class="media-card__separator">·</span>
             <span class="media-card__time">${timeAgo(item.published_at)}</span>
             ${viewsHtml}

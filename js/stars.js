@@ -60,7 +60,7 @@ export function loadStarsFromStorage() {
 export async function toggleStar(channel) {
   if (!channel) return;
   if (!isSignedIn()) {
-    showToast('Please sign in to star creators', 'info');
+    showToast('Please sign in to favorite creators', 'info');
     return;
   }
 

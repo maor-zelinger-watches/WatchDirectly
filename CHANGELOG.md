@@ -21,6 +21,17 @@ that component's heading.
 
 ## Frontend
 
+### 1.7.1 — 2026-07-08
+- Toaster notifications now linger 30% longer (3.0s → 3.9s) so messages are
+  easier to catch before they fade. The `toastOut` fade animation delay moves in
+  step (2.7s → 3.6s) to stay synced with the DOM removal, so the fade still lands
+  exactly as the toast leaves.
+- Finished the star→favorite copy rename started in 1.6.1. The signed-out prompt
+  now reads "Please sign in to favorite creators", and each creator's ☆ button
+  shows a "Favorite this creator" tooltip and "Favorite <channel>" screen-reader
+  label. The ☆/★ glyphs and internal identifiers (`myStars`, `toggleStar`) are
+  unchanged, so no data or backend change is needed.
+
 ### 1.7.0 — 2026-07-08
 - One video at a time: starting an inline player now pauses whichever other
   player was running, so two soundtracks no longer overlap. Each YouTube embed
