@@ -6,7 +6,7 @@
 # last successful deploy (hash stored under .git/, machine-local), so the
 # post-commit hook can call this on every commit at ~zero cost.
 #
-# The deployment ID is read from CONFIG.APPS_SCRIPT_URL in js/app.js — the
+# The deployment ID is read from CONFIG.APPS_SCRIPT_URL in js/config.js — the
 # frontend's URL is the single source of truth, and redeploying that same ID
 # (clasp deploy -i) keeps the URL stable instead of minting a new /exec URL.
 #
@@ -22,9 +22,9 @@ if [[ ! -f "$CLASP_DIR/.clasp.json" ]] || grep -q 'PASTE_SCRIPT_ID_HERE' "$CLASP
   exit 0
 fi
 
-DEPLOYMENT_ID=$(grep -oE 'macros/s/[A-Za-z0-9_-]+' js/app.js | head -1 | cut -d/ -f3)
+DEPLOYMENT_ID=$(grep -oE 'macros/s/[A-Za-z0-9_-]+' js/config.js | head -1 | cut -d/ -f3)
 if [[ -z "$DEPLOYMENT_ID" ]]; then
-  echo "❌ Could not extract the deployment ID from CONFIG.APPS_SCRIPT_URL in js/app.js" >&2
+  echo "❌ Could not extract the deployment ID from CONFIG.APPS_SCRIPT_URL in js/config.js" >&2
   exit 1
 fi
 

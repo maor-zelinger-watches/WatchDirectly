@@ -49,7 +49,7 @@ else
 fi
 
 # Sanity check: the deployment the frontend points at must belong to this script.
-DEPLOYMENT_ID=$(grep -oE 'macros/s/[A-Za-z0-9_-]+' js/app.js | head -1 | cut -d/ -f3)
+DEPLOYMENT_ID=$(grep -oE 'macros/s/[A-Za-z0-9_-]+' js/config.js | head -1 | cut -d/ -f3)
 echo "  Verifying deployment $DEPLOYMENT_ID exists on that script..."
 DEPLOY_LIST=$( (cd "$CLASP_DIR" && npx clasp list-deployments) 2>/dev/null || true )
 if echo "$DEPLOY_LIST" | grep -q "$DEPLOYMENT_ID"; then
