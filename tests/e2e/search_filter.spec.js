@@ -1,8 +1,9 @@
 /**
- * E2E tests for search and category filter (mocked API)
+ * E2E tests for search (mocked API)
  *
- * Tests the search input, category chips, filtered rendering,
- * and restoring the normal feed when the filter clears.
+ * Tests the search input, filtered rendering, and restoring the normal feed
+ * when the query clears. Content-type chip behavior lives in
+ * content_type_filter.spec.js.
  */
 
 import { test, expect } from '@playwright/test';
@@ -90,13 +91,13 @@ test.describe('Search & Category Filter', () => {
     await expect(page.locator('.media-card')).toHaveCount(4);
   });
 
-  test('renders the search input and category chips', async ({ page }) => {
+  test('renders the search input and content-type chips', async ({ page }) => {
     await expect(page.locator('#search-input')).toBeVisible();
 
-    // Chips come from creators.json: "All" + one per unique category
+    // Fixed content-type chips: "All" + Videos / Articles / Shorts
     const chips = page.locator('#category-chips .chip');
     await expect(chips.first()).toHaveText('All');
-    await expect(page.locator('.chip', { hasText: 'The Affordable & "Value" Kings' })).toBeVisible();
+    await expect(page.locator('.chip', { hasText: 'Videos' })).toBeVisible();
   });
 
   test('typing a query filters cards by title', async ({ page }) => {
@@ -130,21 +131,6 @@ test.describe('Search & Category Filter', () => {
     await expect(page.locator('.media-card__channel')).toContainText('Bark and Jack');
   });
 
-  test('clicking a category chip filters the feed', async ({ page }) => {
-    await page.locator('.chip', { hasText: 'The Heavyweights & Entertainment' }).click();
-
-    await expect(page.locator('.media-card')).toHaveCount(2);
-    await expect(page.locator('.chip--active')).toHaveText('The Heavyweights & Entertainment');
-  });
-
-  test('the All chip clears the category filter', async ({ page }) => {
-    await page.locator('.chip', { hasText: 'The Affordable & "Value" Kings' }).click();
-    await expect(page.locator('.media-card')).toHaveCount(1);
-
-    await page.locator('.chip', { hasText: 'All' }).click();
-    await expect(page.locator('.media-card')).toHaveCount(4);
-  });
-
   test('shows an empty message when nothing matches', async ({ page }) => {
     await page.fill('#search-input', 'submariner');
 
@@ -153,8 +139,10 @@ test.describe('Search & Category Filter', () => {
     await expect(page.locator('#feed-empty')).toContainText('No videos match your search');
   });
 
-  test('search and category combine', async ({ page }) => {
-    await page.locator('.chip', { hasText: 'The Heavyweights & Entertainment' }).click();
+  test('search and a content-type chip combine', async ({ page }) => {
+    // All four mock items are videos, so the Videos chip keeps them all;
+    // the query then narrows to Nico's collections video.
+    await page.locator('.chip', { hasText: 'Videos' }).click();
     await page.fill('#search-input', 'collections');
 
     await expect(page.locator('.media-card')).toHaveCount(1);

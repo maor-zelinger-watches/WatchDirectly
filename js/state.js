@@ -23,7 +23,7 @@ export const state = {
   expandedComments: new Set(),
   commentsCache: {},   // videoId -> { comments, tree } — prefetched comment data
   initialLoadComplete: false,
-  filter: { query: '', category: '' },
+  filter: { query: '', types: [] }, // types: content-type multi-select ('video'|'article'|'short'); [] === All
   searchIndex: null,        // videos available to search — seeded from memory/cache,
                             // grows as index chunks land (may be partial mid-build)
   searchIndexComplete: false, // true once the whole catalog is loaded (or restored
@@ -42,7 +42,6 @@ export const state = {
   myVotes: new Set(),       // video IDs the signed-in user has upvoted
   myStars: new Set(),       // channel names the signed-in user has starred
   hostsByChannel: {},       // channel_name -> host, from creators.json (search matching)
-  showShorts: true,         // whether Shorts are visible (persisted)
   renderToken: 0,           // invalidates deferred short inserts after a re-render
   fullscreenVideoId: null,      // video expanded to fullscreen, or null
   fullscreenReturnId: null,     // topmost visible card before fullscreen (scroll anchor)
@@ -51,7 +50,9 @@ export const state = {
 };
 
 export function isFilterActive() {
-  return !!(state.filter.query.trim() || state.filter.category);
+  // types collapses to [] whenever it would cover everything (All / all three),
+  // so any non-empty types array is a real narrowing filter.
+  return !!(state.filter.query.trim() || state.filter.types.length);
 }
 
 /** The current filter plus the channel→host map used for query matching. */

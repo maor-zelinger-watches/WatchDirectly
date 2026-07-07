@@ -15,7 +15,6 @@
  * - wd_feed_cache   — page-1 feed snapshot {videos, total} (stale-while-revalidate)
  * - wd_search_index — full catalog for search {videos} (stale-while-revalidate)
  * - wd_my_stars     — starred channel names, instant paint before server reconcile
- * - wd_show_shorts  — Shorts toggle preference
  * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.)
  */
 
@@ -23,7 +22,6 @@ export const CACHE_KEYS = {
   FEED: 'wd_feed_cache',
   SEARCH_INDEX: 'wd_search_index',
   STARS: 'wd_my_stars',
-  SHOW_SHORTS: 'wd_show_shorts',
 };
 
 // --- storage primitives — never throw -------------------------------
@@ -154,15 +152,4 @@ export function saveStarredChannels(channels) {
 
 export function clearStarredChannels() {
   remove(CACHE_KEYS.STARS);
-}
-
-// --- shorts toggle preference ----------------------------------------
-
-/** Whether Shorts are visible. Defaults to true when unset or unreadable. */
-export function loadShowShorts() {
-  return read(CACHE_KEYS.SHOW_SHORTS) !== 'false';
-}
-
-export function saveShowShorts(show) {
-  return write(CACHE_KEYS.SHOW_SHORTS, String(!!show));
 }

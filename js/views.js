@@ -175,19 +175,20 @@ export function setupFeedControls() {
   const chipsContainer = document.getElementById('category-chips');
   if (!input) return;
 
-  // Category chips and the channel→host search map come from the curated creator list
+  // Content-type chips are a fixed set — render them right away, no fetch needed.
+  renderTypeChips(chipsContainer);
+
+  // The channel→host map (search matching) still comes from the creator list.
   fetch('./creators.json')
     .then(r => r.json())
     .then(creators => {
-      const categories = [...new Set(creators.map(c => c.category))];
-      renderCategoryChips(chipsContainer, categories);
       const hosts = {};
       for (const c of creators) {
         if (c.channel_name && c.host) hosts[c.channel_name] = c.host;
       }
       state.hostsByChannel = hosts;
     })
-    .catch(() => { /* chips are an enhancement — search still works without them */ });
+    .catch(() => { /* host matching is an enhancement — search still works without it */ });
 
   // Warm the search index as soon as the user shows intent
   input.addEventListener('focus', () => {
@@ -388,7 +389,9 @@ async function renderStarred() {
   if (state.view !== 'starred') return;
 
   let list = sortVideos(index.filter(v => state.myStars.has(v.channel_name)));
-  if (isFilterActive()) list = filterVideos(list, activeFilter());
+  // Same render cap as applyFilter — a one-letter search over a large starred
+  // catalog would otherwise paint thousands of cards in one go.
+  if (isFilterActive()) list = filterVideos(list, activeFilter()).slice(0, CONFIG.SEARCH_RENDER_LIMIT);
 
   state.renderToken++;
   container.innerHTML = '';
@@ -405,23 +408,59 @@ async function renderStarred() {
   prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
 }
 
-function renderCategoryChips(container, categories) {
+// Fixed content-type chips. '' is the exclusive "All" chip; the rest map to
+// mediaType() values and are multi-selectable.
+const TYPE_CHIPS = [
+  { value: '', label: 'All' },
+  { value: 'video', label: 'Videos' },
+  { value: 'article', label: 'Articles' },
+  { value: 'short', label: 'Shorts' },
+];
+const ALL_TYPE_VALUES = TYPE_CHIPS.filter(c => c.value).map(c => c.value);
+
+function renderTypeChips(container) {
   if (!container) return;
 
-  container.innerHTML = ['All', ...categories].map(label => {
-    const value = label === 'All' ? '' : label;
-    const active = value === state.filter.category ? ' chip--active' : '';
-    return `<button type="button" class="chip${active}" data-category="${sanitizeHtml(value)}">${sanitizeHtml(label)}</button>`;
-  }).join('');
+  container.innerHTML = TYPE_CHIPS.map(({ value, label }) =>
+    `<button type="button" class="chip" data-type="${sanitizeHtml(value)}">${sanitizeHtml(label)}</button>`
+  ).join('');
 
   container.querySelectorAll('.chip').forEach(chip => {
     chip.addEventListener('click', () => {
-      state.filter.category = chip.dataset.category;
-      container.querySelectorAll('.chip').forEach(c => {
-        c.classList.toggle('chip--active', c === chip);
-      });
+      toggleType(chip.dataset.type);
+      syncTypeChips(container);
       update();
     });
+  });
+
+  syncTypeChips(container);
+}
+
+/**
+ * Applies the multi-select rules to state.filter.types:
+ * - "All" (empty value) clears every type selection.
+ * - Any type toggles on/off, and clears "All".
+ * - Selecting every type (or clearing the last one) collapses back to "All".
+ */
+function toggleType(value) {
+  if (!value) {
+    state.filter.types = [];
+    return;
+  }
+  const set = new Set(state.filter.types);
+  if (set.has(value)) set.delete(value);
+  else set.add(value);
+  // Everything selected is the same as nothing selected: "All".
+  state.filter.types = ALL_TYPE_VALUES.every(v => set.has(v)) ? [] : [...set];
+}
+
+/** Reflects state.filter.types onto the chip active classes. */
+function syncTypeChips(container) {
+  const selected = new Set(state.filter.types);
+  container.querySelectorAll('.chip').forEach(chip => {
+    const value = chip.dataset.type;
+    const active = value ? selected.has(value) : selected.size === 0;
+    chip.classList.toggle('chip--active', active);
   });
 }
 
@@ -458,13 +497,22 @@ async function applyFilter() {
   const renderMatches = (index, final) => {
     if (token !== state.filterRenderToken || state.view !== 'latest') return;
     const matches = filterVideos(index, activeFilter());
+    // A broad query (a single letter matches almost everything) must not
+    // paint the whole index — cap the render; results are ranked best-first.
+    const shown = matches.slice(0, CONFIG.SEARCH_RENDER_LIMIT);
     state.renderToken++;
     container.innerHTML = '';
     state.expandedComments.clear();
-    renderList(container, matches);
+    renderList(container, shown);
+    if (matches.length > shown.length) {
+      const note = document.createElement('p');
+      note.className = 'feed-truncation-note';
+      note.textContent = `Showing the top ${shown.length} of ${matches.length} matches — keep typing to narrow your search.`;
+      container.appendChild(note);
+    }
     empty.querySelector('p').textContent = 'No videos match your search.';
     empty.style.display = (final && matches.length === 0) ? '' : 'none';
-    if (final) prefetchComments(matches.slice(0, CONFIG.PAGE_SIZE));
+    if (final) prefetchComments(shown.slice(0, CONFIG.PAGE_SIZE));
   };
 
   let index;

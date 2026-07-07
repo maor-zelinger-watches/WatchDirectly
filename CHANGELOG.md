@@ -21,6 +21,13 @@ that component's heading.
 
 ## Frontend
 
+### 1.1.0 — 2026-07-07
+- Replaced the creator-category chips and the Shorts on/off toggle with a
+  multi-select content-type filter: **All / Videos / Articles / Shorts**.
+  "All" is exclusive; picking a type clears it; selecting every type (or
+  deselecting the last one) collapses back to "All". Deferred shorts
+  rendering (long-form first, shorts slide in) is unchanged.
+
 ### 1.0.0 — 2026-07-07
 - Initial versioned release. Paginated chronological feed with
   stale-while-revalidate caching, fuzzy full-catalog search, Top This Week

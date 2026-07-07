@@ -14,7 +14,7 @@ import { forceLoadIframe } from './lazy-iframe.js';
 function topmostVisibleCardId() {
   const headerHeight = document.getElementById('header')?.offsetHeight || 0;
   for (const card of document.querySelectorAll('#feed-container .media-card')) {
-    if (card.offsetParent === null) continue; // hidden (e.g. Shorts toggled off)
+    if (card.offsetParent === null) continue; // not laid out (hidden/detached)
     // Require a meaningful part of the card below the header — a sub-pixel
     // sliver of the previous card must not steal the scroll anchor.
     if (card.getBoundingClientRect().bottom > headerHeight + 40) {

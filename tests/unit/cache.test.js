@@ -4,7 +4,6 @@
  * Tests cover:
  * - Feed cache round-trip, shape validation, and corruption self-healing
  * - Starred channels round-trip (Set/array) and corruption handling
- * - Shorts preference default and persistence
  * - Storage failure tolerance (quota errors never throw)
  *
  * Node's experimental localStorage global shadows jsdom's, so we install
@@ -17,7 +16,6 @@ import {
   loadFeedCache, saveFeedCache, clearFeedCache,
   loadSearchIndex, saveSearchIndex, clearSearchIndex,
   loadStarredChannels, saveStarredChannels, clearStarredChannels,
-  loadShowShorts, saveShowShorts,
 } from '../../js/cache.js';
 
 let store = {};
@@ -174,30 +172,6 @@ describe('starred channels', () => {
   });
 });
 
-describe('shorts preference', () => {
-  it('defaults to showing shorts', () => {
-    expect(loadShowShorts()).toBe(true);
-  });
-
-  it('persists an explicit off', () => {
-    saveShowShorts(false);
-    expect(loadShowShorts()).toBe(false);
-  });
-
-  it('persists turning back on', () => {
-    saveShowShorts(false);
-    saveShowShorts(true);
-    expect(loadShowShorts()).toBe(true);
-  });
-
-  it('coerces truthy/falsy inputs', () => {
-    saveShowShorts(0);
-    expect(loadShowShorts()).toBe(false);
-    saveShowShorts('yes');
-    expect(loadShowShorts()).toBe(true);
-  });
-});
-
 describe('storage failure tolerance', () => {
   const quotaError = () => {
     throw new DOMException('quota', 'QuotaExceededError');
@@ -210,11 +184,10 @@ describe('storage failure tolerance', () => {
     expect(saveFeedCache(VIDEOS, 42)).toBe(false);
   });
 
-  it('saveStarredChannels and saveShowShorts never throw on quota errors', () => {
+  it('saveStarredChannels never throws on quota errors', () => {
     localStorageMock.setItem.mockImplementation(quotaError);
 
     expect(() => saveStarredChannels(['X'])).not.toThrow();
-    expect(() => saveShowShorts(false)).not.toThrow();
   });
 
   it('loads report absent data when reads throw (private browsing)', () => {
@@ -224,7 +197,6 @@ describe('storage failure tolerance', () => {
 
     expect(loadFeedCache()).toBeNull();
     expect(loadStarredChannels().size).toBe(0);
-    expect(loadShowShorts()).toBe(true);
   });
 
   it('clear helpers tolerate removeItem failures', () => {

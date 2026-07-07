@@ -43,7 +43,7 @@ function resetState(overrides = {}) {
     hasMore: true,
     initialLoadComplete: true,
     view: 'latest',
-    filter: { query: '', category: '' },
+    filter: { query: '', types: [] },
     prefetchBuffer: [],
     prefetching: false,
     prefetchToken: 0,

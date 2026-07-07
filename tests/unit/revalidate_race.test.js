@@ -55,7 +55,7 @@ function seedCachedFeed(state, videos, total) {
   Object.assign(state, {
     videos: [...videos], totalVideos: total, currentPage: 1, hasMore: true,
     loading: false, revalidating: false, initialLoadComplete: true, view: 'latest',
-    filter: { query: '', category: '' }, prefetchBuffer: [], prefetching: false,
+    filter: { query: '', types: [] }, prefetchBuffer: [], prefetching: false,
     prefetchToken: 0, pendingFetchPage: 0, expandedComments: new Set(),
     commentsCache: {}, renderToken: 0, nextCursor: undefined,
   });

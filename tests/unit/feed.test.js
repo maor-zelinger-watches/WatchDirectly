@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createMediaCard, sortVideos, filterVideos, isShort, dedupeVideos } from '../../js/feed.js';
+import { createMediaCard, sortVideos, filterVideos, isShort, mediaType, dedupeVideos } from '../../js/feed.js';
 
 const mockVideo = {
   video_id: 'abc12345678',
@@ -185,17 +185,6 @@ describe('filterVideos', () => {
     expect(result[0].video_id).toBe('f3ccccccccc');
   });
 
-  it('filters by exact category', () => {
-    const result = filterVideos(catalog, { category: 'The Heavyweights & Entertainment' });
-    expect(result).toHaveLength(2);
-  });
-
-  it('combines query and category', () => {
-    const result = filterVideos(catalog, { query: 'collection', category: 'The Heavyweights & Entertainment' });
-    expect(result).toHaveLength(1);
-    expect(result[0].video_id).toBe('f3ccccccccc');
-  });
-
   it('returns everything for an empty filter', () => {
     expect(filterVideos(catalog, {})).toHaveLength(3);
     expect(filterVideos(catalog)).toHaveLength(3);
@@ -210,9 +199,9 @@ describe('filterVideos', () => {
   });
 
   it('handles items with missing title or channel', () => {
-    const sparse = [{ video_id: 'x1', category: 'Misc' }];
+    const sparse = [{ video_id: 'x1' }];
     expect(filterVideos(sparse, { query: 'anything' })).toEqual([]);
-    expect(filterVideos(sparse, { category: 'Misc' })).toHaveLength(1);
+    expect(filterVideos(sparse, { types: [] })).toHaveLength(1);
   });
 
   it('matches the channel host via hostsByChannel ("Adrian" finds Bark and Jack)', () => {
@@ -236,6 +225,76 @@ describe('filterVideos', () => {
     const original = [...catalog];
     filterVideos(catalog, { query: 'tudor' });
     expect(catalog).toEqual(original);
+  });
+});
+
+describe('mediaType', () => {
+  const video = { ...mockVideo };
+  const article = { ...mockArticle };
+  const short = { ...mockVideo, video_id: 'sh0rtvid001', url: 'https://www.youtube.com/shorts/sh0rtvid001' };
+  // An article whose media_type is missing but whose id is > 11 chars (the
+  // createMediaCard fallback) must still classify as an article, never a short.
+  const idFallbackArticle = { video_id: 'aGVsbG93b3JsZA', url: 'https://example.com/read' };
+
+  it('classifies long-form videos as "video"', () => {
+    expect(mediaType(video)).toBe('video');
+  });
+
+  it('classifies media_type "article" as "article"', () => {
+    expect(mediaType(article)).toBe('article');
+  });
+
+  it('classifies /shorts/ URLs as "short"', () => {
+    expect(mediaType(short)).toBe('short');
+  });
+
+  it('treats a long id as an article even without media_type', () => {
+    expect(mediaType(idFallbackArticle)).toBe('article');
+  });
+
+  it('is null-safe', () => {
+    expect(mediaType(null)).toBe('video');
+    expect(mediaType(undefined)).toBe('video');
+  });
+});
+
+describe('filterVideos (content types)', () => {
+  const video1 = { ...mockVideo, video_id: 'vidaaaaaaa1', title: 'Tudor Review', url: 'https://www.youtube.com/watch?v=vidaaaaaaa1' };
+  const video2 = { ...mockVideo, video_id: 'vidbbbbbbb2', title: 'Omega Deep Dive', url: 'https://www.youtube.com/watch?v=vidbbbbbbb2' };
+  const article1 = { ...mockArticle, video_id: 'YXJ0aWNsZTEx', title: 'Microbrand Feature', url: 'https://example.com/a1' };
+  const short1 = { ...mockVideo, video_id: 'shortvid001', title: 'Quick Take', url: 'https://www.youtube.com/shorts/shortvid001' };
+  const catalog = [video1, article1, video2, short1];
+
+  it('empty types array returns everything (the "All" state)', () => {
+    expect(filterVideos(catalog, { types: [] })).toHaveLength(4);
+  });
+
+  it('filters to a single type', () => {
+    const videos = filterVideos(catalog, { types: ['video'] });
+    expect(videos.map(v => v.video_id)).toEqual(['vidaaaaaaa1', 'vidbbbbbbb2']);
+
+    expect(filterVideos(catalog, { types: ['article'] }).map(v => v.video_id)).toEqual(['YXJ0aWNsZTEx']);
+    expect(filterVideos(catalog, { types: ['short'] }).map(v => v.video_id)).toEqual(['shortvid001']);
+  });
+
+  it('filters to multiple types (union), preserving order', () => {
+    const result = filterVideos(catalog, { types: ['article', 'short'] });
+    expect(result.map(v => v.video_id)).toEqual(['YXJ0aWNsZTEx', 'shortvid001']);
+  });
+
+  it('all three types is equivalent to "All"', () => {
+    expect(filterVideos(catalog, { types: ['video', 'article', 'short'] })).toHaveLength(4);
+  });
+
+  it('combines a query with a type filter', () => {
+    // "review" matches video1's title; the article/short are excluded by type.
+    const result = filterVideos(catalog, { query: 'review', types: ['video'] });
+    expect(result.map(v => v.video_id)).toEqual(['vidaaaaaaa1']);
+  });
+
+  it('a query that matches only an excluded type returns nothing', () => {
+    const result = filterVideos(catalog, { query: 'microbrand', types: ['video'] });
+    expect(result).toEqual([]);
   });
 });
 

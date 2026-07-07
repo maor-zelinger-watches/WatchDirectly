@@ -306,75 +306,6 @@ img {
   border-radius: 2px 2px 0 0;
 }
 
-/* ============================================================
-   SHORTS TOGGLE (in the tabs row)
-   ============================================================ */
-
-.shorts-toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-left: auto;
-  padding: var(--sp-2) var(--sp-2);
-  cursor: pointer;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-.shorts-toggle input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.shorts-toggle__track {
-  position: relative;
-  width: 32px;
-  height: 18px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  transition: background var(--transition-fast), border-color var(--transition-fast);
-  flex-shrink: 0;
-}
-
-.shorts-toggle__thumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  background: var(--text-secondary);
-  border-radius: var(--radius-full);
-  transition: transform var(--transition-fast), background var(--transition-fast);
-}
-
-.shorts-toggle input:checked + .shorts-toggle__track {
-  background: var(--accent-dim);
-  border-color: var(--accent);
-}
-
-.shorts-toggle input:checked + .shorts-toggle__track .shorts-toggle__thumb {
-  transform: translateX(14px);
-  background: var(--accent);
-}
-
-.shorts-toggle input:focus-visible + .shorts-toggle__track {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.shorts-toggle__label {
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-  color: var(--text-secondary);
-}
-
-/* Shorts hidden: one class on the feed container, pure CSS */
-.feed--hide-shorts .media-card--short {
-  display: none;
-}
-
 /* Shorts slide in after the long-form cards have rendered */
 .media-card--short-entering {
   opacity: 0;
@@ -636,7 +567,7 @@ img {
     padding: var(--sp-2) var(--sp-4);
   }
 
-  /* Three tabs + the Shorts toggle share one narrow row */
+  /* Three tabs share one narrow row */
   .feed-tab {
     padding: var(--sp-3) var(--sp-2);
     font-size: var(--fs-sm);
@@ -645,10 +576,6 @@ img {
   .feed-tab--active::after {
     left: var(--sp-2);
     right: var(--sp-2);
-  }
-
-  .shorts-toggle {
-    padding: var(--sp-2) 0;
   }
 
   .comment__reply-btn {
@@ -1427,4 +1354,11 @@ body.fullscreen-mode {
   text-decoration: none;
   font-weight: 600;
   box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+
+.feed-truncation-note {
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  padding: 16px 0 24px;
 }

@@ -1,8 +1,10 @@
 /**
- * E2E tests for the Shorts toggle and deferred shorts rendering (mocked API)
+ * E2E tests for deferred Shorts rendering (mocked API)
  *
- * Long-form videos render first; Shorts slide in afterward at their
- * chronological position. The toggle hides/shows them with pure CSS.
+ * Long-form videos and articles render first; Shorts slide in afterward at
+ * their chronological position. This is independent of the content-type
+ * filter (covered in content_type_filter.spec.js) — it's purely about the
+ * order in which the Latest feed paints network arrivals.
  */
 
 import { test, expect } from '@playwright/test';
@@ -33,7 +35,7 @@ const TOP_WEEK = {
   total: 3,
 };
 
-test.describe('Shorts toggle', () => {
+test.describe('Deferred shorts rendering', () => {
   test.beforeEach(async ({ page }) => {
     await page.route('**/macros/**', async (route) => {
       const url = route.request().url();
@@ -55,11 +57,6 @@ test.describe('Shorts toggle', () => {
     await page.goto('/');
   });
 
-  test('renders the toggle in the tabs row, on by default', async ({ page }) => {
-    await expect(page.locator('#shorts-toggle')).toBeVisible();
-    await expect(page.locator('#shorts-toggle-input')).toBeChecked();
-  });
-
   test('long-form renders first, shorts arrive after', async ({ page }) => {
     // Both long-form cards land before either short does
     await expect(page.locator('.media-card:not(.media-card--short)')).toHaveCount(2);
@@ -74,32 +71,6 @@ test.describe('Shorts toggle', () => {
 
     const order = await page.$$eval('.media-card', cards => cards.map(c => c.dataset.videoId));
     expect(order).toEqual(['long_vid_a1', 'short_vid_1', 'long_vid_b2', 'short_vid_2']);
-  });
-
-  test('toggling off hides shorts without removing long-form cards', async ({ page }) => {
-    await expect(page.locator('.media-card')).toHaveCount(4);
-
-    await page.locator('#shorts-toggle').click();
-
-    await expect(page.locator('#shorts-toggle-input')).not.toBeChecked();
-    await expect(page.locator('.media-card--short').first()).toBeHidden();
-    await expect(page.locator('.media-card:not(.media-card--short)').first()).toBeVisible();
-
-    // Toggling back on restores them
-    await page.locator('#shorts-toggle').click();
-    await expect(page.locator('.media-card--short').first()).toBeVisible();
-  });
-
-  test('the preference persists across reloads', async ({ page }) => {
-    await expect(page.locator('.media-card')).toHaveCount(4);
-    await page.locator('#shorts-toggle').click();
-    await expect(page.locator('.media-card--short').first()).toBeHidden();
-
-    await page.reload();
-
-    await expect(page.locator('#shorts-toggle-input')).not.toBeChecked();
-    await expect(page.locator('.media-card:not(.media-card--short)').first()).toBeVisible();
-    await expect(page.locator('.media-card--short').first()).toBeHidden();
   });
 
   test('tab switches render shorts instantly — no deferred flash-in', async ({ page }) => {

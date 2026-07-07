@@ -18,7 +18,7 @@ import { CONFIG } from './config.js';
 import { state, isFilterActive } from './state.js';
 import { api } from './api-client.js';
 import { isShort } from './feed.js';
-import { loadFeedCache, saveFeedCache, loadShowShorts, saveShowShorts } from './cache.js';
+import { loadFeedCache, saveFeedCache } from './cache.js';
 import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
 import { showToast } from './toast.js';
@@ -63,7 +63,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupInfiniteScroll();
   setupFeedControls();
   setupTabs();
-  setupShortsToggle();
   setupFullscreenKeys();
   loadStarsFromStorage();
 
@@ -587,33 +586,6 @@ function setupInfiniteScroll() {
   }, { rootMargin: '600px' });
 
   scrollObserver.observe(sentinel);
-}
-
-// ============================================================
-// SHORTS TOGGLE
-// Shorts cards are always in the DOM (marked media-card--short);
-// the toggle hides them with a single container class — pure CSS,
-// nothing re-renders.
-// ============================================================
-
-function setupShortsToggle() {
-  const input = document.getElementById('shorts-toggle-input');
-  if (!input) return;
-
-  state.showShorts = loadShowShorts();
-  input.checked = state.showShorts;
-  applyShortsVisibility();
-
-  input.addEventListener('change', () => {
-    state.showShorts = input.checked;
-    saveShowShorts(state.showShorts);
-    applyShortsVisibility();
-  });
-}
-
-function applyShortsVisibility() {
-  const container = document.getElementById('feed-container');
-  if (container) container.classList.toggle('feed--hide-shorts', !state.showShorts);
 }
 
 // ============================================================
