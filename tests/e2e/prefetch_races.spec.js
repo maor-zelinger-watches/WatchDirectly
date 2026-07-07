@@ -292,11 +292,16 @@ test.describe('Prefetch race regressions', () => {
     expect(afterDiff.length).toBeGreaterThanOrEqual(10);
     expect(afterDiff).toEqual(makeItems('fresh', afterDiff.length).map(v => v.video_id));
 
-    // Pagination resumes cleanly: the feed reaches fresh page 2 in order
+    // Pagination resumes cleanly into fresh page 2 and beyond. How far the
+    // feed auto-fills depends on the pinned-at-bottom viewport height, so this
+    // asserts the invariant the test actually guards — no orphaned or
+    // out-of-order buffered page — rather than a brittle fixed count: whatever
+    // is rendered is always an in-order, duplicate-free prefix of the fresh
+    // feed, and it did advance past fresh page 1.
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await expect(page.locator('.media-card')).toHaveCount(20);
+    await expect.poll(async () => (await cardIds(page)).length).toBeGreaterThanOrEqual(20);
     const ids = await cardIds(page);
-    expect(ids).toEqual(makeItems('fresh', 20).map(v => v.video_id));
+    expect(ids).toEqual(makeItems('fresh', ids.length).map(v => v.video_id));
     await expectNoDuplicateCards(page);
   });
 

@@ -201,6 +201,24 @@ export function refreshToken() {
 }
 
 /**
+ * Returns a valid (non-expired) Google ID token, refreshing if needed.
+ * Signs the user out and throws if the session can't be renewed —
+ * callers surface the message and roll back their optimistic UI.
+ *
+ * @returns {Promise<string>} A usable ID token
+ */
+export async function ensureToken() {
+  const token = getToken();
+  if (isTokenExpired()) {
+    const fresh = await refreshToken();
+    if (fresh) return fresh;
+    signOut();
+    throw new Error('Session expired. Please sign in again.');
+  }
+  return token;
+}
+
+/**
  * Registers a callback for auth state changes.
  * @param {Function} callback - Called with (user: User|null)
  */

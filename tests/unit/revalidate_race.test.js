@@ -1,17 +1,23 @@
 /**
- * Regression test for finding #2 — the revalidateFeed pagination race.
+ * Regression tests for the revalidateFeed / loadNextPage concurrency model.
  *
- * revalidateFeed() must claim state.revalidating BEFORE its first await, so a
- * loadNextPage() fired by the scroll observer during the network round-trip is
- * blocked from advancing pagination underneath the diff (pre-fix it advanced to
- * page 2, then revalidation reset to fresh page 1 and dropped those rows). It
- * must also release the flag on every return path, including the early returns
- * that now claim it at entry.
+ * Design (stale-while-revalidate must feel instant):
+ *   - The background page-1 freshness fetch does NOT block pagination.
+ *     revalidateFeed claims state.revalidating only when it commits to the
+ *     DOM diff, so the guard pauses pagination for the reconciliation, not
+ *     for the network round-trip.
+ *   - A loadNextPage fetch already in flight is protected by the prefetch
+ *     token: when the diff resets pagination it bumps the token, and the
+ *     stale response is discarded instead of clobbering the fresh feed.
  *
- * app.js exports nothing in production; it exposes __test__ solely for this
- * file. Every global mutation (IntersectionObserver, fetch, localStorage, the
- * DOM) is undone in afterEach, which vitest runs even when an assertion throws,
- * so a failing test leaves no residue behind.
+ * (The guard genuinely pausing pagination DURING the diff is covered
+ * end-to-end by tests/e2e/prefetch_races.spec.js bugs 3 and 4, which need a
+ * real DOM + animation window to exercise.)
+ *
+ * app.js exports nothing in production; it exposes __test__ solely for these
+ * tests. Every global mutation (IntersectionObserver, fetch, localStorage,
+ * the DOM) is undone in afterEach, which vitest runs even when an assertion
+ * throws, so a failing test leaves no residue behind.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
@@ -51,7 +57,7 @@ function seedCachedFeed(state, videos, total) {
     loading: false, revalidating: false, initialLoadComplete: true, view: 'latest',
     filter: { query: '', category: '' }, prefetchBuffer: [], prefetching: false,
     prefetchToken: 0, pendingFetchPage: 0, expandedComments: new Set(),
-    commentsCache: {}, renderToken: 0,
+    commentsCache: {}, renderToken: 0, nextCursor: undefined,
   });
 }
 
@@ -60,8 +66,8 @@ const cached = [
   { video_id: 'b', published_at: '2026-01-01T00:00:00Z', comment_count: 0 },
 ];
 
-describe('revalidateFeed pagination race (finding #2)', () => {
-  it('claims the revalidation guard synchronously, before the first await resolves', async () => {
+describe('revalidateFeed does not block pagination during the freshness fetch', () => {
+  it('leaves the revalidation guard down while the background page-1 fetch is in flight', async () => {
     const { state, revalidateFeed } = appTest;
     seedCachedFeed(state, cached, 50);
 
@@ -71,17 +77,21 @@ describe('revalidateFeed pagination race (finding #2)', () => {
         ? new Promise((r) => { resolvePage1 = r; })
         : Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: [], total: 50 }) }));
 
-    const pending = revalidateFeed(); // deliberately not awaited
+    const pending = revalidateFeed(); // deliberately not awaited — suspended at page-1
 
-    // The fix: the guard is up the instant we enter — not after the network.
-    expect(state.revalidating).toBe(true);
+    // The whole point: the guard is NOT raised for the network wait, so a
+    // scroll firing right now would be free to paginate the cached window.
+    expect(state.revalidating).toBe(false);
 
     resolvePage1({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: cached, total: 50 }) });
     await pending;
     await flush();
+
+    // Identical content settled via the fast path — guard still down.
+    expect(state.revalidating).toBe(false);
   });
 
-  it('blocks a concurrent loadNextPage from advancing pagination during the window', async () => {
+  it('lets a concurrent loadNextPage paginate while the freshness fetch is in flight', async () => {
     const { state, revalidateFeed, loadNextPage } = appTest;
     seedCachedFeed(state, cached, 50);
 
@@ -91,32 +101,58 @@ describe('revalidateFeed pagination race (finding #2)', () => {
         ? new Promise((r) => { resolvePage1 = r; })
         : Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: [], total: 50 }) }));
 
-    const pending = revalidateFeed(); // suspended at the page-1 await
+    const revalidating = revalidateFeed(); // suspended at the page-1 await
 
     const page2Before = fetch.mock.calls.filter(([u]) => u.includes('page=2')).length;
-    loadNextPage(); // a scroll firing mid-revalidation
+    await loadNextPage(); // a scroll firing mid-revalidation must NOT be blocked
 
-    // Pre-fix this advanced to page 2 and concat'd rows the diff then dropped.
-    expect(state.loading).toBe(false);
-    expect(state.currentPage).toBe(1);
-    expect(fetch.mock.calls.filter(([u]) => u.includes('page=2')).length).toBe(page2Before);
+    // Pre-fix the coarse revalidating guard swallowed this entirely.
+    expect(fetch.mock.calls.filter(([u]) => u.includes('page=2')).length).toBe(page2Before + 1);
 
     resolvePage1({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: cached, total: 50 }) });
-    await pending;
+    await revalidating;
     await flush();
   });
 
-  it('releases the guard on the identical-content early-return path', async () => {
+  it('adopts the server cursor on the identical-content path when pagination did not advance', async () => {
     const { state, revalidateFeed } = appTest;
-    seedCachedFeed(state, cached, 2); // total === videos.length so refill stays quiet
+    seedCachedFeed(state, cached, 50);
 
     fetch.mockImplementation(() =>
-      Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: cached, total: 2 }) }));
+      Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: cached, total: 50, next_cursor: 'server|cursor' }) }));
 
     await revalidateFeed();
     await flush();
 
-    // The early return claimed the flag at entry; the finally must clear it.
+    expect(state.nextCursor).toBe('server|cursor');
     expect(state.revalidating).toBe(false);
+  });
+});
+
+describe('an in-flight paginated response cannot clobber a pagination reset', () => {
+  it('discards loadNextPage\'s response when the prefetch token was bumped mid-flight', async () => {
+    const { state, loadNextPage } = appTest;
+    seedCachedFeed(state, cached, 50);
+
+    let resolvePage2;
+    fetch.mockImplementation((url) =>
+      url.includes('page=2')
+        ? new Promise((r) => { resolvePage2 = r; })
+        : Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: [], total: 50 }) }));
+
+    const pending = loadNextPage(); // suspended at the page-2 fetch; epoch captured
+
+    // A revalidation diff resets pagination while page 2 is airborne — this
+    // is exactly what invalidatePrefetchBuffer() does inside the diff.
+    state.prefetchToken++;
+
+    resolvePage2({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: [{ video_id: 'c', published_at: '2026-01-03T00:00:00Z' }], total: 50 }) });
+    await pending;
+    await flush();
+
+    // The stale response was dropped: pagination didn't advance, 'c' never
+    // entered state — no duplicate, no regressed page count.
+    expect(state.currentPage).toBe(1);
+    expect(state.videos.map(v => v.video_id)).toEqual(['a', 'b']);
   });
 });

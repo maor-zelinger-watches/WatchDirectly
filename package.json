@@ -9,7 +9,9 @@
     "test:e2e": "playwright test",
     "test:all": "vitest run && playwright test",
     "resolve-channels": "node scripts/resolve-channels.js",
-    "serve": "npx serve . -l 3000"
+    "serve": "npx serve . -l 3000",
+    "deploy:backend": "./scripts/deploy-backend.sh",
+    "setup:deploy": "./scripts/setup-backend-deploy.sh"
   },
   "keywords": [
     "watches",
@@ -19,6 +21,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@google/clasp": "^3.3.0",
     "@playwright/test": "^1.59.1",
     "jsdom": "^29.1.1",
     "serve": "^14.2.6",
