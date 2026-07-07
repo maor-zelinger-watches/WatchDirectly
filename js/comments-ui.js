@@ -206,14 +206,24 @@ function setupInlineCommentForm(videoId) {
 }
 
 /**
- * Update comment_count in both state.videos and localStorage cache
- * after a successful comment post. Prevents stale-count flash on next load.
+ * Update comment_count everywhere a copy of the row lives — the feed list
+ * (+ its localStorage cache), the Top This Week list, and the search index —
+ * after a successful comment post. Any list missing here would re-render
+ * with a stale count (that's exactly how search cards lost their counts).
  */
 function updateCachedCommentCount(videoId, newCount) {
   const video = state.videos.find(v => v.video_id === videoId);
   if (video) {
     video.comment_count = newCount;
     saveFeedCache(state.videos, state.totalVideos);
+  }
+  if (state.topVideos) {
+    const tv = state.topVideos.find(v => v.video_id === videoId);
+    if (tv) tv.comment_count = newCount;
+  }
+  if (state.searchIndex) {
+    const sv = state.searchIndex.find(v => v.video_id === videoId);
+    if (sv) sv.comment_count = newCount;
   }
 }
 

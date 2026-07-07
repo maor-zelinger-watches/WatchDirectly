@@ -143,4 +143,28 @@ test.describe('Upvoting', () => {
     await expect(vote).toHaveClass(/media-card__vote--active/);
     await expect(vote.locator('.media-card__vote-count')).toHaveText('2');
   });
+
+  test('a vote cast after the search index is built shows in search results', async ({ page }) => {
+    await setup(page, { signedIn: true });
+
+    // Build the search index first (searching triggers it), then clear.
+    // A no-match query is the completion signal: the empty message only
+    // renders once the index build has finished (never on partial paints).
+    await page.fill('#search-input', 'zzzznomatch');
+    await expect(page.locator('#feed-empty')).toBeVisible();
+    await page.fill('#search-input', '');
+    await expect(page.locator('.media-card')).toHaveCount(2);
+
+    // Vote in the normal feed — count goes 1 → 2.
+    const vote = page.locator('.media-card[data-video-id="lat_vid_1"] .media-card__vote');
+    await vote.click();
+    await expect(vote.locator('.media-card__vote-count')).toHaveText('2');
+
+    // Search again: the result card renders from the index copy, which must
+    // carry the fresh count — not the value frozen at index-build time.
+    await page.fill('#search-input', 'latest');
+    const searchVote = page.locator('.media-card[data-video-id="lat_vid_1"] .media-card__vote');
+    await expect(searchVote.locator('.media-card__vote-count')).toHaveText('2');
+    await expect(searchVote).toHaveClass(/media-card__vote--active/);
+  });
 });

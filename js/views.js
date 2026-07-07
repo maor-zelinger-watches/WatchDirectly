@@ -46,9 +46,29 @@ function seedFromMemory() {
   return dedupeVideos(parts);
 }
 
+/** Same identity key dedupeVideos uses: url when present, else video_id. */
+function indexKey(v) {
+  return v && v.url ? String(v.url).trim().toLowerCase() : `id:${v && v.video_id}`;
+}
+
+/**
+ * Merges a freshly fetched chunk into the index. Fresh rows REPLACE stale
+ * same-key rows — dedupeVideos' engagement contest is only right within a
+ * single fetch (the doubled-article case); across fetches the re-fetched row
+ * is newer truth even when its counts went down (an un-vote), so competing
+ * on engagement would freeze counts at their cached high-water mark.
+ * Keeps the index newest-first: chunks resolve in arbitrary order, and
+ * category-only filtering renders index order directly.
+ */
+function mergeIndexChunk(index, chunkVideos) {
+  const fresh = dedupeVideos(chunkVideos); // collapse intra-fetch doubles
+  const freshKeys = new Set(fresh.map(indexKey));
+  return sortVideos(index.filter(v => !freshKeys.has(indexKey(v))).concat(fresh));
+}
+
 /**
  * Fetches the whole catalog in parallel chunks, merging each into the live
- * index as it arrives (dedupe absorbs page overlap and mid-build ingest).
+ * index as it arrives (fresh rows replace stale seed/cache rows).
  * Every merge notifies progress subscribers so results paint incrementally.
  * Uses offset pagination — unlike cursors, pages are order-independent and
  * can be fetched concurrently. Returns the complete index.
@@ -60,7 +80,7 @@ async function buildSearchIndex() {
   // First chunk is the newest page and tells us the catalog total.
   const first = await api.fetchFeed(1, chunk);
   const firstVideos = first.videos || [];
-  state.searchIndex = dedupeVideos((state.searchIndex || []).concat(firstVideos));
+  state.searchIndex = mergeIndexChunk(state.searchIndex || [], firstVideos);
   notifyIndexProgress();
 
   const total = Math.min(first.total || firstVideos.length, cap);
@@ -70,7 +90,7 @@ async function buildSearchIndex() {
     await Promise.all(pages.map(p =>
       api.fetchFeed(p, chunk)
         .then(data => {
-          state.searchIndex = dedupeVideos(state.searchIndex.concat(data.videos || []));
+          state.searchIndex = mergeIndexChunk(state.searchIndex, data.videos || []);
           notifyIndexProgress();
         })
         // A dropped chunk just means those items miss this session's index.

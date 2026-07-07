@@ -40,6 +40,12 @@ function updateCachedVoteCount(videoId, count) {
     const tv = state.topVideos.find(x => x.video_id === videoId);
     if (tv) tv.vote_count = count;
   }
+  // The search index holds its own copy of every row — without this, a
+  // search re-render paints the count as it was when the index was built.
+  if (state.searchIndex) {
+    const sv = state.searchIndex.find(x => x.video_id === videoId);
+    if (sv) sv.vote_count = count;
+  }
 }
 
 /**
