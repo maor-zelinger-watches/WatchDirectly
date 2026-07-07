@@ -87,6 +87,14 @@ that component's heading.
   token, so repeat calls in a short window (bootstrap, then rapid votes/stars)
   skip the ~100-500ms `tokeninfo` round trip. TTL is capped at the token's own
   expiry; failures are never cached.
+- Feed-head cache: the first 50 sorted videos are kept in `CacheService`
+  (5 min TTL), so the requests that gate a cold start's first paint (page 1,
+  its completion, early prefetch pages) skip the full Videos-sheet scan + sort
+  and answer in a cache read. Populated read-through by any full-path feed
+  request; explicitly invalidated by every writer that changes what the head
+  contains (crawl completion, vote recounts, comment recounts), so counts stay
+  live. Cursor requests and deep pages always take the live path, and a cached
+  head holding an expired premiere/live entry is treated as a miss.
 
 ### 1.1.0 — 2026-07-07
 - Pull premieres and scheduled/active live streams. RSS entries for these are
@@ -115,6 +123,9 @@ that component's heading.
   batched `handleBootstrap` action, and `verifyGoogleToken` cache behavior
   (hit skips the tokeninfo fetch, expired entries are re-verified, failures are
   not cached). The `votes_tab` e2e now routes the `bootstrap` action.
+- Feed-head cache tests: repeat page-1 requests skip the sheet scan, cursor
+  requests take the live path, vote/comment recounts invalidate, and a cached
+  head holding an expired premiere is a miss.
 
 ### 1.1.0 — 2026-07-07
 - New performance test suite (`tests/perf/`, `npm run test:perf`): 16

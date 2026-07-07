@@ -40,6 +40,17 @@ const VERSION = '1.2.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
+
+// Feed-head cache: the first FEED_HEAD_COUNT sorted videos are kept in
+// CacheService so the requests that gate first paint (page 1, the page-1
+// completion, early prefetch pages) skip the full Videos-sheet scan + sort —
+// the dominant cost of a feed doGet. Short TTL as a backstop; the cache is
+// explicitly invalidated by every writer that changes what the head contains
+// (crawl completions, vote recounts, comment recounts). ~50 rows is ~50KB,
+// comfortably inside CacheService's 100KB/key limit.
+const FEED_HEAD_COUNT = 50;
+const FEED_HEAD_CACHE_KEY = 'feed_head_v1';
+const FEED_HEAD_CACHE_SECONDS = 300;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
 
 // Grace window applied to a premiere/live entry's expiry. A scheduled premiere
@@ -546,6 +557,10 @@ function crawlAllFeeds() {
 
   // Update last_fetch timestamp
   setMeta('last_fetch', new Date().toISOString());
+
+  // The crawl appended rows and refreshed view counts / live state in place —
+  // the cached head no longer reflects the sheet.
+  invalidateFeedHead();
 
   log('INFO', 'fetchAllFeeds', 'Refresh complete. New: ' + newCount + ', Errors: ' + errorCount);
   return { new_videos: newCount, errors: errorCount };
@@ -1236,6 +1251,29 @@ function cursorFor(video) {
 }
 
 function getVideos(page, limit, cursor) {
+  var start = (page - 1) * limit;
+
+  // Fast path: serve early no-cursor pages from the cached feed head, skipping
+  // the full sheet scan + sort. Cursor requests always take the live path —
+  // resolving an arbitrary cursor position needs the whole sorted catalog.
+  if (!cursor && start + limit <= FEED_HEAD_COUNT) {
+    var head = readFeedHead();
+    // The head can answer iff the window fits inside it — or it holds the
+    // ENTIRE catalog, in which case a short/empty slice is the true answer.
+    if (head && (start + limit <= head.videos.length || head.videos.length >= head.total)) {
+      var fromHead = head.videos.slice(start, start + limit);
+      return {
+        status: 'ok',
+        videos: fromHead,
+        total: head.total,
+        page: page,
+        next_cursor: (fromHead.length > 0 && start + fromHead.length < head.total)
+          ? cursorFor(fromHead[fromHead.length - 1])
+          : '',
+      };
+    }
+  }
+
   var videos = readAllVideos();
 
   if (videos.length === 0) {
@@ -1245,7 +1283,17 @@ function getVideos(page, limit, cursor) {
   // Sort by published_at descending (newest first), video_id tiebreak
   videos.sort(compareVideos);
 
-  var start = (page - 1) * limit;
+  // Read-through populate: any full-path request refreshes the head for the
+  // next caller. Best-effort — an oversized value or cache hiccup just means
+  // the next request scans the sheet again.
+  try {
+    CacheService.getScriptCache().put(FEED_HEAD_CACHE_KEY, JSON.stringify({
+      videos: videos.slice(0, FEED_HEAD_COUNT),
+      total: videos.length,
+    }), FEED_HEAD_CACHE_SECONDS);
+  } catch (e) {
+    /* cache write is optional */
+  }
 
   // Cursor pagination: resume strictly after the (published_at, video_id)
   // position the client last saw. Unlike the page offset above, items
@@ -1277,6 +1325,46 @@ function getVideos(page, limit, cursor) {
       ? cursorFor(paged[paged.length - 1])
       : '',
   };
+}
+
+/**
+ * Reads the cached feed head, or null on any miss/problem. A head containing
+ * a provisional premiere/live entry whose expiry has passed is treated as a
+ * miss rather than re-filtered — dropping rows here would shift the slice
+ * offsets and total; the live path re-derives everything consistently.
+ */
+function readFeedHead() {
+  try {
+    var raw = CacheService.getScriptCache().get(FEED_HEAD_CACHE_KEY);
+    if (!raw) return null;
+    var head = JSON.parse(raw);
+    if (!head || !Array.isArray(head.videos) || typeof head.total !== 'number') return null;
+    var nowMs = Date.now();
+    for (var i = 0; i < head.videos.length; i++) {
+      var exp = head.videos[i].expires_at;
+      if (exp) {
+        var expMs = new Date(exp).getTime();
+        if (!isNaN(expMs) && expMs < nowMs) return null;
+      }
+    }
+    return head;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Drops the cached feed head. Call from ANY writer that changes what the head
+ * would contain — crawl completions (new rows, refreshed view counts / live
+ * state) and vote/comment recounts (counts are baked into the cached rows).
+ * Cheap enough to call unconditionally; the next feed request repopulates.
+ */
+function invalidateFeedHead() {
+  try {
+    CacheService.getScriptCache().remove(FEED_HEAD_CACHE_KEY);
+  } catch (e) {
+    /* best-effort */
+  }
 }
 
 /**
@@ -1517,6 +1605,10 @@ function updateCommentCount(videoId) {
       break;
     }
   }
+
+  // comment_count is baked into the cached feed head — drop it so the next
+  // feed request serves the new count instead of a stale cached row.
+  invalidateFeedHead();
 }
 
 // ============================================================
@@ -1668,6 +1760,10 @@ function updateVoteCount(videoId) {
       break;
     }
   }
+
+  // vote_count is baked into the cached feed head — drop it so the next feed
+  // request serves the new count instead of a stale cached row.
+  invalidateFeedHead();
 
   return count;
 }

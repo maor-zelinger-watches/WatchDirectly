@@ -39,8 +39,12 @@ function blankSheet(overrides = {}) {
 /** A fresh in-memory CacheService. TTL is ignored — tests don't advance time. */
 function memoryCache() {
   const store = new Map();
-  const cache = { get: (k) => (store.has(k) ? store.get(k) : null), put: (k, v) => { store.set(k, v); } };
-  return { getScriptCache: () => cache };
+  const cache = {
+    get: (k) => (store.has(k) ? store.get(k) : null),
+    put: (k, v) => { store.set(k, v); },
+    remove: (k) => { store.delete(k); },
+  };
+  return { getScriptCache: () => cache, _store: store };
 }
 
 /**
@@ -83,6 +87,7 @@ function loadBackend(mocks = {}) {
   const names = [
     'verifyGoogleToken', 'toIsoDate', 'handleAddComment', 'decodeHtmlEntities',
     'handleFeed', 'handleBootstrap', 'kickoffRefresh',
+    'getVideos', 'updateVoteCount', 'updateCommentCount',
   ];
   const factory = new Function(...Object.keys(globals), `${SRC}\nreturn { ${names.join(', ')} };`);
   return factory(...Object.values(globals));
@@ -332,5 +337,77 @@ describe('verifyGoogleToken (caching — skip the tokeninfo round trip)', () => 
     expect(be.verifyGoogleToken('bad')).toBeNull();
     expect(be.verifyGoogleToken('bad')).toBeNull();
     expect(fetches).toBe(2);                          // failures re-verify every time
+  });
+});
+
+describe('getVideos feed-head cache (skip the sheet scan on early pages)', () => {
+  // The shared mock sheet backs EVERY spreadsheet (videos, votes, comments),
+  // so the header row carries the columns each code path looks up.
+  const HEADERS = ['video_id', 'user_email', 'url', 'published_at', 'vote_count', 'comment_count', 'channel_name'];
+  const ROWS = [
+    ['vid1', '', 'https://a', '2026-01-02T00:00:00.000Z', 1, 0, 'Chan'],
+    ['vid2', '', 'https://b', '2026-01-01T00:00:00.000Z', 0, 0, 'Chan'],
+  ];
+
+  /** A videos sheet that counts full reads, the cost the cache exists to skip. */
+  function countingSetup(rows = ROWS) {
+    let reads = 0;
+    const sheet = blankSheet({
+      getDataRange: () => ({ getValues: () => { reads++; return [HEADERS, ...rows]; } }),
+    });
+    const cacheService = memoryCache();
+    const be = loadBackend({ sheet, CacheService: cacheService });
+    return { be, cacheService, reads: () => reads };
+  }
+
+  it('serves a repeat page-1 request from cache without re-reading the sheet', () => {
+    const { be, reads } = countingSetup();
+    const first = be.getVideos(1, 10, '');
+    expect(first.videos.map((v) => v.video_id)).toEqual(['vid1', 'vid2']); // newest first
+    expect(reads()).toBe(1);
+
+    const second = be.getVideos(1, 10, '');
+    expect(reads()).toBe(1);                          // cache hit — no second scan
+    expect(second.videos.map((v) => v.video_id)).toEqual(['vid1', 'vid2']);
+    expect(second.total).toBe(first.total);
+    expect(second.next_cursor).toBe(first.next_cursor);
+  });
+
+  it('cursor requests always take the live path', () => {
+    const { be, reads } = countingSetup();
+    be.getVideos(1, 10, '');                          // populates the head
+    const res = be.getVideos(2, 1, '2026-01-02T00:00:00.000Z|vid1');
+    expect(reads()).toBe(2);                          // cursor resolution needs the full catalog
+    expect(res.videos.map((v) => v.video_id)).toEqual(['vid2']);
+  });
+
+  it('a vote recount invalidates the head so the next read serves fresh counts', () => {
+    const { be, reads } = countingSetup();
+    be.getVideos(1, 10, '');                          // 1 read — populates cache
+    be.updateVoteCount('vid1');                       // +2 reads (votes tab + videos sheet)
+    be.getVideos(1, 10, '');                          // must re-scan: counts changed
+    expect(reads()).toBe(4);                          // 3 would mean a stale cached count was served
+  });
+
+  it('a comment recount invalidates the head too', () => {
+    const { be, reads } = countingSetup();
+    be.getVideos(1, 10, '');                          // 1 read
+    be.updateCommentCount('vid1');                    // +2 reads (comments + videos)
+    be.getVideos(1, 10, '');                          // must re-scan
+    expect(reads()).toBe(4);
+  });
+
+  it('a cached head holding an expired premiere is a miss, not re-filtered', () => {
+    const { be, cacheService, reads } = countingSetup();
+    // Seed a head whose entry expired between populate and read. Serving it
+    // would resurface a premiere that never aired; re-filtering it in place
+    // would shift offsets/total. Either way: fall through to the live path.
+    cacheService._store.set('feed_head_v1', JSON.stringify({
+      videos: [{ video_id: 'ghost', url: 'https://g', published_at: '2026-01-03T00:00:00.000Z', expires_at: new Date(Date.now() - 1000).toISOString() }],
+      total: 1,
+    }));
+    const res = be.getVideos(1, 10, '');
+    expect(reads()).toBe(1);                          // went to the sheet
+    expect(res.videos.map((v) => v.video_id)).toEqual(['vid1', 'vid2']); // no ghost
   });
 });
