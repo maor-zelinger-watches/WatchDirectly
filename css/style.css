@@ -90,6 +90,15 @@
   box-sizing: border-box;
 }
 
+/* Anything scrolled into view (keyboard focus, scrollIntoView, in-page
+   anchors) must land below the sticky header — without this, scroll
+   targets sit underneath it and taps hit the header instead. Applies to
+   every element because scroll targets include controls INSIDE cards
+   (vote/star/expand buttons), not just the cards themselves. */
+* {
+  scroll-margin-top: calc(var(--header-height) + var(--sp-2));
+}
+
 html {
   font-size: 16px;
   -webkit-text-size-adjust: 100%;
@@ -318,12 +327,6 @@ img {
   display: none;
 }
 
-/* Shorts slide in after the long-form cards have rendered */
-.media-card--short-entering {
-  opacity: 0;
-  transform: translateY(16px) scale(0.97);
-}
-
 /* ============================================================
    SEARCH & FILTER CONTROLS
    ============================================================ */
@@ -414,8 +417,8 @@ img {
   border-radius: var(--radius-md);
   overflow: hidden;
   transition: border-color var(--transition-normal), opacity 0.3s ease, transform 0.3s ease;
-  /* Post-fullscreen scroll restore lands below the sticky header */
-  scroll-margin-top: calc(var(--header-height) + var(--sp-2));
+  /* Post-fullscreen scroll restore clears the sticky header via the
+     universal scroll-margin-top rule in RESET & BASE. */
 }
 
 .media-card:hover {
@@ -425,6 +428,34 @@ img {
 .media-card--entering {
   opacity: 0;
   transform: translateY(12px);
+}
+
+/* Batch entrance (appendCards): the card is inserted at its final layout
+   position immediately — only opacity/transform animate (compositor-only,
+   zero layout shift). The stagger lives in --enter-delay per card;
+   fill-mode "both" keeps the card invisible until its turn. */
+.media-card--enter {
+  animation: card-enter 0.3s ease both;
+  animation-delay: var(--enter-delay, 0ms);
+}
+
+.media-card--enter-short {
+  animation: card-enter-short 0.3s ease both;
+  animation-delay: var(--enter-delay, 0ms);
+}
+
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+@keyframes card-enter-short {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.97);
+  }
 }
 
 .media-card--leaving {

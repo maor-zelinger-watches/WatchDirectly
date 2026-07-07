@@ -91,7 +91,7 @@ export function insertCardChronologically(container, card) {
  * Used by tab switches and filter re-renders: the data is already loaded,
  * so everything appears at once — no deferred reveal, no flicker. The
  * animated shorts reveal is reserved for the Latest feed's network loads
- * (appendCards → insertShortsDeferred in app.js).
+ * (appendCards in app.js).
  */
 export function renderList(container, videos) {
   for (const video of videos) {

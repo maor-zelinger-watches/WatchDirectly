@@ -64,10 +64,14 @@ test.describe('Optimistic UI Comments', () => {
   });
 
   test('successful comment post (optimistic -> resolved)', async ({ page }) => {
-    // Delay the POST request so we can see the optimistic state
+    // Hold the POST until the test releases it — the optimistic window
+    // stays open exactly as long as the assertions need (a fixed timer
+    // races the runner's scheduling and flakes under load).
+    let releasePost;
+    const postHeld = new Promise(resolve => { releasePost = resolve; });
     await page.route('**/exec', async (route, request) => {
       if (request.method() === 'POST') {
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await postHeld;
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -102,17 +106,22 @@ test.describe('Optimistic UI Comments', () => {
     // Reply button should NOT exist while optimistic
     await expect(newComment.locator('.comment__reply-btn')).toHaveCount(0);
 
-    // Wait for the mock API to resolve and check that it transitioned to real comment
+    // Optimistic state verified — let the server respond and check the
+    // transition to a real comment
+    releasePost();
     await expect(newComment).not.toHaveClass(/comment--optimistic/);
     await expect(newComment.locator('.comment__reply-btn')).toBeVisible();
     await expect(newComment).toHaveAttribute('data-comment-id', 'real_id_123');
   });
 
   test('failed comment post (optimistic -> rollback)', async ({ page }) => {
-    // Fail the POST request to trigger rollback
+    // Fail the POST to trigger rollback — held until the test has verified
+    // the optimistic state (same reasoning as the success case).
+    let releasePost;
+    const postHeld = new Promise(resolve => { releasePost = resolve; });
     await page.route('**/exec', async (route, request) => {
       if (request.method() === 'POST') {
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await postHeld;
         await route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -139,8 +148,9 @@ test.describe('Optimistic UI Comments', () => {
     const commentsList = page.locator('.media-card__comments-list').first();
     await expect(commentsList.locator('.comment')).toHaveCount(1, { timeout: 2000 });
 
-    // Wait for network failure + rollback (500ms mock delay + processing)
-    // The rollback removes the entire .comment-thread, so the comment count drops to 0
+    // Optimistic state verified — let the POST fail and trigger rollback.
+    // The rollback removes the entire .comment-thread, so the count drops to 0
+    releasePost();
     await expect(commentsList.locator('.comment')).toHaveCount(0, { timeout: 5000 });
 
     // The text should be restored to the textarea

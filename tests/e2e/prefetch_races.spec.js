@@ -236,11 +236,15 @@ test.describe('Prefetch race regressions', () => {
     expect(afterDiff.length).toBeGreaterThanOrEqual(10);
     expect(afterDiff).toEqual(makeItems('fresh', afterDiff.length).map(v => v.video_id));
 
-    // The feed continues into fresh page 2 — not skipped, not duplicated
+    // The feed continues into fresh page 2 — not skipped, not duplicated.
+    // The viewport is pinned at the bottom, so auto-fill may legitimately
+    // continue past page 2 — assert the in-order fresh prefix at whatever
+    // depth it reached, not a frozen count (a skip or duplicate anywhere
+    // still breaks the prefix equality).
     await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await expect(page.locator('.media-card')).toHaveCount(20);
+    await expect.poll(() => page.locator('.media-card').count()).toBeGreaterThanOrEqual(20);
     const ids = await cardIds(page);
-    expect(ids).toEqual(makeItems('fresh', 20).map(v => v.video_id));
+    expect(ids).toEqual(makeItems('fresh', ids.length).map(v => v.video_id));
   });
 
   test('bug 4: a scroll during the revalidate diff cannot consume and orphan a buffered page', async ({ page }) => {

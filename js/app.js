@@ -222,109 +222,60 @@ async function loadNextPage() {
 
 /**
  * Append video cards one at a time with staggered timing.
- * Long-form videos and articles render first; Shorts are held back and
- * slide in afterward at their chronological position, so the main
- * content is on screen before the short-form filler arrives.
- * Returns a Promise that resolves when the long-form cards are in
- * (Shorts keep animating in after resolution).
- */
-function appendCards(videos) {
-  return new Promise((resolve) => {
-    // Paginated cards belong only to the unfiltered Latest feed — a filter
-    // render or another view owns the container otherwise.
-    if (videos.length === 0 || isFilterActive() || state.view !== 'latest') {
-      resolve();
-      return;
-    }
-
-    const feedContainer = document.getElementById('feed-container');
-
-    // Captured now so staggered inserts abort if the container is
-    // re-rendered (tab switch, search) while this batch is in flight.
-    const token = state.renderToken;
-    const staleRender = () =>
-      token !== state.renderToken || state.view !== 'latest' || isFilterActive();
-
-    // Deduplicate: skip items already rendered in the DOM
-    const deduped = videos.filter(video => {
-      const id = video.video_id;
-      return id && !feedContainer.querySelector(`[data-video-id="${id}"]`);
-    });
-
-    if (deduped.length === 0) {
-      resolve();
-      return;
-    }
-
-    const mains = deduped.filter(v => !isShort(v));
-    const shorts = deduped.filter(isShort);
-
-    if (mains.length === 0) {
-      resolve();
-      insertShortsDeferred(feedContainer, shorts, token);
-      return;
-    }
-
-    mains.forEach((video, i) => {
-      setTimeout(() => {
-        const isLast = i === mains.length - 1;
-
-        // Double-check dedup (guards against race from staggered timeouts)
-        if (!staleRender() && !feedContainer.querySelector(`[data-video-id="${video.video_id}"]`)) {
-          const card = buildCard(video);
-          card.classList.add('media-card--entering');
-          feedContainer.appendChild(card);
-          observeLazyIframe(card);
-
-          requestAnimationFrame(() => {
-            card.classList.remove('media-card--entering');
-          });
-        }
-
-        // Resolve when the last long-form card is in, then bring in the Shorts
-        if (isLast) {
-          setTimeout(() => {
-            resolve();
-            insertShortsDeferred(feedContainer, shorts, token);
-          }, 50);
-        }
-      }, i * 60);
-    });
-  });
-}
-
-/**
- * Slides Shorts into the feed after the long-form cards have rendered.
- * Each short lands at its chronological spot with an entrance animation.
- * Inserts are abandoned if the container was re-rendered in the meantime
- * (view switch, search) — state.renderToken tracks container ownership.
+ * The whole batch is inserted synchronously in ONE pass — space is
+ * allocated in a single layout, so the page never keeps shifting under
+ * the user's cursor while cards trickle in (staggered DOM insertion made
+ * every interaction land on a moving page for ~1s per batch, and racked
+ * up layout-shift for free). The familiar reveal is preserved purely on
+ * the compositor: each card starts invisible and fades/slides in on a
+ * per-card CSS animation-delay — long-form first (60ms apart), Shorts
+ * after (150ms + 80ms apart), same schedule as before. Shorts still land
+ * at their chronological position among the batch.
  *
- * This deferred reveal is for NETWORK ARRIVALS on the Latest feed only
- * (appendCards). Re-renders of already-loaded data must use renderList —
- * replaying the animation on every tab switch reads as flicker.
+ * This entrance animation is for NETWORK ARRIVALS on the Latest feed only.
+ * Re-renders of already-loaded data must use renderList — replaying the
+ * animation on every tab switch reads as flicker.
  */
-function insertShortsDeferred(container, shorts, token) {
-  if (!shorts || shorts.length === 0) return;
+async function appendCards(videos) {
+  // Paginated cards belong only to the unfiltered Latest feed — a filter
+  // render or another view owns the container otherwise.
+  if (videos.length === 0 || isFilterActive() || state.view !== 'latest') return;
 
-  shorts.forEach((video, i) => {
-    setTimeout(() => {
-      if (token !== state.renderToken) return;
-      if (!video.video_id || container.querySelector(`[data-video-id="${video.video_id}"]`)) return;
+  const feedContainer = document.getElementById('feed-container');
 
-      const card = buildCard(video);
-      card.classList.add('media-card--short-entering');
-      insertCardChronologically(container, card);
-      observeLazyIframe(card);
-
-      // Double rAF so the browser paints the entering state before
-      // the transition to the resting state starts.
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          card.classList.remove('media-card--short-entering');
-        });
-      });
-    }, 150 + i * 80);
+  // Deduplicate: skip items already rendered in the DOM
+  const deduped = videos.filter(video => {
+    const id = video.video_id;
+    return id && !feedContainer.querySelector(`[data-video-id="${id}"]`);
   });
+  if (deduped.length === 0) return;
+
+  const mains = deduped.filter(v => !isShort(v));
+  const shorts = deduped.filter(isShort);
+  const inserted = [];
+
+  // Long-form cards append in batch order (pages arrive chronological).
+  const frag = document.createDocumentFragment();
+  mains.forEach((video, i) => {
+    const card = buildCard(video);
+    card.classList.add('media-card--enter');
+    card.style.setProperty('--enter-delay', `${i * 60}ms`);
+    frag.appendChild(card);
+    inserted.push(card);
+  });
+  feedContainer.appendChild(frag);
+
+  // Shorts go to their chronological spot, in the same synchronous task —
+  // the browser computes layout once for the whole batch.
+  shorts.forEach((video, i) => {
+    const card = buildCard(video);
+    card.classList.add('media-card--enter-short');
+    card.style.setProperty('--enter-delay', `${150 + i * 80}ms`);
+    insertCardChronologically(feedContainer, card);
+    inserted.push(card);
+  });
+
+  for (const card of inserted) observeLazyIframe(card);
 }
 
 /**

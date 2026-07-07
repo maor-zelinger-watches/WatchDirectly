@@ -7,7 +7,7 @@
  */
 
 export const CONFIG = {
-  APP_VERSION: '1.2.0',       // frontend version (npm semver) — bump on every
+  APP_VERSION: '1.2.1',       // frontend version (npm semver) — bump on every
                               // user-visible change; shown in the header and
                               // logged at boot. Backend has its own VERSION
                               // in apps-script/Code.gs; package.json tracks
@@ -19,6 +19,10 @@ export const CONFIG = {
   SEARCH_CHUNK_SIZE: 500,     // page size for building the search index; the
                               // catalog is fetched in parallel chunks of this
                               // size so results paint as each chunk lands
+  SEARCH_RENDER_LIMIT: 200,   // max cards painted for a filtered render — a
+                              // broad query (e.g. a single letter) can match
+                              // nearly the whole index, and building thousands
+                              // of cards synchronously freezes the page
   SEARCH_INDEX_LIMIT: 5000,   // absolute ceiling on indexed/cached items — a
                               // backstop against an unbounded sheet, not a
                               // normal limit (see ensureSearchIndex)

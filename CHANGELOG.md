@@ -21,6 +21,19 @@ that component's heading.
 
 ## Frontend
 
+### 1.2.1 — 2026-07-07
+- Feed batches now insert in a single synchronous DOM pass — layout settles
+  in one frame instead of shifting for ~1s per page while cards trickled in
+  on timers (clicks kept landing on a moving page). The staggered entrance
+  reveal looks the same but runs compositor-only via per-card CSS
+  `animation-delay` (long-form first, Shorts fade in after at their
+  chronological position), so it causes zero layout shift.
+- Scroll targets no longer land underneath the sticky header: a universal
+  `scroll-margin-top` means keyboard focus (Tab) and `scrollIntoView` leave
+  chips, vote/star/expand buttons and cards below the header instead of
+  burying them where taps hit the header. Generalizes the fix `.media-card`
+  already had for the post-fullscreen scroll restore.
+
 ### 1.2.0 — 2026-07-07
 - Content-type chips are now pure UI visibility filters (CSS hide/show over
   already-rendered cards) instead of re-rendering through the search index —
@@ -47,6 +60,19 @@ that component's heading.
 
 ## Backend
 
+### 1.1.0 — 2026-07-07
+- Pull premieres and scheduled/active live streams. RSS entries for these are
+  indistinguishable from normal uploads (no broadcast state, no air time), so
+  the crawl now enriches each YouTube item via the Data API `videos.list`
+  (`part=snippet,liveStreamingDetails`, 50 ids/call) into three self-initialized
+  columns: `live_status` (`upcoming`/`live`/`none`), `scheduled_start`, and
+  `expires_at`. A premiere/live entry gets an `expires_at` (scheduled start, or
+  ingest time, + 12h grace); once it airs it keeps the **same** video id and the
+  existing row is re-enriched in place to `none` with `expires_at` cleared —
+  becoming permanent. `readAllVideos` drops rows whose `expires_at` has passed,
+  so an entry that never airs expires out instead of lingering. Requires a
+  `youtube_api_key` Meta value; without one the crawl is unchanged.
+
 ### 1.0.0 — 2026-07-07
 - Initial versioned release. Google Apps Script web app over Sheets:
   feed/comments/topWeek/refresh/logs GET actions,
@@ -54,6 +80,17 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.1.0 — 2026-07-07
+- New performance test suite (`tests/perf/`, `npm run test:perf`): 16
+  user-journey latency tests against a fully mocked backend (cold/warm load,
+  revalidation non-blocking, prefetch consumption, scroll jank via longtask
+  observer, chip filters, progressive search, tab switches, fullscreen,
+  optimistic votes, a full multi-stage journey, and a CPU/network-throttled
+  mobile variant). Runs as its own Playwright project, serially — latency
+  measured under 16-way parallelism is noise. E2E projects now skip
+  `tests/perf/`; the suite holds to the same 30s/test and 5s/action
+  standards as e2e.
 
 ### 1.0.0 — 2026-07-07
 - Initial versioned release. Vitest unit tests, Playwright e2e tests,

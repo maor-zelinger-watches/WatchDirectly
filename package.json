@@ -1,13 +1,15 @@
 {
   "name": "watchdirectly",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Chronological watch content aggregator with community comments",
   "type": "module",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
-    "test:all": "vitest run && playwright test",
+    "test:e2e": "playwright test --project=mobile-chrome --project=desktop-chrome",
+    "test:perf": "playwright test --project=perf --workers=1",
+    "test:smoke": "playwright test --project=smoke --workers=1",
+    "test:all": "vitest run && npm run test:e2e && npm run test:smoke && npm run test:perf",
     "resolve-channels": "node scripts/resolve-channels.js",
     "serve": "npx serve . -l 3000",
     "deploy:backend": "./scripts/deploy-backend.sh",
