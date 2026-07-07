@@ -44,6 +44,10 @@ async function setup(page, { signedIn = false, myStars = ['Teddy Baldassarre'] }
       let body = {};
       try { body = JSON.parse(req.postData() || '{}'); } catch { /* noop */ }
 
+      if (body.action === 'bootstrap') {
+        // Sign-in reconciles votes + stars in one batched request.
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', video_ids: [], channels: [...stars] }) });
+      }
       if (body.action === 'myStars') {
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', channels: [...stars] }) });
       }

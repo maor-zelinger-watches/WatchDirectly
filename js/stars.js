@@ -104,13 +104,25 @@ export async function toggleStar(channel) {
  */
 export async function loadMyStars() {
   if (!isSignedIn()) return;
-  try {
-    let token = getToken();
-    if (isTokenExpired()) token = await refreshToken();
-    if (!token) return; // can't reconcile right now; the cache stays best-effort
+  let token = getToken();
+  if (isTokenExpired()) token = await refreshToken();
+  if (!token) return; // can't reconcile right now; the cache stays best-effort
+  await reconcileMyStars(api.fetchMyStars(token));
+}
 
-    const epoch = starEpoch;
-    const data = await api.fetchMyStars(token);
+/**
+ * Applies a myStars snapshot (from fetchMyStars OR the batched bootstrap
+ * request) to the UI and localStorage. Captures the star epoch BEFORE awaiting
+ * so a star toggled while the request is in flight beats the older snapshot.
+ * Takes the request promise so the sign-in bootstrap can feed both this and
+ * reconcileMyVotes the SAME request — one round trip, two consumers.
+ *
+ * @param {Promise<{channels?: string[]}>} fetchPromise
+ */
+export async function reconcileMyStars(fetchPromise) {
+  const epoch = starEpoch;
+  try {
+    const data = await fetchPromise;
     // A star toggled while this was in flight beats the older snapshot
     if (epoch !== starEpoch) return;
 

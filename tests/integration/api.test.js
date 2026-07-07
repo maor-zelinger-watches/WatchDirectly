@@ -322,6 +322,23 @@ describe('API Client', () => {
     });
   });
 
+  describe('fetchBootstrap', () => {
+    it('POSTs the token and returns votes and stars together', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', video_ids: ['v1'], channels: ['Hodinkee'] }),
+      });
+
+      const result = await api.fetchBootstrap('mock-token');
+      expect(result.video_ids).toEqual(['v1']);
+      expect(result.channels).toEqual(['Hodinkee']);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.action).toBe('bootstrap');
+      expect(body.token).toBe('mock-token');
+    });
+  });
+
   describe('postComment', () => {
     it('sends a POST request with token-only auth', async () => {
       fetchMock.mockResolvedValueOnce({

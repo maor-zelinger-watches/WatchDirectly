@@ -21,6 +21,15 @@ that component's heading.
 
 ## Frontend
 
+### 1.3.0 — 2026-07-07
+- Sign-in now reconciles votes and stars in a single `bootstrap` request
+  instead of two back-to-back POSTs. Apps Script serializes a user's requests,
+  so the old pair queued nose-to-tail on load (and each re-verified the ID
+  token over the network); the batched call halves both the boot-time queue
+  depth and the token checks. The new `bootstrap.js` hands the one request
+  promise to both the vote and star reconcilers, which each still capture their
+  own epoch before awaiting — a vote/star toggled mid-flight still wins.
+
 ### 1.2.1 — 2026-07-07
 - Feed batches now insert in a single synchronous DOM pass — layout settles
   in one frame instead of shifting for ~1s per page while cards trickled in
@@ -60,6 +69,25 @@ that component's heading.
 
 ## Backend
 
+### 1.2.0 — 2026-07-07
+- Feed requests no longer crawl inline. `handleFeed` used to run the full
+  `fetchAllFeeds` crawl (14 feeds, per-channel sleeps, retry backoff, YouTube
+  enrichment — tens of seconds) whenever the feed was stale. Because Apps
+  Script serializes a user's web requests, that stalled every other request the
+  page fired on load behind it, surfacing as 30s+ TTFBs even though each
+  execution was individually fast. Now a stale feed is served immediately and
+  the crawl is handed to its own execution via a one-shot `kickoffRefresh`
+  time-based trigger (guarded against pile-up by the `fetch_in_progress` marker
+  and a pending-trigger check). Responses carry `stale: true` while a refresh is
+  underway. Matches the read-only design `handleTopWeek` already had.
+- New `bootstrap` POST action returns a signed-in user's upvoted video ids and
+  starred channels together, verifying the token once — replacing the separate
+  `myVotes` + `myStars` calls (both kept for older clients).
+- Token verification is now cached in `CacheService` keyed by a hash of the ID
+  token, so repeat calls in a short window (bootstrap, then rapid votes/stars)
+  skip the ~100-500ms `tokeninfo` round trip. TTL is capped at the token's own
+  expiry; failures are never cached.
+
 ### 1.1.0 — 2026-07-07
 - Pull premieres and scheduled/active live streams. RSS entries for these are
   indistinguishable from normal uploads (no broadcast state, no air time), so
@@ -80,6 +108,13 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.1.1 — 2026-07-07
+- Backend unit tests cover the read-only `handleFeed` (serves without crawling
+  inline, schedules a one-shot refresh trigger, no double-scheduling), the
+  batched `handleBootstrap` action, and `verifyGoogleToken` cache behavior
+  (hit skips the tokeninfo fetch, expired entries are re-verified, failures are
+  not cached). The `votes_tab` e2e now routes the `bootstrap` action.
 
 ### 1.1.0 — 2026-07-07
 - New performance test suite (`tests/perf/`, `npm run test:perf`): 16

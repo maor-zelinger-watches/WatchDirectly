@@ -36,6 +36,33 @@ function blankSheet(overrides = {}) {
   };
 }
 
+/** A fresh in-memory CacheService. TTL is ignored — tests don't advance time. */
+function memoryCache() {
+  const store = new Map();
+  const cache = { get: (k) => (store.has(k) ? store.get(k) : null), put: (k, v) => { store.set(k, v); } };
+  return { getScriptCache: () => cache };
+}
+
+/**
+ * Records ScriptApp trigger installs/removals so the async-refresh tests can
+ * assert exactly what handleFeed scheduled. `initial` seeds pending handlers.
+ */
+function triggerRecorder(initial = []) {
+  let triggers = initial.map((fn) => ({ getHandlerFunction: () => fn }));
+  const created = [];
+  const scriptApp = {
+    getProjectTriggers: () => triggers.slice(),
+    newTrigger: (fn) => ({
+      timeBased: () => ({ after: () => ({ create: () => {
+        created.push(fn);
+        triggers.push({ getHandlerFunction: () => fn });
+      } }) }),
+    }),
+    deleteTrigger: (t) => { triggers = triggers.filter((x) => x !== t); },
+  };
+  return { scriptApp, created, remaining: () => triggers.map((t) => t.getHandlerFunction()) };
+}
+
 /** Eval Code.gs with injected mock globals; return the named functions. */
 function loadBackend(mocks = {}) {
   const sheet = mocks.sheet || blankSheet();
@@ -43,16 +70,20 @@ function loadBackend(mocks = {}) {
     UrlFetchApp: mocks.UrlFetchApp || { fetch: () => ({ getResponseCode: () => 200, getContentText: () => '{}' }) },
     SpreadsheetApp: mocks.SpreadsheetApp || spreadsheetReturning(sheet),
     LockService: mocks.LockService || { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
+    CacheService: mocks.CacheService || memoryCache(),
     Utilities: mocks.Utilities || {
       getUuid: () => '00000000-0000-0000-0000-000000000000',
       computeDigest: () => [], base64EncodeWebSafe: () => 'x', sleep() {},
-      DigestAlgorithm: { MD5: 'MD5' },
+      DigestAlgorithm: { MD5: 'MD5', SHA_256: 'SHA_256' },
     },
     Logger: { log() {} },
     ContentService: { createTextOutput: () => ({ setMimeType: () => ({}) }), MimeType: { JSON: 'json' } },
-    ScriptApp: {}, XmlService: {},
+    ScriptApp: mocks.ScriptApp || {}, XmlService: {},
   };
-  const names = ['verifyGoogleToken', 'toIsoDate', 'handleAddComment', 'decodeHtmlEntities'];
+  const names = [
+    'verifyGoogleToken', 'toIsoDate', 'handleAddComment', 'decodeHtmlEntities',
+    'handleFeed', 'handleBootstrap', 'kickoffRefresh',
+  ];
   const factory = new Function(...Object.keys(globals), `${SRC}\nreturn { ${names.join(', ')} };`);
   return factory(...Object.values(globals));
 }
@@ -177,5 +208,129 @@ describe('decodeHtmlEntities (finding #9 — decode order)', () => {
   it('decodes a bare &amp;', () => {
     const { decodeHtmlEntities } = loadBackend();
     expect(decodeHtmlEntities('A &amp; B')).toBe('A & B');
+  });
+});
+
+describe('handleFeed (perf — a read must never crawl inline)', () => {
+  it('serves the feed immediately and schedules an async refresh when stale', () => {
+    const rec = triggerRecorder();
+    let crawlFetches = 0;
+    const be = loadBackend({
+      ScriptApp: rec.scriptApp,
+      // Any fetch here would mean the crawl ran inline — count them.
+      UrlFetchApp: { fetch: () => { crawlFetches++; return { getResponseCode: () => 200, getContentText: () => '<rss></rss>' }; } },
+    });
+    // Blank META → no last_fetch → stale.
+    const res = be.handleFeed({ page: '1', limit: '10' });
+    expect(res.status).toBe('ok');
+    expect(res.stale).toBe(true);
+    expect(crawlFetches).toBe(0);                     // did NOT crawl inline
+    expect(rec.created).toEqual(['kickoffRefresh']);  // scheduled it instead
+  });
+
+  it('does not stack a second trigger when a refresh is already pending', () => {
+    const rec = triggerRecorder(['kickoffRefresh']);
+    const be = loadBackend({ ScriptApp: rec.scriptApp });
+    be.handleFeed({ page: '1', limit: '10' });
+    expect(rec.created).toEqual([]);                  // one pending refresh is enough
+  });
+
+  it('kickoffRefresh removes its own one-shot trigger before crawling', () => {
+    const rec = triggerRecorder(['kickoffRefresh', 'scheduledFetchAllFeeds']);
+    // A recent fetch_in_progress marker makes fetchAllFeeds no-op, so the test
+    // exercises trigger cleanup without running the real crawl.
+    const metaSheet = blankSheet({
+      getDataRange: () => ({ getValues: () => [['key', 'value'], ['fetch_in_progress', new Date().toISOString()]] }),
+    });
+    const be = loadBackend({ ScriptApp: rec.scriptApp, sheet: metaSheet });
+    be.kickoffRefresh();
+    expect(rec.remaining()).toEqual(['scheduledFetchAllFeeds']); // only kickoffRefresh removed
+  });
+});
+
+describe('handleBootstrap (batched votes + stars, one token check)', () => {
+  // getVotesSheet and getStarsSheet resolve to the SAME mock sheet, so give it
+  // both column sets: video_id/user_email for votes, channel_name/user_email
+  // for stars.
+  const combinedSheet = () => blankSheet({
+    getDataRange: () => ({ getValues: () => [
+      ['video_id', 'channel_name', 'user_email'],
+      ['vidA', 'ChanX', 'user@example.com'],
+      ['vidB', 'ChanX', 'user@example.com'],
+      ['vidC', 'ChanY', 'other@example.com'],
+    ] }),
+  });
+
+  it("returns the user's votes and stars, verifying the token once", () => {
+    let tokenFetches = 0;
+    const be = loadBackend({
+      sheet: combinedSheet(),
+      UrlFetchApp: { fetch: () => { tokenFetches++; return { getResponseCode: () => 200, getContentText: () => JSON.stringify(validClaims()) }; } },
+    });
+    const res = be.handleBootstrap({ token: 't' });
+    expect(res.status).toBe('ok');
+    expect(res.video_ids).toEqual(['vidA', 'vidB']);
+    expect(res.channels).toEqual(['ChanX']);          // deduped
+    expect(tokenFetches).toBe(1);                     // ONE tokeninfo call for the batch
+  });
+
+  it('rejects a missing token', () => {
+    const be = loadBackend({ sheet: combinedSheet() });
+    expect(be.handleBootstrap({}).status).toBe('error');
+  });
+
+  it('rejects an invalid token (aud mismatch)', () => {
+    const be = loadBackend({ sheet: combinedSheet(), UrlFetchApp: tokeninfo({ ...validClaims(), aud: 'attacker' }) });
+    expect(be.handleBootstrap({ token: 't' }).status).toBe('error');
+  });
+});
+
+describe('verifyGoogleToken (caching — skip the tokeninfo round trip)', () => {
+  // Distinct cache keys per token so different tokens can't collide.
+  const hashingUtilities = {
+    getUuid: () => 'x', sleep() {},
+    computeDigest: (_algo, str) => Array.from(String(str)).map((c) => c.charCodeAt(0)),
+    base64EncodeWebSafe: (bytes) => bytes.join(','),
+    DigestAlgorithm: { SHA_256: 'SHA_256' },
+  };
+
+  it('serves a repeat verification of the same token from cache (no second fetch)', () => {
+    let fetches = 0;
+    const be = loadBackend({
+      Utilities: hashingUtilities,
+      UrlFetchApp: { fetch: () => { fetches++; return { getResponseCode: () => 200, getContentText: () => JSON.stringify(validClaims()) }; } },
+    });
+    const a = be.verifyGoogleToken('tok-123');
+    const b = be.verifyGoogleToken('tok-123');
+    expect(a).toEqual({ email: 'user@example.com', name: 'User', picture: 'https://x/p.jpg' });
+    expect(b).toEqual(a);
+    expect(fetches).toBe(1);                          // second call hit the cache
+  });
+
+  it('ignores a cached entry whose exp has passed and re-verifies live', () => {
+    let fetches = 0;
+    const store = new Map();
+    const cache = { get: (k) => (store.has(k) ? store.get(k) : null), put: (k, v) => store.set(k, v) };
+    const key = 'tok_' + Array.from('tok-xyz').map((c) => c.charCodeAt(0)).join(',');
+    store.set(key, JSON.stringify({ email: 'stale@example.com', name: 'Stale', picture: '', exp: nowSec() - 100 }));
+    const be = loadBackend({
+      Utilities: hashingUtilities,
+      CacheService: { getScriptCache: () => cache },
+      UrlFetchApp: { fetch: () => { fetches++; return { getResponseCode: () => 200, getContentText: () => JSON.stringify(validClaims()) }; } },
+    });
+    const res = be.verifyGoogleToken('tok-xyz');
+    expect(fetches).toBe(1);                          // stale cache not trusted → live verify
+    expect(res.email).toBe('user@example.com');       // fresh identity, not the stale cached one
+  });
+
+  it('does not cache a failed verification', () => {
+    let fetches = 0;
+    const be = loadBackend({
+      Utilities: hashingUtilities,
+      UrlFetchApp: { fetch: () => { fetches++; return { getResponseCode: () => 401, getContentText: () => '{}' }; } },
+    });
+    expect(be.verifyGoogleToken('bad')).toBeNull();
+    expect(be.verifyGoogleToken('bad')).toBeNull();
+    expect(fetches).toBe(2);                          // failures re-verify every time
   });
 });

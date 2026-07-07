@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -164,6 +164,8 @@ function doPost(e) {
         return jsonResponse(handleStar(data));
       case 'myStars':
         return jsonResponse(handleMyStars(data));
+      case 'bootstrap':
+        return jsonResponse(handleBootstrap(data));
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -219,21 +221,93 @@ function recordCommentTime(email) {
 // FEED HANDLER
 // ============================================================
 
+// A feed request NEVER crawls inline. fetchAllFeeds crawls ~14 RSS feeds with
+// a per-channel sleep, exponential-backoff retries, and YouTube API enrichment
+// — a job measured in tens of seconds. Apps Script serializes a single user's
+// web requests, so running that crawl here stalled EVERY other request the page
+// fired on load (feed pages, votes, stars) behind it for the crawl's full
+// duration — the client saw 30s+ TTFBs while the execution itself was fast.
+// Instead we always serve the current sheet immediately and, when the data is
+// stale, hand the crawl to its own execution via a one-shot trigger.
+// handleTopWeek learned this same lesson (it never crawls either).
 function handleFeed(params) {
-  // Check if refresh needed
   var lastFetch = getMeta('last_fetch');
   var refreshHours = parseInt(getMeta('refresh_interval_hours')) || DEFAULT_REFRESH_HOURS;
   var staleThreshold = refreshHours * 60 * 60 * 1000;
+  var stale = !lastFetch || (Date.now() - new Date(lastFetch).getTime()) > staleThreshold;
 
-  if (!lastFetch || (Date.now() - new Date(lastFetch).getTime()) > staleThreshold) {
-    log('INFO', 'handleFeed', 'Feed is stale, triggering refresh');
-    fetchAllFeeds();
+  if (stale) {
+    scheduleRefresh();
   }
 
   var page = parseInt(params.page) || 1;
   var limit = parseInt(params.limit) || DEFAULT_PAGE_LIMIT;
 
-  return getVideos(page, limit, params.cursor || '');
+  var result = getVideos(page, limit, params.cursor || '');
+  // Signal that an async refresh is underway; the client keeps serving cache.
+  if (stale) result.stale = true;
+  return result;
+}
+
+/**
+ * Schedules an asynchronous feed refresh on its own execution, so a stale-feed
+ * web request can return immediately instead of blocking on the crawl.
+ *
+ * A one-shot time-based trigger (fires ~1s out) runs kickoffRefresh in a
+ * separate invocation. Guarded against pile-up: skip if a crawl is already
+ * running (fetch_in_progress marker) or a kickoffRefresh trigger is already
+ * pending. The check-and-create runs under the script lock so two concurrent
+ * stale requests can't both install a trigger; if the lock is contended we
+ * simply skip — the next feed request (or the 4h trigger) will reschedule, and
+ * feed staleness is never urgent.
+ */
+function scheduleRefresh() {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(3000);
+  } catch (e) {
+    return;
+  }
+  try {
+    var inProgress = getMeta('fetch_in_progress');
+    if (inProgress && (Date.now() - new Date(inProgress).getTime()) < 10 * 60 * 1000) {
+      return; // a crawl is already running — another would just no-op
+    }
+    if (hasPendingTrigger('kickoffRefresh')) {
+      return; // one pending refresh is enough
+    }
+    ScriptApp.newTrigger('kickoffRefresh').timeBased().after(1000).create();
+    log('INFO', 'scheduleRefresh', 'Async refresh scheduled');
+  } catch (e) {
+    log('ERROR', 'scheduleRefresh', e.message);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** True if a project trigger for the given handler function already exists. */
+function hasPendingTrigger(handlerName) {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === handlerName) return true;
+  }
+  return false;
+}
+
+/**
+ * Entry point for the one-shot refresh trigger installed by scheduleRefresh.
+ * A one-shot trigger does NOT remove itself once fired, so we delete every
+ * kickoffRefresh trigger first (left to accumulate they'd hit the 20-trigger
+ * project cap), then run the crawl. fetchAllFeeds has its own in-progress guard.
+ */
+function kickoffRefresh() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'kickoffRefresh') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  fetchAllFeeds();
 }
 
 function handleRefresh() {
@@ -1543,6 +1617,11 @@ function handleMyVotes(data) {
     return { status: 'error', message: 'Invalid authentication token' };
   }
 
+  return { status: 'ok', video_ids: readUserVoteIds(user.email) };
+}
+
+/** Video ids the given user has upvoted. Shared by myVotes and bootstrap. */
+function readUserVoteIds(email) {
   var sheet = getVotesSheet();
   var rows = sheet.getDataRange().getValues();
   var headers = rows[0];
@@ -1551,10 +1630,9 @@ function handleMyVotes(data) {
 
   var ids = [];
   for (var i = 1; i < rows.length; i++) {
-    if (rows[i][emailCol] === user.email) ids.push(rows[i][videoIdCol]);
+    if (rows[i][emailCol] === email) ids.push(rows[i][videoIdCol]);
   }
-
-  return { status: 'ok', video_ids: ids };
+  return ids;
 }
 
 /**
@@ -1696,6 +1774,11 @@ function handleMyStars(data) {
     return { status: 'error', message: 'Invalid authentication token' };
   }
 
+  return { status: 'ok', channels: readUserStarChannels(user.email) };
+}
+
+/** Channel names the given user has starred. Shared by myStars and bootstrap. */
+function readUserStarChannels(email) {
   var sheet = getStarsSheet();
   var rows = sheet.getDataRange().getValues();
   var headers = rows[0];
@@ -1706,12 +1789,36 @@ function handleMyStars(data) {
   for (var i = 1; i < rows.length; i++) {
     // Coerce to string so numeric/date-like channel names round-trip intact
     var ch = String(rows[i][channelCol]);
-    if (rows[i][emailCol] === user.email && channels.indexOf(ch) === -1) {
+    if (rows[i][emailCol] === email && channels.indexOf(ch) === -1) {
       channels.push(ch);
     }
   }
+  return channels;
+}
 
-  return { status: 'ok', channels: channels };
+/**
+ * One round trip for everything the client needs about the signed-in user on
+ * load: their upvoted video ids AND starred channels. Replaces the separate
+ * myVotes + myStars POSTs fired back-to-back at sign-in — each re-verified the
+ * ID token over the network and, because Apps Script serializes a user's
+ * requests, queued nose-to-tail. Here the token is verified ONCE.
+ */
+function handleBootstrap(data) {
+  var token = data.token;
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = verifyGoogleToken(token);
+  if (!user) {
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  return {
+    status: 'ok',
+    video_ids: readUserVoteIds(user.email),
+    channels: readUserStarChannels(user.email),
+  };
 }
 
 // ============================================================
@@ -1728,6 +1835,27 @@ function handleMyStars(data) {
  * - Token is validated for structure + expiry by Google's servers
  */
 function verifyGoogleToken(idToken) {
+  // Fast path: a token verified moments ago is served from the script cache,
+  // skipping the ~100-500ms tokeninfo round trip. Keyed by a hash of the token
+  // (never the raw token). The cache is best-effort — any failure falls through
+  // to a live verification.
+  var cache = null;
+  var cacheKey = null;
+  try {
+    cache = CacheService.getScriptCache();
+    cacheKey = 'tok_' + tokenHash(idToken);
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      var claims = JSON.parse(cached);
+      // Re-check expiry locally so a token can never be trusted past its own exp.
+      if (claims.exp && parseInt(claims.exp, 10) * 1000 > Date.now()) {
+        return { email: claims.email, name: claims.name, picture: claims.picture };
+      }
+    }
+  } catch (e) {
+    cache = null;
+  }
+
   try {
     var response = UrlFetchApp.fetch(
       'https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(idToken),
@@ -1762,15 +1890,39 @@ function verifyGoogleToken(idToken) {
       return null;
     }
 
-    return {
+    var user = {
       email: payload.email,
       name: payload.name || payload.email.split('@')[0],
       picture: payload.picture || '',
     };
+
+    // Cache the verified identity so repeat calls in the same short window
+    // (bootstrap, then rapid votes/stars) skip the tokeninfo fetch. Never cache
+    // a failure, and never past the token's own expiry (TTL capped at 1h).
+    if (cache && cacheKey) {
+      try {
+        var ttl = Math.min(parseInt(payload.exp, 10) - Math.floor(Date.now() / 1000), 3600);
+        if (ttl > 0) {
+          cache.put(cacheKey, JSON.stringify({
+            email: user.email, name: user.name, picture: user.picture, exp: payload.exp,
+          }), ttl);
+        }
+      } catch (e) {
+        // best-effort — a cache write failure just means the next call re-verifies
+      }
+    }
+
+    return user;
   } catch (error) {
     log('ERROR', 'verifyGoogleToken', error.message);
     return null;
   }
+}
+
+/** Short, stable cache key for an ID token. Hashes so the raw token is never stored. */
+function tokenHash(idToken) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken);
+  return Utilities.base64EncodeWebSafe(bytes);
 }
 
 // ============================================================

@@ -52,6 +52,10 @@ async function setup(page, { signedIn = false } = {}) {
       let body = {};
       try { body = JSON.parse(req.postData() || '{}'); } catch { /* noop */ }
 
+      if (body.action === 'bootstrap') {
+        // Sign-in now reconciles votes + stars in one batched request.
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', video_ids: [], channels: [] }) });
+      }
       if (body.action === 'myVotes') {
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', video_ids: [] }) });
       }

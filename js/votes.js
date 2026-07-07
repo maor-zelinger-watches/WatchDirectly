@@ -100,13 +100,25 @@ export async function toggleVote(videoId) {
  */
 export async function loadMyVotes() {
   if (!isSignedIn()) return;
-  try {
-    let token = getToken();
-    if (isTokenExpired()) token = await refreshToken();
-    if (!token) return; // can't reconcile right now
+  let token = getToken();
+  if (isTokenExpired()) token = await refreshToken();
+  if (!token) return; // can't reconcile right now
+  await reconcileMyVotes(api.fetchMyVotes(token));
+}
 
-    const epoch = voteEpoch;
-    const data = await api.fetchMyVotes(token);
+/**
+ * Applies a myVotes snapshot (from fetchMyVotes OR the batched bootstrap
+ * request) to the UI. Captures the vote epoch BEFORE awaiting so a vote cast
+ * while the request is in flight beats the older snapshot. Takes the request
+ * promise (not a token) so the sign-in bootstrap can feed both this and
+ * reconcileMyStars the SAME request — one round trip, two consumers.
+ *
+ * @param {Promise<{video_ids?: string[]}>} fetchPromise
+ */
+export async function reconcileMyVotes(fetchPromise) {
+  const epoch = voteEpoch;
+  try {
+    const data = await fetchPromise;
     // A vote cast while this was in flight beats the older snapshot
     if (epoch !== voteEpoch) return;
 

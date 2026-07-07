@@ -29,8 +29,9 @@ import {
   invalidatePrefetchBuffer, takeBufferedPage, refillPrefetchBuffer,
 } from './prefetch.js';
 import { prefetchComments, updateInlineCommentFormUI } from './comments-ui.js';
-import { loadMyVotes, clearVoteMarkings } from './votes.js';
-import { loadStarsFromStorage, loadMyStars, clearStarMarkings, setOnStarsChanged } from './stars.js';
+import { clearVoteMarkings } from './votes.js';
+import { loadStarsFromStorage, clearStarMarkings, setOnStarsChanged } from './stars.js';
+import { loadMyVotesAndStars } from './bootstrap.js';
 import { setupFullscreenKeys } from './fullscreen.js';
 import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged } from './views.js';
 
@@ -595,8 +596,7 @@ function setupAuthUI() {
     updateAuthUI(user);
     state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
     if (user) {
-      loadMyVotes();
-      loadMyStars();
+      loadMyVotesAndStars();
     } else {
       clearVoteMarkings();
       clearStarMarkings();
@@ -607,8 +607,7 @@ function setupAuthUI() {
   const user = getCurrentUser();
   if (user) {
     updateAuthUI(user);
-    loadMyVotes();
-    loadMyStars();
+    loadMyVotesAndStars();
   } else {
     renderSignInButton(container);
   }

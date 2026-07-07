@@ -196,6 +196,19 @@ export function createApiClient(baseUrl) {
     async fetchMyStars(token) {
       return post({ action: 'myStars', token });
     },
+
+    /**
+     * Fetches the signed-in user's votes AND starred channels in one request.
+     * Replaces the separate fetchMyVotes + fetchMyStars round trips at sign-in:
+     * the backend serializes a user's requests and re-verifies the token on
+     * each, so batching halves both the queue depth and the token checks.
+     *
+     * @param {string} token - Google Sign-In ID token
+     * @returns {Promise<{video_ids: string[], channels: string[]}>}
+     */
+    async fetchBootstrap(token) {
+      return post({ action: 'bootstrap', token });
+    },
   };
 }
 

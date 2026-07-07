@@ -156,6 +156,7 @@ export async function installMocks(page, opts = {}) {
     }
     if (action === 'commentsBatch') return json({ status: 'ok', byVideo: {} });
     if (action === 'comments') return json({ status: 'ok', comments: [] });
+    if (action === 'bootstrap') return json({ status: 'ok', video_ids: [], channels: [] });
     if (action === 'myStars') return json({ status: 'ok', channels: [] });
     if (action === 'myVotes') return json({ status: 'ok', video_ids: [] });
     if (action === 'vote') {
