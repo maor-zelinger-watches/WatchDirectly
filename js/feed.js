@@ -88,7 +88,7 @@ export function createMediaCard(item) {
   ` : `
     <div class="media-card__embed">
       <iframe
-        data-src="https://www.youtube-nocookie.com/embed/${escaped.videoId}"
+        data-src="https://www.youtube-nocookie.com/embed/${escaped.videoId}?enablejsapi=1"
         title="${escaped.title}"
         frameborder="0"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"

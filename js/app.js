@@ -33,6 +33,7 @@ import { clearVoteMarkings } from './votes.js';
 import { loadStarsFromStorage, clearStarMarkings, setOnStarsChanged } from './stars.js';
 import { loadMyVotesAndStars } from './bootstrap.js';
 import { setupFullscreenKeys } from './fullscreen.js';
+import { setupSinglePlay } from './single-play.js';
 import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged } from './views.js';
 
 // The Starred view repaints when a star lands or the server reconciles —
@@ -71,6 +72,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupFeedControls();
   setupTabs();
   setupFullscreenKeys();
+  setupSinglePlay();
   loadStarsFromStorage();
 
   const cached = await showCachedFeed();

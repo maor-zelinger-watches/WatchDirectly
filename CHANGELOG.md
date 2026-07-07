@@ -21,6 +21,15 @@ that component's heading.
 
 ## Frontend
 
+### 1.7.0 — 2026-07-08
+- One video at a time: starting an inline player now pauses whichever other
+  player was running, so two soundtracks no longer overlap. Each YouTube embed
+  gains `enablejsapi=1`; a new `single-play.js` registers each player as a
+  listener on load and, when one reports it started playing, sends `pauseVideo`
+  to the rest. It's a **pause**, not a stop — the paused video keeps its place
+  and resumes on tap — and fullscreen is deliberately untouched, so expanding a
+  card leaves it playing. Verified live against real YouTube players.
+
 ### 1.6.1 — 2026-07-07
 - Renamed the "Starred" feed tab to **Favorite** (the ☆/★ icons are unchanged).
   The empty-state and error copy for the feed now read "favorite creators" to
@@ -181,6 +190,13 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.1.5 — 2026-07-08
+- Added test coverage for the single-play feature: `tests/unit/single-play.test.js`
+  (message parsing, the listening handshake, pause-others-not-self, no `stopVideo`,
+  origin/state guards) and `tests/e2e/lazy_iframe.spec.js`, which pins down that a
+  below-the-fold player promotes on scroll — on fresh load and after a
+  revalidation diff — the lazy-load behavior single-play relies on.
 
 ### 1.1.4 — 2026-07-07
 - Updated the Starred-tab e2e spec for the "Favorite" rename: the tab is now

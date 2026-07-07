@@ -6,15 +6,25 @@
  * page of cards doesn't load a page of players at once.
  */
 
+import { registerPlayer } from './single-play.js';
+
+/**
+ * Promotes a data-src iframe to a live player: sets src and, once it
+ * loads, registers as a listener so single-play.js hears its state
+ * changes. No-op if the iframe was already promoted.
+ */
+function promote(iframe) {
+  if (!iframe.dataset.src) return;
+  iframe.addEventListener('load', () => registerPlayer(iframe), { once: true });
+  iframe.src = iframe.dataset.src;
+  delete iframe.dataset.src;
+}
+
 const iframeObserver = new IntersectionObserver((entries) => {
   entries.forEach(entry => {
     if (entry.isIntersecting) {
-      const iframe = entry.target;
-      if (iframe.dataset.src) {
-        iframe.src = iframe.dataset.src;
-        delete iframe.dataset.src;
-      }
-      iframeObserver.unobserve(iframe);
+      promote(entry.target);
+      iframeObserver.unobserve(entry.target);
     }
   });
 }, { rootMargin: '150px' });
@@ -39,8 +49,7 @@ export function observeLazyIframe(card) {
 export function forceLoadIframe(card) {
   const iframe = card.querySelector('iframe[data-src]');
   if (iframe) {
-    iframe.src = iframe.dataset.src;
-    delete iframe.dataset.src;
+    promote(iframe);
     iframeObserver.unobserve(iframe);
   }
 }
