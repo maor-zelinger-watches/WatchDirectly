@@ -136,28 +136,140 @@ export function createMediaCard(item) {
   `.trim();
 }
 
+// --- fuzzy search --------------------------------------------------------
+//
+// Matching is deliberately client-side and tolerant: after the (cheap) exact
+// paths — full-token equality, prefix, and substring, which cover the common
+// case — a bounded edit-distance pass catches single-character typos
+// ("veritasum" → "Veritasium", "budgt" → "budget"). Everything is scored so
+// results can be ranked by relevance instead of returned in catalog order.
+
+/** Lowercase and strip diacritics so "clé" matches "cle". */
+function normalizeText(s) {
+  return String(s == null ? '' : s)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, ''); // strip combining diacritical marks
+}
+
+/** Split normalized text into alphanumeric word tokens. */
+function tokenize(s) {
+  return normalizeText(s).split(/[^a-z0-9]+/).filter(Boolean);
+}
+
 /**
- * Filters videos by a free-text query (matched against title, channel
- * name, and the channel's host name, case-insensitive) and/or an exact
- * category. Host matching lets "Adrian" find Bark and Jack videos —
- * feed items only carry channel_name, so hosts come in via a
- * channel→host map built from creators.json.
+ * True when `a` and `b` are at most one edit (insert/delete/substitute)
+ * apart. O(n) with early exit — no full DP matrix. Used only for tokens
+ * long enough (>= 4 chars) that a single typo shouldn't collapse distinct
+ * words together.
+ */
+function withinEdit1(a, b) {
+  const la = a.length, lb = b.length;
+  if (Math.abs(la - lb) > 1) return false;
+  if (a === b) return true;
+  let i = 0, j = 0, edits = 0;
+  while (i < la && j < lb) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (la > lb) i++;            // deletion from a
+    else if (lb > la) j++;       // insertion into a
+    else { i++; j++; }           // substitution
+  }
+  if (i < la || j < lb) edits++; // trailing char
+  return edits <= 1;
+}
+
+// Relevance tiers for one query token against one field, best first.
+const TIER_EXACT = 100;   // token equals a whole field token
+const TIER_PREFIX = 60;   // a field token starts with the query token
+const TIER_SUBSTR = 30;   // query token appears inside the field
+const TIER_FUZZY = 12;    // within one typo of a field token
+const FUZZY_MIN_LEN = 4;  // don't fuzzy-match very short tokens
+
+/** Best tier score for one query token against one field's tokens + raw text. */
+function scoreToken(qt, fieldTokens, fieldNorm) {
+  let best = 0;
+  for (const t of fieldTokens) {
+    if (t === qt) return TIER_EXACT;            // can't beat exact
+    if (t.startsWith(qt)) best = Math.max(best, TIER_PREFIX);
+    else if (best < TIER_SUBSTR && t.includes(qt)) best = Math.max(best, TIER_SUBSTR);
+  }
+  if (best < TIER_SUBSTR && fieldNorm.includes(qt)) best = TIER_SUBSTR;
+  if (best < TIER_FUZZY && qt.length >= FUZZY_MIN_LEN) {
+    for (const t of fieldTokens) {
+      if (withinEdit1(t, qt)) { best = TIER_FUZZY; break; }
+    }
+  }
+  return best;
+}
+
+// Field weights: a title hit outranks a channel/host hit of the same tier.
+const FIELD_WEIGHT_TITLE = 3;
+const FIELD_WEIGHT_CHANNEL = 2;
+const FIELD_WEIGHT_HOST = 2;
+
+/**
+ * Scores one video against the tokenized query. Returns a positive relevance
+ * score only if EVERY query token matches at least one field (AND semantics —
+ * more words narrows the result). 0 means "no match".
+ */
+function scoreVideo(v, queryTokens, hostsByChannel) {
+  const titleTokens = tokenize(v.title);
+  const channelTokens = tokenize(v.channel_name);
+  const titleNorm = normalizeText(v.title);
+  const channelNorm = normalizeText(v.channel_name);
+  const hostName = hostsByChannel ? hostsByChannel[v.channel_name] || '' : '';
+  const hostTokens = hostName ? tokenize(hostName) : [];
+  const hostNorm = hostName ? normalizeText(hostName) : '';
+
+  let total = 0;
+  for (const qt of queryTokens) {
+    const best = Math.max(
+      scoreToken(qt, titleTokens, titleNorm) * FIELD_WEIGHT_TITLE,
+      scoreToken(qt, channelTokens, channelNorm) * FIELD_WEIGHT_CHANNEL,
+      hostTokens.length ? scoreToken(qt, hostTokens, hostNorm) * FIELD_WEIGHT_HOST : 0,
+    );
+    if (best === 0) return 0; // this token matched nothing → video excluded
+    total += best;
+  }
+  return total;
+}
+
+/**
+ * Filters videos by a free-text query and/or an exact category.
+ *
+ * The query is tokenized and fuzzily matched against each video's title,
+ * channel name, and the channel's host name (typo-tolerant, diacritic-
+ * insensitive). Host matching lets "Adrian" find Bark and Jack videos —
+ * feed items only carry channel_name, so hosts come in via a channel→host
+ * map built from creators.json.
+ *
+ * With a query present, results are ranked by relevance (best first), ties
+ * broken by original order. With no query, order is preserved exactly.
  * Returns a new array — does not mutate the input.
  *
  * @param {Object[]} videos - Media items from the API
  * @param {{query?: string, category?: string, hostsByChannel?: Object<string, string>}} filter
- * @returns {Object[]} Matching videos, in their original order
+ * @returns {Object[]} Matching videos, ranked by relevance when a query is set
  */
 export function filterVideos(videos, { query = '', category = '', hostsByChannel = null } = {}) {
-  const q = query.trim().toLowerCase();
-  return videos.filter(v => {
-    if (category && v.category !== category) return false;
-    if (!q) return true;
-    const title = (v.title || '').toLowerCase();
-    const channel = (v.channel_name || '').toLowerCase();
-    const host = hostsByChannel ? (hostsByChannel[v.channel_name] || '').toLowerCase() : '';
-    return title.includes(q) || channel.includes(q) || host.includes(q);
-  });
+  const queryTokens = tokenize(query);
+
+  if (queryTokens.length === 0) {
+    // Category-only (or no filter): keep the caller's order untouched.
+    return category ? videos.filter(v => v.category === category) : videos.slice();
+  }
+
+  const scored = [];
+  for (let i = 0; i < videos.length; i++) {
+    const v = videos[i];
+    if (category && v.category !== category) continue;
+    const score = scoreVideo(v, queryTokens, hostsByChannel);
+    if (score > 0) scored.push({ v, score, i });
+  }
+
+  scored.sort((a, b) => (b.score - a.score) || (a.i - b.i));
+  return scored.map(s => s.v);
 }
 
 /** Engagement weight for dedupe tiebreaks: votes dominate, comments break ties. */

@@ -12,43 +12,137 @@
 import { state, isFilterActive, activeFilter } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
-import { filterVideos, sortVideos } from './feed.js';
+import { filterVideos, sortVideos, dedupeVideos } from './feed.js';
 import { renderList } from './cards.js';
 import { prefetchComments } from './comments-ui.js';
 import { exitFullscreen } from './fullscreen.js';
 import { isSignedIn } from './auth.js';
 import { showToast } from './toast.js';
 import { sanitizeHtml } from './utils.js';
+import { loadFeedCache, loadSearchIndex, saveSearchIndex } from './cache.js';
+
+// True while the current index build is running off a cached catalog, so a
+// network failure can degrade to that cache instead of failing search.
+let indexFromCache = false;
+
+/** Fires every registered onProgress callback with the current (partial) index. */
+function notifyIndexProgress() {
+  for (const cb of state.searchIndexProgress) {
+    // A stale render callback throwing must not abort the build for the others.
+    try { cb(state.searchIndex); } catch (e) { /* ignore */ }
+  }
+}
 
 /**
- * Loads the full catalog once (titles, channels, categories) so search
- * and filters work across everything, not just the pages scrolled so far.
- * If the catalog has outgrown SEARCH_INDEX_LIMIT, a second fetch sized
- * from the server's total grabs the whole thing — older videos must not
- * silently drop out of search.
+ * Instant, network-free starting point for search: everything already in
+ * memory (the scrolled feed) plus the cached page-1 snapshot, deduped.
+ * Lets the first keystroke match against something before any chunk lands.
  */
-export function ensureSearchIndex() {
-  if (state.searchIndex) return Promise.resolve(state.searchIndex);
+function seedFromMemory() {
+  const parts = [];
+  if (Array.isArray(state.videos) && state.videos.length) parts.push(...state.videos);
+  const cachedFeed = loadFeedCache();
+  if (cachedFeed && cachedFeed.videos.length) parts.push(...cachedFeed.videos);
+  return dedupeVideos(parts);
+}
+
+/**
+ * Fetches the whole catalog in parallel chunks, merging each into the live
+ * index as it arrives (dedupe absorbs page overlap and mid-build ingest).
+ * Every merge notifies progress subscribers so results paint incrementally.
+ * Uses offset pagination — unlike cursors, pages are order-independent and
+ * can be fetched concurrently. Returns the complete index.
+ */
+async function buildSearchIndex() {
+  const chunk = CONFIG.SEARCH_CHUNK_SIZE;
+  const cap = CONFIG.SEARCH_INDEX_LIMIT;
+
+  // First chunk is the newest page and tells us the catalog total.
+  const first = await api.fetchFeed(1, chunk);
+  const firstVideos = first.videos || [];
+  state.searchIndex = dedupeVideos((state.searchIndex || []).concat(firstVideos));
+  notifyIndexProgress();
+
+  const total = Math.min(first.total || firstVideos.length, cap);
+  if (firstVideos.length > 0 && total > firstVideos.length) {
+    const pages = [];
+    for (let p = 2; (p - 1) * chunk < total; p++) pages.push(p);
+    await Promise.all(pages.map(p =>
+      api.fetchFeed(p, chunk)
+        .then(data => {
+          state.searchIndex = dedupeVideos(state.searchIndex.concat(data.videos || []));
+          notifyIndexProgress();
+        })
+        // A dropped chunk just means those items miss this session's index.
+        .catch(() => { /* best-effort */ })
+    ));
+  }
+
+  return state.searchIndex;
+}
+
+/**
+ * Ensures the full-catalog search index is (being) built, so search and
+ * filters reach everything, not just the pages scrolled so far.
+ *
+ * Returns a promise that resolves with the COMPLETE index. Pass `onProgress`
+ * to also paint partial results: it's called with the current index right
+ * away (from an in-memory/cached seed) and again after each chunk merges in.
+ * The seed makes the first keystroke feel instant; the resolved promise is
+ * the authoritative final state (empty-state, prefetch) for callers to render.
+ */
+export function ensureSearchIndex(onProgress) {
+  // Already complete: fire the callback once (don't retain it — there's no
+  // build left to clear the subscriber set) and hand back the final index.
+  if (state.searchIndexComplete) {
+    if (typeof onProgress === 'function' && state.searchIndex && state.searchIndex.length) {
+      try { onProgress(state.searchIndex); } catch (e) { /* ignore */ }
+    }
+    return Promise.resolve(state.searchIndex);
+  }
+
+  if (typeof onProgress === 'function') {
+    state.searchIndexProgress.add(onProgress);
+    // Late subscriber (index already seeded/partial): paint immediately.
+    if (state.searchIndex && state.searchIndex.length) {
+      try { onProgress(state.searchIndex); } catch (e) { /* ignore */ }
+    }
+  }
+
+  // Seed synchronously so progress subscribers have something to show now.
+  if (!state.searchIndex) {
+    const cached = loadSearchIndex();
+    if (cached && cached.length) {
+      state.searchIndex = cached;
+      indexFromCache = true;
+    } else {
+      state.searchIndex = seedFromMemory();
+      indexFromCache = false;
+    }
+    if (state.searchIndex.length) notifyIndexProgress();
+  }
 
   if (!state.searchIndexPromise) {
-    state.searchIndexPromise = api.fetchFeed(1, CONFIG.SEARCH_INDEX_LIMIT)
-      .then(data => {
-        const videos = data.videos || [];
-        if ((data.total || 0) > videos.length) {
-          // Best-effort: a failed follow-up shouldn't discard the first page
-          return api.fetchFeed(1, data.total)
-            .then(full => full.videos || videos)
-            .catch(() => videos);
-        }
-        return videos;
-      })
-      .then(videos => {
-        state.searchIndex = videos;
-        return state.searchIndex;
+    state.searchIndexPromise = buildSearchIndex()
+      .then(full => {
+        state.searchIndex = full;
+        state.searchIndexComplete = true;
+        saveSearchIndex(full);
+        state.searchIndexProgress.clear();
+        return full;
       })
       .catch(error => {
-        // Allow a retry on the next keystroke
+        // A cached catalog is a good-enough fallback — run the session on it
+        // rather than failing search outright over a flaky network.
+        if (indexFromCache && state.searchIndex && state.searchIndex.length) {
+          state.searchIndexComplete = true;
+          state.searchIndexProgress.clear();
+          return state.searchIndex;
+        }
+        // Nothing usable — reset so the next keystroke retries from scratch.
         state.searchIndexPromise = null;
+        state.searchIndex = null;
+        state.searchIndexProgress.clear();
         throw error;
       });
   }
@@ -179,7 +273,7 @@ async function switchView(view) {
 
   // First open of Starred needs the full catalog — show the skeleton
   // while it loads instead of leaving the previous view's cards up.
-  if (view === 'starred' && isSignedIn() && !state.searchIndex) {
+  if (view === 'starred' && isSignedIn() && !state.searchIndexComplete) {
     const container = document.getElementById('feed-container');
     const skeleton = document.getElementById('feed-skeleton');
     const sentinel = document.getElementById('load-more-container');
@@ -336,29 +430,33 @@ async function applyFilter() {
     return;
   }
 
+  sentinel.style.display = 'none';
+
+  // Paints the matches for the current index snapshot. `final` is held back
+  // until the index is complete — a slow chunk that would add a match must
+  // not flash "No videos match" or prefetch a soon-to-change result set.
+  const renderMatches = (index, final) => {
+    if (token !== state.filterRenderToken || state.view !== 'latest') return;
+    const matches = filterVideos(index, activeFilter());
+    state.renderToken++;
+    container.innerHTML = '';
+    state.expandedComments.clear();
+    renderList(container, matches);
+    empty.querySelector('p').textContent = 'No videos match your search.';
+    empty.style.display = (final && matches.length === 0) ? '' : 'none';
+    if (final) prefetchComments(matches.slice(0, CONFIG.PAGE_SIZE));
+  };
+
   let index;
   try {
-    index = await ensureSearchIndex();
+    // Render each chunk as it lands; the promise resolves with the full index.
+    index = await ensureSearchIndex(partial => renderMatches(partial, false));
   } catch (error) {
+    if (token !== state.filterRenderToken || state.view !== 'latest') return;
     console.error('Failed to load search index:', error);
     showToast('Search is unavailable right now. Please try again.', 'error');
     return;
   }
 
-  // The filter or view may have changed while the index was loading
-  if (token !== state.filterRenderToken || state.view !== 'latest') return;
-
-  const matches = filterVideos(index, activeFilter());
-
-  state.renderToken++;
-  container.innerHTML = '';
-  state.expandedComments.clear();
-  sentinel.style.display = 'none';
-
-  renderList(container, matches);
-
-  empty.querySelector('p').textContent = 'No videos match your search.';
-  empty.style.display = matches.length === 0 ? '' : 'none';
-
-  prefetchComments(matches.slice(0, CONFIG.PAGE_SIZE));
+  renderMatches(index, true);
 }

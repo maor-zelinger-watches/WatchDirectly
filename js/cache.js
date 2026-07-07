@@ -13,6 +13,7 @@
  *
  * Keys owned here:
  * - wd_feed_cache   — page-1 feed snapshot {videos, total} (stale-while-revalidate)
+ * - wd_search_index — full catalog for search {videos} (stale-while-revalidate)
  * - wd_my_stars     — starred channel names, instant paint before server reconcile
  * - wd_show_shorts  — Shorts toggle preference
  * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.)
@@ -20,6 +21,7 @@
 
 export const CACHE_KEYS = {
   FEED: 'wd_feed_cache',
+  SEARCH_INDEX: 'wd_search_index',
   STARS: 'wd_my_stars',
   SHOW_SHORTS: 'wd_show_shorts',
 };
@@ -82,6 +84,44 @@ export function saveFeedCache(videos, total) {
 
 export function clearFeedCache() {
   remove(CACHE_KEYS.FEED);
+}
+
+// --- search index (full catalog, stale-while-revalidate) -------------
+
+/**
+ * Loads the cached search index (the whole catalog).
+ * Returns an array of videos, or null when absent/corrupt. A non-array
+ * or empty payload is cleared and reported as absent so search rebuilds.
+ */
+export function loadSearchIndex() {
+  const raw = read(CACHE_KEYS.SEARCH_INDEX);
+  if (!raw) return null;
+
+  try {
+    const data = JSON.parse(raw);
+    const videos = Array.isArray(data) ? data : (Array.isArray(data.videos) ? data.videos : null);
+    if (!videos || videos.length === 0) {
+      remove(CACHE_KEYS.SEARCH_INDEX);
+      return null;
+    }
+    return videos;
+  } catch (e) {
+    remove(CACHE_KEYS.SEARCH_INDEX);
+    return null;
+  }
+}
+
+/**
+ * Saves the full search index. Best-effort — the catalog can be large, so a
+ * quota failure just leaves search to rebuild from the network next session.
+ */
+export function saveSearchIndex(videos) {
+  if (!Array.isArray(videos) || videos.length === 0) return false;
+  return write(CACHE_KEYS.SEARCH_INDEX, JSON.stringify({ videos }));
+}
+
+export function clearSearchIndex() {
+  remove(CACHE_KEYS.SEARCH_INDEX);
 }
 
 // --- starred creators (instant paint, reconciled by the server) ------

@@ -11,8 +11,12 @@ export const CONFIG = {
   GOOGLE_CLIENT_ID: '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com',
   PAGE_SIZE: 10,
   COMMENT_BATCH_SIZE: 10,     // ids per commentsBatch request (backend caps at 20)
-  SEARCH_INDEX_LIMIT: 2000,   // first fetch; if the catalog outgrows it, a
-                              // follow-up fetch grabs the rest (see ensureSearchIndex)
+  SEARCH_CHUNK_SIZE: 500,     // page size for building the search index; the
+                              // catalog is fetched in parallel chunks of this
+                              // size so results paint as each chunk lands
+  SEARCH_INDEX_LIMIT: 5000,   // absolute ceiling on indexed/cached items — a
+                              // backstop against an unbounded sheet, not a
+                              // normal limit (see ensureSearchIndex)
   PREFETCH_PAGES_AHEAD: 3,    // pages fetched ahead of the scroll position so
                               // infinite scroll renders instantly from memory
 };

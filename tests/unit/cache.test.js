@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   CACHE_KEYS,
   loadFeedCache, saveFeedCache, clearFeedCache,
+  loadSearchIndex, saveSearchIndex, clearSearchIndex,
   loadStarredChannels, saveStarredChannels, clearStarredChannels,
   loadShowShorts, saveShowShorts,
 } from '../../js/cache.js';
@@ -90,6 +91,48 @@ describe('feed cache', () => {
     saveFeedCache(VIDEOS, 42);
     clearFeedCache();
     expect(loadFeedCache()).toBeNull();
+  });
+});
+
+describe('search index cache', () => {
+  it('round-trips the full catalog', () => {
+    saveSearchIndex(VIDEOS);
+    expect(loadSearchIndex()).toEqual(VIDEOS);
+  });
+
+  it('returns null when nothing is cached', () => {
+    expect(loadSearchIndex()).toBeNull();
+  });
+
+  it('refuses to save an empty or non-array index', () => {
+    expect(saveSearchIndex([])).toBe(false);
+    expect(saveSearchIndex(null)).toBe(false);
+    expect(loadSearchIndex()).toBeNull();
+  });
+
+  it('clears and returns null on corrupt JSON', () => {
+    store[CACHE_KEYS.SEARCH_INDEX] = '{not json!!';
+    expect(loadSearchIndex()).toBeNull();
+    expect(store[CACHE_KEYS.SEARCH_INDEX]).toBeUndefined();
+  });
+
+  it('clears and returns null on an empty payload', () => {
+    store[CACHE_KEYS.SEARCH_INDEX] = JSON.stringify({ videos: [] });
+    expect(loadSearchIndex()).toBeNull();
+    expect(store[CACHE_KEYS.SEARCH_INDEX]).toBeUndefined();
+  });
+
+  it('clearSearchIndex removes the entry', () => {
+    saveSearchIndex(VIDEOS);
+    clearSearchIndex();
+    expect(loadSearchIndex()).toBeNull();
+  });
+
+  it('reports failure instead of throwing on quota errors', () => {
+    localStorageMock.setItem.mockImplementation(() => {
+      throw new DOMException('quota', 'QuotaExceededError');
+    });
+    expect(saveSearchIndex(VIDEOS)).toBe(false);
   });
 });
 

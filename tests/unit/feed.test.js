@@ -239,6 +239,54 @@ describe('filterVideos', () => {
   });
 });
 
+describe('filterVideos (fuzzy matching)', () => {
+  const catalog = [
+    { ...mockVideo, video_id: 'z1aaaaaaaaa', title: 'Explained by Veritasium', channel_name: 'Veritasium' },
+    { ...mockVideo, video_id: 'z2bbbbbbbbb', title: 'Best Budget Watches 2026', channel_name: 'Just One More Watch' },
+    { ...mockVideo, video_id: 'z3ccccccccc', title: 'Café Racer Restoration', channel_name: 'Nico Leonard' },
+  ];
+
+  it('tolerates a single-character typo (insertion)', () => {
+    // "veritasum" is missing the second "i" of "Veritasium"
+    const result = filterVideos(catalog, { query: 'veritasum' });
+    expect(result.map(v => v.video_id)).toContain('z1aaaaaaaaa');
+  });
+
+  it('tolerates a single-character typo (substitution)', () => {
+    const result = filterVideos(catalog, { query: 'budgt' }); // dropped the "e"
+    expect(result.map(v => v.video_id)).toContain('z2bbbbbbbbb');
+  });
+
+  it('is diacritic-insensitive both ways', () => {
+    expect(filterVideos(catalog, { query: 'cafe' }).map(v => v.video_id)).toContain('z3ccccccccc');
+    expect(filterVideos(catalog, { query: 'café' }).map(v => v.video_id)).toContain('z3ccccccccc');
+  });
+
+  it('does not fuzzy-match a distant word (no false positives)', () => {
+    expect(filterVideos(catalog, { query: 'submariner' })).toEqual([]);
+  });
+
+  it('does not fuzzy-match short tokens (guards against noise)', () => {
+    // "cat" is one edit from "café" but too short to fuzzy-match — and it is
+    // not a substring of any field, so it must not match.
+    expect(filterVideos(catalog, { query: 'cat' })).toEqual([]);
+  });
+
+  it('requires every query token to match (AND semantics)', () => {
+    expect(filterVideos(catalog, { query: 'budget watches' }).map(v => v.video_id)).toEqual(['z2bbbbbbbbb']);
+    expect(filterVideos(catalog, { query: 'budget helicopter' })).toEqual([]);
+  });
+
+  it('ranks a title hit above a channel-only hit', () => {
+    const ranked = [
+      { ...mockVideo, video_id: 'r1', title: 'Nothing relevant here', channel_name: 'Watchmojo' },
+      { ...mockVideo, video_id: 'r2', title: 'Watch Review Roundup', channel_name: 'Some Channel' },
+    ];
+    const result = filterVideos(ranked, { query: 'watch' });
+    expect(result[0].video_id).toBe('r2'); // title match outranks channel match
+  });
+});
+
 describe('sortVideos', () => {
   it('sorts videos in reverse chronological order (newest first)', () => {
     const sorted = sortVideos([...mockVideos]);

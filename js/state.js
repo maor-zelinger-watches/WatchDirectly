@@ -24,8 +24,12 @@ export const state = {
   commentsCache: {},   // videoId -> { comments, tree } — prefetched comment data
   initialLoadComplete: false,
   filter: { query: '', category: '' },
-  searchIndex: null,        // all videos, fetched lazily on first search/filter
-  searchIndexPromise: null, // in-flight index fetch (dedupes concurrent requests)
+  searchIndex: null,        // videos available to search — seeded from memory/cache,
+                            // grows as index chunks land (may be partial mid-build)
+  searchIndexComplete: false, // true once the whole catalog is loaded (or restored
+                              // from cache); until then searchIndex is best-effort
+  searchIndexPromise: null, // in-flight index build (dedupes concurrent requests)
+  searchIndexProgress: new Set(), // onProgress callbacks fired as chunks merge in
   filterRenderToken: 0,     // invalidates stale filter renders after async index load
   view: 'latest',           // 'latest' (chronological), 'top' (weekly upvotes), or 'starred'
   prefetchBuffer: [],       // [{page, videos}] fetched ahead, contiguous from currentPage+1
