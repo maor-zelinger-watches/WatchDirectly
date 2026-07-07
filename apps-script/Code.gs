@@ -36,11 +36,16 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
+
+// Grace window applied to a premiere/live entry's expiry. A scheduled premiere
+// that never airs, or a stream that never ends, stops being surfaced once its
+// scheduled start (or, if unknown, its ingest time) is this far in the past.
+const LIVE_GRACE_MS = 12 * 60 * 60 * 1000;
 
 // OAuth client ID this app's Google Sign-In tokens are minted for. Every ID
 // token MUST carry this as its `aud` claim, or it was issued to a different
@@ -346,6 +351,19 @@ function crawlAllFeeds() {
     vHeaders.push('view_count');
   }
 
+  // Self-initialize the live/premiere columns (added after view tracking).
+  // live_status: 'upcoming' | 'live' | 'none'; scheduled_start: ISO air time;
+  // expires_at: ISO time after which a still-unaired/running entry is hidden.
+  ['live_status', 'scheduled_start', 'expires_at'].forEach(function(col) {
+    if (vHeaders.indexOf(col) === -1 && vHeaders.length > 0) {
+      videosSheet.getRange(1, vHeaders.length + 1).setValue(col);
+      vHeaders.push(col);
+    }
+  });
+  var liveStatusCol = vHeaders.indexOf('live_status');
+  var scheduledStartCol = vHeaders.indexOf('scheduled_start');
+  var expiresAtCol = vHeaders.indexOf('expires_at');
+
   if (videoData.length > 1) {
     var videoIdCol = vHeaders.indexOf('item_id');
     if (videoIdCol === -1) videoIdCol = vHeaders.indexOf('video_id');
@@ -384,6 +402,9 @@ function crawlAllFeeds() {
     try {
       var videos = fetchAndParseFeed(feedUrl, channelName, tier, category);
 
+      // Recover premiere/live state (invisible in RSS) before persisting.
+      enrichLiveMetadata(videos);
+
       for (var v = 0; v < videos.length; v++) {
         var video = videos[v];
         if (!existingVideos[video.video_id]) {
@@ -409,6 +430,9 @@ function crawlAllFeeds() {
               else if (hName === 'media_type') newRow.push(video.media_type);
               else if (hName === 'preview_image') newRow.push(video.preview_image);
               else if (hName === 'view_count') newRow.push(video.view_count || 0);
+              else if (hName === 'live_status') newRow.push(video.live_status || 'none');
+              else if (hName === 'scheduled_start') newRow.push(video.scheduled_start || '');
+              else if (hName === 'expires_at') newRow.push(video.expires_at || '');
               else newRow.push('');
             }
           }
@@ -416,11 +440,23 @@ function crawlAllFeeds() {
           videosSheet.appendRow(newRow);
           existingVideos[video.video_id] = true;
           newCount++;
-        } else if (viewCountCol !== -1 && video.view_count && existingRowById[video.video_id]) {
-          // Views were captured at first ingest (hours after publish, when
-          // they're lowest) — refresh them while the video is still inside
-          // the ~15-entry RSS window. Older videos keep their last count.
-          videosSheet.getRange(existingRowById[video.video_id], viewCountCol + 1).setValue(video.view_count);
+        } else if (existingRowById[video.video_id]) {
+          var existingRow = existingRowById[video.video_id];
+          if (viewCountCol !== -1 && video.view_count) {
+            // Views were captured at first ingest (hours after publish, when
+            // they're lowest) — refresh them while the video is still inside
+            // the ~15-entry RSS window. Older videos keep their last count.
+            videosSheet.getRange(existingRow, viewCountCol + 1).setValue(video.view_count);
+          }
+          // Re-enrich live state in place. A premiere/stream keeps its video id
+          // when it becomes a VOD, so the SAME row transitions upcoming -> live
+          // -> none: this clears expires_at once it airs, making the permanent
+          // entry visible without ever creating a second row.
+          if (liveStatusCol !== -1 && video.live_status !== undefined) {
+            videosSheet.getRange(existingRow, liveStatusCol + 1).setValue(video.live_status);
+            if (scheduledStartCol !== -1) videosSheet.getRange(existingRow, scheduledStartCol + 1).setValue(video.scheduled_start || '');
+            if (expiresAtCol !== -1) videosSheet.getRange(existingRow, expiresAtCol + 1).setValue(video.expires_at || '');
+          }
         }
       }
 
@@ -712,6 +748,89 @@ function fetchOgImage(articleUrl) {
   }
 }
 
+/**
+ * Enriches parsed YouTube items in place with premiere/live broadcast state.
+ *
+ * A channel RSS entry for a premiere or scheduled live stream is byte-for-byte
+ * indistinguishable from a normal upload — the feed carries no broadcast state
+ * and no air time. We batch the 11-char video ids into the YouTube Data API
+ * videos.list endpoint (part=snippet,liveStreamingDetails; up to 50 ids/call,
+ * 1 quota unit each) to recover, per item:
+ *   - live_status:     snippet.liveBroadcastContent — 'upcoming' | 'live' | 'none'
+ *   - scheduled_start: liveStreamingDetails.scheduledStartTime (upcoming/live)
+ *   - expires_at:      when a still-unaired premiere or still-running stream
+ *                      should stop being surfaced (scheduled start, or ingest
+ *                      time if unknown, + LIVE_GRACE_MS). Left blank for 'none',
+ *                      so a finished broadcast — which keeps the SAME video id
+ *                      as it becomes a VOD — is permanent once it airs.
+ *
+ * Requires a 'youtube_api_key' Meta value. Without a key, or on any API error,
+ * this is a no-op and the crawl degrades to plain RSS behaviour (every item
+ * treated as a normal, permanent upload).
+ *
+ * @param {Object[]} videos - Parsed item objects, mutated in place.
+ */
+function enrichLiveMetadata(videos) {
+  var apiKey = getMeta('youtube_api_key');
+  if (!apiKey) return;
+
+  // Only genuine YouTube videos (exactly 11-char id) have broadcast state;
+  // articles and hashed ids are skipped. Group so duplicate ids share a lookup.
+  var ids = [];
+  var byId = {};
+  for (var i = 0; i < videos.length; i++) {
+    var v = videos[i];
+    if (v.media_type === 'video' && v.video_id && v.video_id.length === 11) {
+      if (!byId[v.video_id]) { byId[v.video_id] = []; ids.push(v.video_id); }
+      byId[v.video_id].push(v);
+    }
+  }
+  if (ids.length === 0) return;
+
+  var now = Date.now();
+
+  for (var b = 0; b < ids.length; b += 50) {
+    var batch = ids.slice(b, b + 50);
+    var url = 'https://www.googleapis.com/youtube/v3/videos'
+      + '?part=snippet,liveStreamingDetails'
+      + '&fields=' + encodeURIComponent('items(id,snippet/liveBroadcastContent,liveStreamingDetails/scheduledStartTime)')
+      + '&id=' + batch.join(',')
+      + '&key=' + encodeURIComponent(apiKey);
+
+    try {
+      var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      if (resp.getResponseCode() !== 200) {
+        log('WARN', 'enrichLiveMetadata', 'videos.list HTTP ' + resp.getResponseCode() + ': ' + resp.getContentText().slice(0, 200));
+        continue;
+      }
+      var items = (JSON.parse(resp.getContentText()).items) || [];
+      for (var k = 0; k < items.length; k++) {
+        var it = items[k];
+        var status = (it.snippet && it.snippet.liveBroadcastContent) || 'none';
+        var lsd = it.liveStreamingDetails || {};
+        var scheduled = lsd.scheduledStartTime || '';
+        var expires = '';
+
+        if (status === 'upcoming' || status === 'live') {
+          // Anchor expiry to the scheduled start when known, else to now.
+          var base = scheduled ? new Date(scheduled).getTime() : now;
+          if (isNaN(base)) base = now;
+          expires = new Date(base + LIVE_GRACE_MS).toISOString();
+        }
+
+        var rows = byId[it.id] || [];
+        for (var r = 0; r < rows.length; r++) {
+          rows[r].live_status = status;
+          rows[r].scheduled_start = scheduled;
+          rows[r].expires_at = expires;
+        }
+      }
+    } catch (e) {
+      log('WARN', 'enrichLiveMetadata', 'videos.list failed: ' + e.message);
+    }
+  }
+}
+
 function parseRssFeed(xml, channelName, tier, category) {
   try {
     var doc = XmlService.parse(xml);
@@ -946,12 +1065,22 @@ function readAllVideos() {
 
   var headers = data[0];
   var videos = [];
+  var nowMs = Date.now();
 
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
     var video = {};
     for (var j = 0; j < headers.length; j++) {
       video[headers[j]] = row[j];
+    }
+
+    // Drop provisional premiere/live entries whose expiry has passed. A
+    // scheduled premiere or running stream is surfaced while fresh; when it
+    // ends, the crawl re-enriches the SAME video id, clears expires_at, and the
+    // row reappears as a permanent VOD. One that never airs simply expires out.
+    if (video.expires_at) {
+      var expMs = new Date(video.expires_at).getTime();
+      if (!isNaN(expMs) && expMs < nowMs) continue;
     }
 
     // Legacy fallback: if media_type column is missing from older sheet data,
