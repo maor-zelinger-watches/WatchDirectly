@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.5.0 — 2026-07-07
+- Rebranded the UI to the Andrew Morgan Watches design system: swapped the type
+  from Inter to **Poppins** (across the app and the Terms/Privacy pages) and
+  remapped the palette to a pure-black canvas (`#000`), off-black cards
+  (`#0d0d0d`–`#161616`), pure-white text, slate-grey metadata, and a single
+  electric **volt-chartreuse** accent (`#e1f003`) replacing the former gold. The
+  wordmark and feed tabs are now uppercase with editorial letter-spacing.
+- Reworked buttons into the guide's outlined-pill system (2px borders, uppercase
+  labels, 8px radius): the primary CTA is solid chartreuse, and the secondary
+  (`.btn--ghost`) is a white outline that inverts to a white fill on hover —
+  deliberately not the accent, keeping the neon rare so it reads loudest on the
+  one primary action per view. Added an unused `--orange` (`#c7632f`) token
+  reserved for the logo per the brand guide.
+
 ### 1.4.0 — 2026-07-07
 - Search no longer flashes blank on the first keystroke. The first query paints
   against an in-memory seed (the pages scrolled so far) while the full catalog

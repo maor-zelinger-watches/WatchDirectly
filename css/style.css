@@ -10,36 +10,41 @@
    ============================================================ */
 
 :root {
-  /* Colors — Dark theme */
-  --bg-canvas: #030303;
-  --bg-surface: #1a1a1b;
-  --bg-surface-hover: #222223;
-  --bg-comment: #141415;
-  --bg-input: #272729;
-  --bg-header: rgba(3, 3, 3, 0.85);
+  /* Colors — Andrew Morgan Watches: dark, editorial, high-contrast.
+     ~70% black, ~25% white, ~5% neon accent — the chartreuse reads
+     loudest when it stays rare. */
+  --bg-canvas: #000000;        /* Ink Black — dominant surface */
+  --bg-surface: #0d0d0d;       /* Off-black cards / panels */
+  --bg-surface-hover: #161616;
+  --bg-comment: #0d0d0d;
+  --bg-input: #161616;
+  --bg-header: rgba(0, 0, 0, 0.85);
 
-  --accent: #d4a053;
-  --accent-hover: #e6b565;
-  --accent-dim: rgba(212, 160, 83, 0.15);
+  --accent: #e1f003;           /* Volt Chartreuse — CTAs, links, highlights */
+  --accent-hover: #eaff2e;
+  --accent-dim: rgba(225, 240, 3, 0.14);
 
-  --text-primary: #d7dadc;
-  --text-secondary: #818384;
-  --text-link: #6cb6ff;
-  --text-muted: #565758;
+  --orange: #c7632f;           /* Burnt Orange — logo/wordmark only */
 
-  --border: #343536;
-  --separator: #2d2d2e;
+  --text-primary: #ffffff;     /* Pure White — headings, body, icons */
+  --text-secondary: #8a8a8a;   /* Slate Grey — secondary text, metadata */
+  --text-link: #e1f003;        /* Links carry the accent */
+  --text-muted: #5a5a5a;
+
+  --border: #2a2a2a;           /* Hairline on black */
+  --separator: #222222;
 
   --tier-0: #ffd700;
   --tier-1: #c0c0c0;
   --tier-2: #cd7f32;
-  --tier-3: #818384;
+  --tier-3: #8a8a8a;
 
   --danger: #ff4444;
   --success: #318b34;
 
-  /* Typography */
-  --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* Typography — one geometric sans does all the work.
+     Headlines heavy & UPPERCASE; body light-weight, sentence case. */
+  --font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
   --fs-xs: 0.6875rem;   /* 11px */
   --fs-sm: 0.75rem;     /* 12px */
@@ -182,7 +187,8 @@ img {
   font-size: var(--fs-md);
   font-weight: var(--fw-bold);
   color: var(--text-primary);
-  letter-spacing: -0.01em;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .header__auth {
@@ -289,6 +295,8 @@ img {
   font-size: var(--fs-base);
   font-weight: var(--fw-semibold);
   color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
   background: transparent;
   border: none;
   cursor: pointer;
@@ -1035,20 +1043,25 @@ body.fullscreen-mode {
   justify-content: center;
   padding: var(--sp-2) var(--sp-4);
   font-size: var(--fs-sm);
-  font-weight: var(--fw-semibold);
-  border-radius: var(--radius-lg);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  border-radius: var(--radius-md);
   transition: all var(--transition-fast);
-  border: none;
+  border: 2px solid transparent;
   cursor: pointer;
 }
 
+/* Solid accent CTA — fill flips to a lighter neon on hover */
 .btn--primary {
   background: var(--accent);
+  border-color: var(--accent);
   color: var(--bg-canvas);
 }
 
 .btn--primary:hover {
   background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 .btn--primary:disabled {
@@ -1056,15 +1069,18 @@ body.fullscreen-mode {
   cursor: not-allowed;
 }
 
+/* Outlined secondary — white border on black, inverts to a white fill on
+   hover. Keeps the neon rare (accent stays on the one primary action). */
 .btn--ghost {
   background: transparent;
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-color: var(--border);
 }
 
 .btn--ghost:hover {
-  color: var(--text-primary);
-  border-color: var(--text-secondary);
+  background: var(--text-primary);
+  color: var(--bg-canvas);
+  border-color: var(--text-primary);
 }
 
 .btn--sm {
