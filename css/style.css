@@ -1240,6 +1240,20 @@ body.fullscreen-mode {
   color: var(--text-secondary);
 }
 
+.feed__searching {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-8);
+  color: var(--text-secondary);
+}
+
+.feed__searching p {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
 /* ============================================================
    RESPONSIVE — Tablet & Desktop
    ============================================================ */

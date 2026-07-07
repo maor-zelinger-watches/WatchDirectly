@@ -7,7 +7,7 @@
  */
 
 export const CONFIG = {
-  APP_VERSION: '1.3.1',       // frontend version (npm semver) — bump on every
+  APP_VERSION: '1.4.0',       // frontend version (npm semver) — bump on every
                               // user-visible change; shown in the header and
                               // logged at boot. Backend has its own VERSION
                               // in apps-script/Code.gs; package.json tracks

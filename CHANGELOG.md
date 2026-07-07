@@ -21,6 +21,21 @@ that component's heading.
 
 ## Frontend
 
+### 1.4.0 — 2026-07-07
+- Search no longer flashes blank on the first keystroke. The first query paints
+  against an in-memory seed (the pages scrolled so far) while the full catalog
+  index streams in behind it — but when the seed had no match, the container was
+  cleared to zero cards and, since that pass isn't final, the empty state stayed
+  hidden, leaving a visible blank until the network chunks landed. A new
+  "Searching…" indicator (`#feed-searching`) now shows whenever there are no
+  matches to paint *and* the index is still building, so the box never goes
+  blank; it resolves to real results or the "No videos match" empty state once
+  the index completes, and clears on tab switch so it can't strand under another
+  view.
+- Tightened the search debounce from 250ms to 120ms. Matching is in-memory and
+  the render is capped, so the main thread keeps up per keystroke; the first
+  keystroke now feels responsive instead of laggy.
+
 ### 1.3.1 — 2026-07-07
 - Toast notifications are now larger and anchored to the top-center of the
   viewport instead of the bottom. Bigger type (18px, semibold), roomier
@@ -123,6 +138,13 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.1.2 — 2026-07-07
+- Search e2e now covers the loading state: a delayed index-build fetch proves
+  the "Searching…" indicator shows while the catalog warms and the empty state
+  stays hidden, then it settles to the real "No videos match" state once the
+  index completes. Updated the filter/search perf comment for the 120ms
+  debounce.
 
 ### 1.1.1 — 2026-07-07
 - Backend unit tests cover the read-only `handleFeed` (serves without crawling

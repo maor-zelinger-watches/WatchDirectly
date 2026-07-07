@@ -195,13 +195,17 @@ export function setupFeedControls() {
     ensureSearchIndex().catch(() => {});
   }, { once: true });
 
+  // Short debounce: matching is in-memory and the render is capped, so the
+  // main thread can keep up per keystroke. A tighter delay keeps the first
+  // keystroke from feeling laggy; applyFilter shows a "Searching…" state
+  // while the catalog index is still warming so the box never flashes blank.
   let debounceTimer;
   input.addEventListener('input', () => {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       state.filter.query = input.value;
       update();
-    }, 250);
+    }, 120);
   });
 }
 
@@ -253,6 +257,9 @@ async function switchView(view) {
   // A superseded switch bails before its skeleton cleanup — clear any
   // skeleton it left showing before this view takes over the container.
   document.getElementById('feed-skeleton').style.display = 'none';
+  // Latest-view search may have left the "Searching…" indicator up; the new
+  // view owns the container now, so it must not linger below its cards.
+  document.getElementById('feed-searching').style.display = 'none';
 
   if (view === 'top' && !state.topLoaded) {
     const container = document.getElementById('feed-container');
@@ -503,12 +510,14 @@ async function applyFilter() {
   const container = document.getElementById('feed-container');
   const sentinel = document.getElementById('load-more-container');
   const empty = document.getElementById('feed-empty');
+  const searching = document.getElementById('feed-searching');
   if (!container) return;
 
   const token = ++state.filterRenderToken;
 
   if (!isFilterActive()) {
     // Restore the normal infinite-scroll feed
+    if (searching) searching.style.display = 'none';
     state.renderToken++;
     container.innerHTML = '';
     state.expandedComments.clear();
@@ -540,8 +549,15 @@ async function applyFilter() {
       note.textContent = `Showing the top ${shown.length} of ${matches.length} matches — keep typing to narrow your search.`;
       container.appendChild(note);
     }
+    // Distinguish "no matches yet, still building the index" from "done, and
+    // nothing matches". Only the latter is a real empty state; the former gets
+    // a "Searching…" indicator so the container never flashes blank while the
+    // catalog is still streaming in behind the seed.
+    const noMatches = matches.length === 0;
+    const stillBuilding = !final && !state.searchIndexComplete;
     empty.querySelector('p').textContent = 'No videos match your search.';
-    empty.style.display = (final && matches.length === 0) ? '' : 'none';
+    empty.style.display = (final && noMatches) ? '' : 'none';
+    if (searching) searching.style.display = (noMatches && stillBuilding) ? '' : 'none';
     if (final) prefetchComments(shown.slice(0, CONFIG.PAGE_SIZE));
   };
 

@@ -118,7 +118,7 @@ test.describe('PERF · filter & search', () => {
     });
     console.log(`[T8] results after keystroke in ${ms}ms`);
 
-    // 250ms debounce + filter work — comfortably under a second.
+    // 120ms debounce + filter work — comfortably under a second.
     expect(ms).toBeLessThan(1000);
 
     // It's a real filter, not the whole feed: a nonsense query empties it.

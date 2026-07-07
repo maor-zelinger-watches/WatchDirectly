@@ -139,6 +139,35 @@ test.describe('Search & Category Filter', () => {
     await expect(page.locator('#feed-empty')).toContainText('No videos match your search');
   });
 
+  test('shows a loading state while the catalog index warms, never a blank flash', async ({ page }) => {
+    // Delay the index-build fetch so the build is observably in flight after
+    // the first keystroke. This route is registered after the beforeEach one,
+    // so it wins for feed requests; everything else falls back.
+    await page.route('**/macros/**', async (route) => {
+      if (route.request().url().includes('action=feed')) {
+        await new Promise((r) => setTimeout(r, 800));
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(MOCK_FEED),
+        });
+      } else {
+        await route.fallback();
+      }
+    });
+
+    // Nothing in the in-memory seed matches, and the catalog is still
+    // streaming in — the box must show "Searching…", not an empty container.
+    await page.fill('#search-input', 'submariner');
+    await expect(page.locator('#feed-searching')).toBeVisible();
+    await expect(page.locator('#feed-empty')).toBeHidden();
+
+    // Once the index finishes, it resolves to the real empty state.
+    await expect(page.locator('#feed-empty')).toBeVisible();
+    await expect(page.locator('#feed-empty')).toContainText('No videos match your search');
+    await expect(page.locator('#feed-searching')).toBeHidden();
+  });
+
   test('search and a content-type chip combine', async ({ page }) => {
     // All four mock items are videos, so the Videos chip keeps them all;
     // the query then narrows to Nico's collections video.
