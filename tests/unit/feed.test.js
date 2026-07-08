@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createMediaCard, sortVideos, filterVideos, isShort, mediaType, dedupeVideos } from '../../js/feed.js';
+import { createMediaCard, sortVideos, filterVideos, isShort, mediaType, dedupeVideos, mergeTopRanking } from '../../js/feed.js';
 
 const mockVideo = {
   video_id: 'abc12345678',
@@ -347,6 +347,59 @@ describe('sortVideos', () => {
   it('handles single item', () => {
     const result = sortVideos([mockVideo]);
     expect(result).toHaveLength(1);
+  });
+});
+
+describe('mergeTopRanking (Top This Week stale-while-revalidate reconcile)', () => {
+  const v = (id, extra = {}) => ({ video_id: id, ...extra });
+
+  it('full-replaces when the whole loaded list fits in fresh page 1', () => {
+    // Single page loaded: fresh is authoritative — reorder, add, and remove.
+    const current = [v('a'), v('b'), v('c')];
+    const fresh = [v('c'), v('a'), v('d')]; // b dropped out, d new, reordered
+    expect(mergeTopRanking(current, fresh).map(x => x.video_id)).toEqual(['c', 'a', 'd']);
+  });
+
+  it('removes an item that fell out of the fresh window (keep it fresh)', () => {
+    const current = [v('a'), v('b'), v('c')];
+    const fresh = [v('a'), v('c')]; // b gone; both len<= so tail is c, deduped away
+    expect(mergeTopRanking(current, fresh).map(x => x.video_id)).toEqual(['a', 'c']);
+  });
+
+  it('preserves the scrolled tail beyond the fresh window', () => {
+    // User scrolled to 5; fresh only covers page 1 (3) — keep 4 and 5.
+    const current = [v('a'), v('b'), v('c'), v('d'), v('e')];
+    const fresh = [v('a'), v('b'), v('c')];
+    expect(mergeTopRanking(current, fresh).map(x => x.video_id)).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('splices a new top item in without duplicating a promoted one', () => {
+    // x is new at the top; c was on page 1 and got pushed down into the tail.
+    const current = [v('a'), v('b'), v('c'), v('d'), v('e')];
+    const fresh = [v('x'), v('a'), v('b')];
+    // c (index 2, inside the old window) is absent from fresh → dropped; d,e kept.
+    expect(mergeTopRanking(current, fresh).map(x => x.video_id)).toEqual(['x', 'a', 'b', 'd', 'e']);
+  });
+
+  it('does not duplicate a tail item that fresh pulled up into the window', () => {
+    const current = [v('a'), v('b'), v('c'), v('d')];
+    const fresh = [v('c'), v('a')]; // c promoted from the tail
+    // tail = [c, d] minus c (now in fresh) = [d]
+    expect(mergeTopRanking(current, fresh).map(x => x.video_id)).toEqual(['c', 'a', 'd']);
+  });
+
+  it('adopts fresh counts/order (returns fresh objects for the window)', () => {
+    const current = [v('a', { vote_count: 1 }), v('b', { vote_count: 5 })];
+    const fresh = [v('b', { vote_count: 6 }), v('a', { vote_count: 1 })];
+    expect(mergeTopRanking(current, fresh)).toEqual(fresh);
+  });
+
+  it('tolerates empty inputs', () => {
+    expect(mergeTopRanking([], [])).toEqual([]);
+    expect(mergeTopRanking(null, [v('a')]).map(x => x.video_id)).toEqual(['a']);
+    // Empty fresh (window 0) keeps the current list untouched — the caller
+    // (revalidateTop) already guards this case, but the function stays safe.
+    expect(mergeTopRanking([v('a')], null).map(x => x.video_id)).toEqual(['a']);
   });
 });
 

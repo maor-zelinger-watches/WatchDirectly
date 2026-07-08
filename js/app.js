@@ -17,7 +17,7 @@
 import { CONFIG } from './config.js';
 import { state, isFilterActive } from './state.js';
 import { api } from './api-client.js';
-import { isShort, mediaType } from './feed.js';
+import { isShort, mediaType, sortVideos } from './feed.js';
 import { loadFeedCache, saveFeedCache } from './cache.js';
 import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
@@ -121,6 +121,15 @@ async function loadNextPage() {
       await appendCards(newVideos);
       state.initialLoadComplete = true;
 
+      // Persist immediately from the first fetch — a refresh must paint from
+      // cache even if the second (full-page) fetch below is slow or fails.
+      // Apps Script cold-starts can hang that request; without this early
+      // save the cache would never be written and refresh would fall back to
+      // the network + skeleton. The second fetch upgrades this snapshot.
+      state.currentPage = 1;
+      state.hasMore = serverHasMore();
+      saveFeedCache(state.videos, state.totalVideos);
+
       // 2. Fetch the remainder of the first page (up to PAGE_SIZE)
       if (initialLimit < CONFIG.PAGE_SIZE && state.videos.length < state.totalVideos) {
         const fullPageData = await api.fetchFeed(1, CONFIG.PAGE_SIZE);
@@ -190,6 +199,11 @@ async function loadNextPage() {
       state.hasMore = newVideos.length > 0 && serverHasMore();
 
       await appendCards(uniqueNewVideos);
+
+      // Persist the grown feed so a refresh restores every page the user
+      // scrolled through — not just page 1. showCachedFeed repaints the whole
+      // cached list; revalidateFeed then reconciles only its front (see there).
+      saveFeedCache(state.videos, state.totalVideos);
 
       // Prefetch comments for newly loaded cards
       prefetchComments(uniqueNewVideos);
@@ -341,21 +355,27 @@ async function revalidateFeed() {
     const freshVideos = data.videos || [];
     if (freshVideos.length === 0) return;
 
-    // Quick check: is anything different?
-    const cachedIds = state.videos.map(v => v.video_id).join(',');
+    // The fresh fetch only covers page 1. When the user has scrolled past it,
+    // the loaded feed carries a tail (pages 2+) this fetch knows nothing about
+    // — so "in the cache but absent from fresh page 1" must NOT be read as
+    // "deleted": the item was almost always just pushed down by newer ones.
+    const hasTail = state.videos.length > CONFIG.PAGE_SIZE;
+
+    // Quick check: has the FRONT of the feed changed? Compare fresh page 1
+    // against the first N cached items (the whole list when single-page).
+    const frontIds = state.videos.slice(0, freshVideos.length).map(v => v.video_id).join(',');
     const freshIds = freshVideos.map(v => v.video_id).join(',');
     const countsChanged = freshVideos.some(fv => {
       const cached = state.videos.find(v => v.video_id === fv.video_id);
       return cached && cached.comment_count !== fv.comment_count;
     });
 
-    if (cachedIds === freshIds && !countsChanged) {
-      // Content identical — the cached pagination is still valid, so the
-      // read-ahead buffer can start filling from it as-is. Adopt the
-      // server's cursor (exact where a derived one is best-effort), but only
-      // if a concurrent loadNextPage hasn't advanced past page 1 and set a
-      // later cursor in the meantime — overwriting it would re-fetch a page.
-      if (state.currentPage === startCurrentPage) state.nextCursor = data.next_cursor;
+    if (frontIds === freshIds && !countsChanged) {
+      // Front identical and no count drift — nothing to reconcile. Adopt the
+      // server's page-1 cursor only when single-page (with a tail loaded the
+      // live cursor already points past the tail; page 1's would rewind it),
+      // and only if a concurrent loadNextPage hasn't advanced past page 1.
+      if (!hasTail && state.currentPage === startCurrentPage) state.nextCursor = data.next_cursor;
       prefetchComments(state.videos);
       refillPrefetchBuffer();
       return;
@@ -402,29 +422,34 @@ async function revalidateFeed() {
     );
 
     // --- 1. Animate out cards no longer in the fresh feed ---
-    const removedCards = container.querySelectorAll('.media-card');
-    const removePromises = [];
+    // Only when the whole loaded feed fits within page 1. With a tail loaded,
+    // an item missing from fresh page 1 was pushed down to a page we didn't
+    // refetch, not deleted — removing it would wipe the scrolled feed.
+    if (!hasTail) {
+      const removedCards = container.querySelectorAll('.media-card');
+      const removePromises = [];
 
-    removedCards.forEach(card => {
-      const id = card.dataset.videoId;
-      // Never remove the card the user is watching in fullscreen
-      if (id === state.fullscreenVideoId) return;
-      if (id && !freshIdSet.has(id)) {
-        card.classList.add('media-card--leaving');
-        removePromises.push(new Promise(resolve => {
-          card.addEventListener('transitionend', () => {
-            card.remove();
-            resolve();
-          }, { once: true });
-          // Safety timeout in case transitionend doesn't fire
-          setTimeout(() => { card.remove(); resolve(); }, 400);
-        }));
+      removedCards.forEach(card => {
+        const id = card.dataset.videoId;
+        // Never remove the card the user is watching in fullscreen
+        if (id === state.fullscreenVideoId) return;
+        if (id && !freshIdSet.has(id)) {
+          card.classList.add('media-card--leaving');
+          removePromises.push(new Promise(resolve => {
+            card.addEventListener('transitionend', () => {
+              card.remove();
+              resolve();
+            }, { once: true });
+            // Safety timeout in case transitionend doesn't fire
+            setTimeout(() => { card.remove(); resolve(); }, 400);
+          }));
+        }
+      });
+
+      // Wait for fade-out animations to complete
+      if (removePromises.length > 0) {
+        await Promise.all(removePromises);
       }
-    });
-
-    // Wait for fade-out animations to complete
-    if (removePromises.length > 0) {
-      await Promise.all(removePromises);
     }
 
     // --- 2. Update comment counts on surviving cards ---
@@ -479,11 +504,32 @@ async function revalidateFeed() {
     }
 
     // --- 5. Update state and cache ---
-    state.videos = freshVideos;
-    state.totalVideos = data.total || freshVideos.length;
-    state.currentPage = 1;
-    state.nextCursor = data.next_cursor;
-    state.hasMore = serverHasMore();
+    if (hasTail) {
+      // Non-destructive merge (the "only add what's missing" reconcile): pull
+      // fresh counts onto the items we already hold, splice in any genuinely-
+      // new top items, and keep the whole scrolled tail. Pagination keeps its
+      // live cursor — it already points past the tail, which fresh page 1
+      // never touched.
+      for (const fv of freshVideos) {
+        const existing = state.videos.find(v => v.video_id === fv.video_id);
+        if (existing) {
+          existing.comment_count = fv.comment_count;
+          existing.vote_count = fv.vote_count;
+        }
+      }
+      const newTop = freshVideos.filter(fv => !state.videos.some(v => v.video_id === fv.video_id));
+      state.videos = sortVideos([...newTop, ...state.videos]);
+      state.totalVideos = data.total || state.totalVideos;
+      state.currentPage = Math.max(1, Math.ceil(state.videos.length / CONFIG.PAGE_SIZE));
+      state.nextCursor = cursorAfter(state.videos);
+      state.hasMore = state.videos.length < state.totalVideos;
+    } else {
+      state.videos = freshVideos;
+      state.totalVideos = data.total || freshVideos.length;
+      state.currentPage = 1;
+      state.nextCursor = data.next_cursor;
+      state.hasMore = serverHasMore();
+    }
     // Drop prefetched comments only where the server reports a different
     // count — wiping the whole cache defeated the prefetch entirely.
     for (const fv of freshVideos) {
@@ -499,7 +545,7 @@ async function revalidateFeed() {
     const sentinel = document.getElementById('load-more-container');
     if (sentinel) sentinel.style.display = state.hasMore ? '' : 'none';
 
-    saveFeedCache(freshVideos, state.totalVideos);
+    saveFeedCache(state.videos, state.totalVideos);
 
     // Prefetch comments for all cards
     prefetchComments(freshVideos);

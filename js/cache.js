@@ -14,6 +14,8 @@
  * Keys owned here:
  * - wd_feed_cache   — page-1 feed snapshot {videos, total} (stale-while-revalidate)
  * - wd_search_index — full catalog for search {videos} (stale-while-revalidate)
+ * - wd_top_cache    — Top This Week first-page snapshot {videos, total, cursor}
+ * - wd_channels     — curated creator list {creators} (small, fully cached)
  * - wd_my_stars     — starred channel names, instant paint before server reconcile
  * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.)
  */
@@ -21,6 +23,8 @@
 export const CACHE_KEYS = {
   FEED: 'wd_feed_cache',
   SEARCH_INDEX: 'wd_search_index',
+  TOP: 'wd_top_cache',
+  CHANNELS: 'wd_channels',
   STARS: 'wd_my_stars',
 };
 
@@ -120,6 +124,84 @@ export function saveSearchIndex(videos) {
 
 export function clearSearchIndex() {
   remove(CACHE_KEYS.SEARCH_INDEX);
+}
+
+// --- Top This Week (first-page snapshot, stale-while-revalidate) -----
+
+/**
+ * Loads the cached Top This Week first page.
+ * Returns {videos, total, cursor} or null. Only the first ranked page is
+ * cached — deeper pages are re-fetched on scroll — so the payload stays small
+ * and the revalidate can fully reconcile (add/remove/reorder) the window it
+ * covers. Invalid payloads (corrupt JSON, empty videos) are cleared.
+ * `cursor` may be '' (end of the week) or a string; both are valid.
+ */
+export function loadTopCache() {
+  const raw = read(CACHE_KEYS.TOP);
+  if (!raw) return null;
+
+  try {
+    const data = JSON.parse(raw);
+    const videos = Array.isArray(data.videos) ? data.videos : [];
+    if (videos.length === 0) {
+      remove(CACHE_KEYS.TOP);
+      return null;
+    }
+    return {
+      videos,
+      total: typeof data.total === 'number' ? data.total : videos.length,
+      cursor: typeof data.cursor === 'string' ? data.cursor : undefined,
+    };
+  } catch (e) {
+    remove(CACHE_KEYS.TOP);
+    return null;
+  }
+}
+
+/** Saves the Top first-page snapshot. Best-effort — quota failures are silent. */
+export function saveTopCache(videos, total, cursor) {
+  if (!Array.isArray(videos) || videos.length === 0) return false;
+  return write(CACHE_KEYS.TOP, JSON.stringify({ videos, total, cursor }));
+}
+
+export function clearTopCache() {
+  remove(CACHE_KEYS.TOP);
+}
+
+// --- Channels (curated creator list, fully cached) -------------------
+
+/**
+ * Loads the cached creator list.
+ * Returns an array of creators, or null when absent/corrupt. The list is
+ * small and curated, so the whole thing is cached; a non-array or empty
+ * payload is cleared and reported as absent so the tab rebuilds from network.
+ */
+export function loadChannelsCache() {
+  const raw = read(CACHE_KEYS.CHANNELS);
+  if (!raw) return null;
+
+  try {
+    const data = JSON.parse(raw);
+    const creators = Array.isArray(data) ? data : (Array.isArray(data.creators) ? data.creators : null);
+    if (!creators || creators.length === 0) {
+      remove(CACHE_KEYS.CHANNELS);
+      return null;
+    }
+    return creators;
+  } catch (e) {
+    remove(CACHE_KEYS.CHANNELS);
+    return null;
+  }
+}
+
+/** Saves the creator list. Best-effort — quota failures are silent. */
+export function saveChannelsCache(creators) {
+  if (!Array.isArray(creators) || creators.length === 0) return false;
+  return write(CACHE_KEYS.CHANNELS, JSON.stringify({ creators }));
+}
+
+export function clearChannelsCache() {
+  remove(CACHE_KEYS.CHANNELS);
 }
 
 // --- starred creators (instant paint, reconciled by the server) ------

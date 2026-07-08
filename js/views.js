@@ -12,14 +12,18 @@
 import { state, isFilterActive, activeFilter } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
-import { filterVideos, sortVideos, dedupeVideos } from './feed.js';
+import { filterVideos, sortVideos, dedupeVideos, mergeTopRanking } from './feed.js';
 import { renderList, buildChannelCard } from './cards.js';
 import { prefetchComments } from './comments-ui.js';
 import { exitFullscreen } from './fullscreen.js';
 import { isSignedIn } from './auth.js';
 import { showToast } from './toast.js';
 import { sanitizeHtml } from './utils.js';
-import { loadFeedCache, loadSearchIndex, saveSearchIndex } from './cache.js';
+import {
+  loadFeedCache, loadSearchIndex, saveSearchIndex,
+  loadTopCache, saveTopCache,
+  loadChannelsCache, saveChannelsCache,
+} from './cache.js';
 
 // True while the current index build is running off a cached catalog, so a
 // network failure can degrade to that cache instead of failing search.
@@ -170,22 +174,67 @@ export function ensureSearchIndex(onProgress) {
   return state.searchIndexPromise;
 }
 
+/** Commits a creator list to state: the list itself and the search host-map. */
+function applyCreators(creators) {
+  state.creators = creators;
+  const hosts = {};
+  for (const c of creators) {
+    if (c.channel_name && c.host) hosts[c.channel_name] = c.host;
+  }
+  state.hostsByChannel = hosts;
+}
+
+/** Cheap identity of the creator list — re-render only when this changes. */
+function creatorsSignature(creators) {
+  return (creators || [])
+    .map(c => `${c.channel_name}|${c.url || ''}|${c.avatar || ''}|${c.host || ''}`)
+    .sort()
+    .join('\n');
+}
+
+/**
+ * Background freshness check for the Channels tab (stale-while-revalidate):
+ * the cached list painted instantly; this fetches the live list, updates
+ * state + cache, and repaints only if the curated list actually changed (a
+ * rare event — so most opens never touch the DOM after the cached paint).
+ */
+async function revalidateChannels() {
+  let creators;
+  try {
+    const data = await api.fetchChannels();
+    creators = data.channels || [];
+  } catch (e) {
+    return; // the cached list stays on screen
+  }
+  if (creators.length === 0) return; // don't wipe on a transient empty
+  const changed = creatorsSignature(creators) !== creatorsSignature(state.creators);
+  applyCreators(creators);
+  saveChannelsCache(creators);
+  if (changed && state.view === 'channels') renderChannels();
+}
+
 // Single in-flight fetch of the creator list, shared by the host map (search
-// matching) and the Channels tab. Cached on state.creators; a failure clears
-// the promise so the next caller retries.
+// matching) and the Channels tab. Cached on state.creators (session) and in
+// localStorage (across sessions); a failure clears the promise so the next
+// caller retries.
 let creatorsPromise = null;
 export function loadCreators() {
   if (state.creators) return Promise.resolve(state.creators);
+
+  // Instant paint from the persisted list, then revalidate in the background.
+  const cached = loadChannelsCache();
+  if (cached && cached.length) {
+    applyCreators(cached);
+    revalidateChannels();
+    return Promise.resolve(cached);
+  }
+
   if (!creatorsPromise) {
     creatorsPromise = api.fetchChannels()
       .then(data => {
         const creators = data.channels || [];
-        state.creators = creators;
-        const hosts = {};
-        for (const c of creators) {
-          if (c.channel_name && c.host) hosts[c.channel_name] = c.host;
-        }
-        state.hostsByChannel = hosts;
+        applyCreators(creators);
+        saveChannelsCache(creators);
         return creators;
       })
       .catch(err => {
@@ -292,66 +341,64 @@ async function switchView(view) {
   document.getElementById('feed-searching').style.display = 'none';
 
   if (view === 'top' && !state.topLoaded) {
-    const container = document.getElementById('feed-container');
-    const skeleton = document.getElementById('feed-skeleton');
-    const sentinel = document.getElementById('load-more-container');
-    state.renderToken++;
-    container.innerHTML = '';
-    state.expandedComments.clear();
-    sentinel.style.display = 'none';
-    skeleton.style.display = '';
-    try {
-      const data = await api.fetchTopWeek(CONFIG.PAGE_SIZE);
-      // Keep the loaded list even if this switch is stale — reopening the tab
-      // renders it instantly and keeps paginating. Only the DOM work below
-      // needs the token guard.
-      state.topVideos = data.videos || [];
-      state.topTotal = data.total || 0;
-      state.topCursor = data.next_cursor;
-      state.topHasMore = typeof data.next_cursor === 'string' && data.next_cursor !== '';
-      // Don't freeze an empty result for the whole session. An empty list can
-      // come from a transient hiccup or a refresh still in flight; leaving
-      // topLoaded false lets reopening the tab refetch instead of sticking.
-      state.topLoaded = state.topVideos.length > 0;
-    } catch (e) {
-      console.error('Failed to load top videos:', e);
-      // A newer switch owns the tabs and container now — don't yank the
-      // user to Latest over a request they've already navigated away from.
+    // Instant paint from the cached first page, then revalidate in the
+    // background. Only fall back to the skeleton + blocking fetch when there's
+    // no cache to show — a first-ever open (or a cleared cache).
+    const cachedTop = loadTopCache();
+    if (cachedTop) {
+      state.topVideos = cachedTop.videos;
+      state.topTotal = cachedTop.total;
+      state.topCursor = cachedTop.cursor;
+      state.topHasMore = typeof cachedTop.cursor === 'string' && cachedTop.cursor !== '';
+      state.topLoaded = true;
+      revalidateTop(); // background freshness; repaints only if the ranking moved
+    } else {
+      const container = document.getElementById('feed-container');
+      const skeleton = document.getElementById('feed-skeleton');
+      const sentinel = document.getElementById('load-more-container');
+      state.renderToken++;
+      container.innerHTML = '';
+      state.expandedComments.clear();
+      sentinel.style.display = 'none';
+      skeleton.style.display = '';
+      try {
+        const data = await api.fetchTopWeek(CONFIG.PAGE_SIZE);
+        // Keep the loaded list even if this switch is stale — reopening the tab
+        // renders it instantly and keeps paginating. Only the DOM work below
+        // needs the token guard.
+        state.topVideos = data.videos || [];
+        state.topTotal = data.total || 0;
+        state.topCursor = data.next_cursor;
+        state.topHasMore = typeof data.next_cursor === 'string' && data.next_cursor !== '';
+        // Don't freeze an empty result for the whole session. An empty list can
+        // come from a transient hiccup or a refresh still in flight; leaving
+        // topLoaded false lets reopening the tab refetch instead of sticking.
+        state.topLoaded = state.topVideos.length > 0;
+        if (state.topVideos.length > 0) saveTopCache(state.topVideos, state.topTotal, state.topCursor);
+      } catch (e) {
+        console.error('Failed to load top videos:', e);
+        // A newer switch owns the tabs and container now — don't yank the
+        // user to Latest over a request they've already navigated away from.
+        if (token !== viewToken) return;
+        showToast('Failed to load top videos. Please try again.', 'error');
+        state.view = 'latest';
+        document.querySelectorAll('.feed-tab').forEach(t => {
+          const active = t.dataset.view === 'latest';
+          t.classList.toggle('feed-tab--active', active);
+          t.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        skeleton.style.display = 'none';
+        applyFilter();
+        return;
+      }
       if (token !== viewToken) return;
-      showToast('Failed to load top videos. Please try again.', 'error');
-      state.view = 'latest';
-      document.querySelectorAll('.feed-tab').forEach(t => {
-        const active = t.dataset.view === 'latest';
-        t.classList.toggle('feed-tab--active', active);
-        t.setAttribute('aria-selected', active ? 'true' : 'false');
-      });
       skeleton.style.display = 'none';
-      applyFilter();
-      return;
     }
-    if (token !== viewToken) return;
-    skeleton.style.display = 'none';
   }
 
-  // First open of Starred needs the full catalog — show the skeleton
-  // while it loads instead of leaving the previous view's cards up.
-  if (view === 'starred' && isSignedIn() && !state.searchIndexComplete) {
-    const container = document.getElementById('feed-container');
-    const skeleton = document.getElementById('feed-skeleton');
-    const sentinel = document.getElementById('load-more-container');
-    state.renderToken++;
-    container.innerHTML = '';
-    state.expandedComments.clear();
-    sentinel.style.display = 'none';
-    skeleton.style.display = '';
-    try {
-      await ensureSearchIndex();
-    } catch (e) {
-      /* renderStarred surfaces the error toast */
-    }
-    if (token !== viewToken) return;
-    skeleton.style.display = 'none';
-  }
+  // Starred paints instantly from the cached/seeded search index and
+  // reconciles as fresh catalog chunks land (renderStarred owns that
+  // stale-while-revalidate flow) — no blocking skeleton wait here.
 
   // Only the most recent switch may repaint — a stale update() here
   // caused redundant re-renders and lost scroll on rapid tab flips.
@@ -391,6 +438,47 @@ function renderTop() {
   sentinel.style.display = (state.topHasMore && !filtered) ? '' : 'none';
 
   prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
+}
+
+/**
+ * Background freshness check for Top This Week (stale-while-revalidate).
+ *
+ * The cached first page painted instantly; this refetches that first ranked
+ * page and reconciles the window it covers — new items in, dropped items out,
+ * counts and order updated (fresh is authoritative for the top). Any deeper
+ * pages the user scrolled to are preserved: fresh page 1 knows nothing about
+ * them, so "absent from fresh" beyond the window is not "removed." Repaints
+ * only when the visible list actually moved, so an unchanged open never flashes.
+ */
+async function revalidateTop() {
+  let data;
+  try {
+    data = await api.fetchTopWeek(CONFIG.PAGE_SIZE);
+  } catch (e) {
+    return; // the stale ranking stays on screen
+  }
+  const fresh = data.videos || [];
+  if (fresh.length === 0) return; // don't wipe the list on a transient empty
+
+  const merged = mergeTopRanking(state.topVideos || [], fresh);
+  const hadTail = (state.topVideos || []).length > fresh.length;
+
+  const sig = (list) => list.map(v => `${v.video_id}:${v.vote_count || 0}:${v.comment_count || 0}`).join(',');
+  const changed = sig(state.topVideos || []) !== sig(merged);
+
+  state.topVideos = merged;
+  state.topTotal = data.total || state.topTotal;
+  // The cursor only advances when there's no deeper tail — with a tail loaded
+  // the live cursor already points past it; fresh page 1's would rewind it.
+  if (!hadTail) {
+    state.topCursor = data.next_cursor;
+    state.topHasMore = typeof data.next_cursor === 'string' && data.next_cursor !== '';
+  }
+  saveTopCache(fresh, state.topTotal, data.next_cursor);
+
+  // Only the ranked-content render is driven here; a search query owns the
+  // container (renderTop filters the loaded set) and must not be interrupted.
+  if (changed && state.view === 'top' && !isFilterActive()) renderTop();
 }
 
 /**
@@ -462,6 +550,7 @@ async function renderStarred() {
   const container = document.getElementById('feed-container');
   const sentinel = document.getElementById('load-more-container');
   const empty = document.getElementById('feed-empty');
+  const searching = document.getElementById('feed-searching');
   if (!container) return;
 
   sentinel.style.display = 'none';
@@ -470,49 +559,73 @@ async function renderStarred() {
     state.renderToken++;
     container.innerHTML = '';
     state.expandedComments.clear();
+    if (searching) searching.style.display = 'none';
     empty.querySelector('p').textContent = 'Sign in to see videos from your favorite creators.';
     empty.style.display = '';
     return;
   }
 
+  const token = ++state.filterRenderToken;
+  let painted = false;
+
+  // Paints the starred set for the current index snapshot. Runs first from the
+  // seeded/cached index (instant), again per fresh chunk, and finally when the
+  // rebuilt index is complete — the same stale-while-revalidate shape as search.
+  const renderFrom = (index, final) => {
+    if (token !== state.filterRenderToken || state.view !== 'starred') return;
+    let list = sortVideos((index || []).filter(v => state.myStars.has(v.channel_name)));
+    // Same render cap as applyFilter — a one-letter search over a large starred
+    // catalog would otherwise paint thousands of cards in one go.
+    if (isFilterActive()) list = filterVideos(list, activeFilter()).slice(0, CONFIG.SEARCH_RENDER_LIMIT);
+
+    state.renderToken++;
+    container.innerHTML = '';
+    state.expandedComments.clear();
+    renderList(container, list);
+    painted = true;
+
+    empty.querySelector('p').textContent = state.myStars.size === 0
+      ? 'No favorite creators yet. Tap the ☆ next to a channel name to build your feed.'
+      : (isFilterActive()
+        ? 'No videos match your search.'
+        : 'No videos from your favorite creators yet.');
+    // Don't flash "no videos" while the catalog is still streaming in behind the
+    // seed — a favorite's videos may simply not be in the partial index yet. The
+    // "no stars" copy is safe to show immediately (it doesn't depend on the index).
+    const noItems = list.length === 0;
+    const stillBuilding = !final && !state.searchIndexComplete;
+    empty.style.display = (noItems && (final || state.myStars.size === 0)) ? '' : 'none';
+    if (searching) searching.style.display = (noItems && stillBuilding && state.myStars.size > 0) ? '' : 'none';
+    if (final) prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
+  };
+
+  // Kicks off the index (seeds synchronously from cache/memory, fires onProgress
+  // for any seed and again per chunk); resolves with the authoritative index.
+  const indexPromise = ensureSearchIndex(partial => renderFrom(partial, false));
+  // Guarantee a first paint even when the seed was empty (cold, no cache): clear
+  // the previous view and show the searching state rather than leaving it blank.
+  if (!painted) renderFrom(state.searchIndex || [], false);
+
   let index;
   try {
-    index = await ensureSearchIndex();
+    index = await indexPromise;
   } catch (error) {
+    if (token !== state.filterRenderToken || state.view !== 'starred') return;
     console.error('Failed to load starred feed:', error);
     showToast('Favorite feed is unavailable right now. Please try again.', 'error');
-    // Show a visible fallback instead of a dead blank screen
-    if (state.view === 'starred') {
+    // Keep any seeded cards on screen; only show the error when nothing painted.
+    if (!(state.searchIndex && state.searchIndex.length)) {
       state.renderToken++;
       container.innerHTML = '';
       state.expandedComments.clear();
+      if (searching) searching.style.display = 'none';
       empty.querySelector('p').textContent = 'Favorite feed is unavailable right now. Please try again.';
       empty.style.display = '';
     }
     return;
   }
 
-  // The view may have changed while the index was loading
-  if (state.view !== 'starred') return;
-
-  let list = sortVideos(index.filter(v => state.myStars.has(v.channel_name)));
-  // Same render cap as applyFilter — a one-letter search over a large starred
-  // catalog would otherwise paint thousands of cards in one go.
-  if (isFilterActive()) list = filterVideos(list, activeFilter()).slice(0, CONFIG.SEARCH_RENDER_LIMIT);
-
-  state.renderToken++;
-  container.innerHTML = '';
-  state.expandedComments.clear();
-  renderList(container, list);
-
-  empty.querySelector('p').textContent = state.myStars.size === 0
-    ? 'No favorite creators yet. Tap the ☆ next to a channel name to build your feed.'
-    : (isFilterActive()
-      ? 'No videos match your search.'
-      : 'No videos from your favorite creators yet.');
-  empty.style.display = list.length === 0 ? '' : 'none';
-
-  prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
+  renderFrom(index, true);
 }
 
 /**

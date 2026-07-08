@@ -15,6 +15,8 @@ import {
   CACHE_KEYS,
   loadFeedCache, saveFeedCache, clearFeedCache,
   loadSearchIndex, saveSearchIndex, clearSearchIndex,
+  loadTopCache, saveTopCache, clearTopCache,
+  loadChannelsCache, saveChannelsCache, clearChannelsCache,
   loadStarredChannels, saveStarredChannels, clearStarredChannels,
 } from '../../js/cache.js';
 
@@ -131,6 +133,89 @@ describe('search index cache', () => {
       throw new DOMException('quota', 'QuotaExceededError');
     });
     expect(saveSearchIndex(VIDEOS)).toBe(false);
+  });
+});
+
+describe('top cache', () => {
+  it('round-trips videos, total, and cursor', () => {
+    saveTopCache(VIDEOS, 30, 'cur|1');
+    expect(loadTopCache()).toEqual({ videos: VIDEOS, total: 30, cursor: 'cur|1' });
+  });
+
+  it('accepts an empty-string cursor (end of the week)', () => {
+    saveTopCache(VIDEOS, 30, '');
+    expect(loadTopCache()).toEqual({ videos: VIDEOS, total: 30, cursor: '' });
+  });
+
+  it('falls back total to length and cursor to undefined when absent', () => {
+    store[CACHE_KEYS.TOP] = JSON.stringify({ videos: VIDEOS });
+    expect(loadTopCache()).toEqual({ videos: VIDEOS, total: VIDEOS.length, cursor: undefined });
+  });
+
+  it('returns null when nothing is cached', () => {
+    expect(loadTopCache()).toBeNull();
+  });
+
+  it('does not save an empty list', () => {
+    expect(saveTopCache([], 0, '')).toBe(false);
+    expect(store[CACHE_KEYS.TOP]).toBeUndefined();
+  });
+
+  it('clears and returns null on corrupt JSON', () => {
+    store[CACHE_KEYS.TOP] = '{bad';
+    expect(loadTopCache()).toBeNull();
+    expect(store[CACHE_KEYS.TOP]).toBeUndefined();
+  });
+
+  it('clears and returns null on an empty cached payload', () => {
+    store[CACHE_KEYS.TOP] = JSON.stringify({ videos: [], total: 5 });
+    expect(loadTopCache()).toBeNull();
+    expect(store[CACHE_KEYS.TOP]).toBeUndefined();
+  });
+
+  it('clearTopCache removes the key', () => {
+    saveTopCache(VIDEOS, 30, '');
+    clearTopCache();
+    expect(loadTopCache()).toBeNull();
+  });
+});
+
+describe('channels cache', () => {
+  const CREATORS = [
+    { channel_name: 'Teddy Baldassarre', host: 'Teddy', avatar: 'a.jpg' },
+    { channel_name: 'Bark and Jack', host: 'Adrian', avatar: 'b.jpg' },
+  ];
+
+  it('round-trips the creator list', () => {
+    saveChannelsCache(CREATORS);
+    expect(loadChannelsCache()).toEqual(CREATORS);
+  });
+
+  it('returns null when nothing is cached', () => {
+    expect(loadChannelsCache()).toBeNull();
+  });
+
+  it('does not save an empty list', () => {
+    expect(saveChannelsCache([])).toBe(false);
+    expect(store[CACHE_KEYS.CHANNELS]).toBeUndefined();
+  });
+
+  it('clears and returns null on corrupt JSON', () => {
+    store[CACHE_KEYS.CHANNELS] = 'nope{';
+    expect(loadChannelsCache()).toBeNull();
+    expect(store[CACHE_KEYS.CHANNELS]).toBeUndefined();
+  });
+
+  it('clears and returns null on an empty cached payload', () => {
+    store[CACHE_KEYS.CHANNELS] = JSON.stringify({ creators: [] });
+    expect(loadChannelsCache()).toBeNull();
+    expect(store[CACHE_KEYS.CHANNELS]).toBeUndefined();
+  });
+
+  it('clearChannelsCache removes the key', () => {
+    saveChannelsCache(CREATORS);
+    clearChannelsCache();
+    expect(loadChannelsCache()).toBeNull();
   });
 });
 

@@ -21,6 +21,47 @@ that component's heading.
 
 ## Frontend
 
+### 1.13.0 — 2026-07-08
+- Extended stale-while-revalidate caching to every tab, so navigating and
+  refreshing paint instantly from localStorage and reconcile in the background
+  — the same model the Latest feed uses. Each tab reconciles to fit its data
+  shape:
+  - **Top This Week** (`wd_top_cache`): the first ranked page is cached and
+    repainted instantly on open/refresh, then a background refetch reconciles
+    that window — new items in, dropped items out, order and counts updated
+    (`mergeTopRanking`). Deeper pages the user scrolled to are preserved: a
+    page-1 refetch knows nothing about them, so absence there isn't deletion.
+    Verified painting from cache in ~26 ms with no skeleton.
+  - **Favorites**: now paints instantly from the already-persisted search
+    index (the full catalog) filtered by starred creators, and reconciles as
+    fresh catalog chunks stream in — instead of blocking on a full index build
+    behind a skeleton. Guards the empty state so a partial seed never flashes
+    "no favorites" while the catalog is still loading.
+  - **Channels** (`wd_channels`): the small curated list is fully cached and
+    repainted instantly, revalidated by full replace, and only re-rendered when
+    the list actually changed (no flash on an unchanged open). Verified painting
+    from cache in ~60 ms.
+- Fixed Latest feed caching so a refresh restores from localStorage instead of
+  re-fetching everything from the backend. Two bugs were defeating the
+  stale-while-revalidate cache:
+  - **First-load cache was never written when the follow-up fetch stalled.**
+    Initial load fetches page 1 in two steps (a fast N+1 paint, then the full
+    page), but `saveFeedCache` only ran after the second fetch. When that
+    request was slow or failed (Apps Script cold-starts routinely do),
+    execution fell into the `catch` and the cache stayed empty — so the next
+    refresh found nothing and showed the loading skeleton. The page-1 snapshot
+    is now saved from the first fetch; the second upgrades it.
+  - **Scrolled-through pages weren't cached, and revalidate wiped them.** The
+    infinite-scroll path never rewrote the cache (only page 1, votes, and
+    comments did), so pages 2+ were lost on refresh. And even with them cached,
+    `revalidateFeed` replaced the feed with fresh page 1 and animated out every
+    card missing from it — deleting the whole scrolled tail (items absent from
+    page 1 are pushed-down, not deleted). Pagination now persists the growing
+    feed, and revalidate reconciles a multi-page feed non-destructively: it
+    adds new top items and updates counts but keeps the tail. A genuinely
+    deleted item lingers in the cached tail until a full re-navigation — an
+    acceptable trade for restoring the scrolled feed instantly across refresh.
+
 ### 1.12.0 — 2026-07-08
 - Removed `creators.json`: the Channels tab and search's host-name matching now
   fetch the curated creator list from the backend's new `getChannels` action

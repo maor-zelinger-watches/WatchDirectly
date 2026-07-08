@@ -380,6 +380,32 @@ export function dedupeVideos(videos) {
 }
 
 /**
+ * Reconciles a fresh Top This Week page 1 into the currently-loaded ranking
+ * (stale-while-revalidate). `fresh` is authoritative for the rank window it
+ * covers: its order wins, new items enter, and items that fell out of that
+ * window are dropped ("remove to keep it fresh"). Any deeper pages the user
+ * scrolled to — positions beyond `fresh.length` — are preserved, because a
+ * page-1 fetch knows nothing about them, so absence there is not deletion.
+ *
+ * When the whole loaded list fits in page 1 (current.length <= fresh.length),
+ * the tail is empty and this is a clean full replace: exactly the add / remove /
+ * reorder the user asked for. Returns a new array — does not mutate inputs.
+ *
+ * @param {Object[]} current - the loaded top list (may include scrolled pages)
+ * @param {Object[]} fresh - freshly fetched page 1 of the ranking
+ * @returns {Object[]}
+ */
+export function mergeTopRanking(current, fresh) {
+  const freshList = Array.isArray(fresh) ? fresh : [];
+  const window = freshList.length;
+  const freshIds = new Set(freshList.map(v => v && v.video_id));
+  const tail = (Array.isArray(current) ? current : [])
+    .slice(window)
+    .filter(v => v && !freshIds.has(v.video_id));
+  return [...freshList, ...tail];
+}
+
+/**
  * Sorts videos in reverse chronological order (newest first).
  * Invalid dates sort oldest, and video_id breaks timestamp ties, so the
  * order is deterministic (and matches the server's pagination order).
