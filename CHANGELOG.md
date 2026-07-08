@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.11.0 — 2026-07-08
+- Nebula-style feed grid: the video/article feed now tiles up to **three across
+  on desktop** (two on tablet, one on mobile) instead of a single column of
+  wide, horizontal cards. Each card became a vertical tile — 16:9 thumbnail on
+  top, title/meta/action-bar stacked below — by switching `.media-card__grid`
+  from a `280px | content` row to a single column, and `.feed` from a flex
+  column to a responsive CSS grid. The desktop canvas widens (`--max-width`
+  860 → 1120px) so three tiles get ~355px each. Titles reserve two lines so
+  tile bottoms line up across a row, and `align-items: start` means expanding a
+  card's inline comments grows only that card, never its row-mates. Pure CSS —
+  no markup or JS change — so Latest, Top This Week, Favorites and search
+  results all inherit the grid, and the Channels grid and fullscreen overlay
+  are unaffected.
+
 ### 1.10.0 — 2026-07-08
 - **Top This Week** now infinite-scrolls instead of showing a fixed first
   slice. The tab was capped at a single 50-item response; because votes are

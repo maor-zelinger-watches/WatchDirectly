@@ -475,11 +475,17 @@ img {
    VIDEO CARD — Grid Layout (thumbnail left, info right)
    ============================================================ */
 
+/* Nebula-style grid: video/article tiles, up to three across on desktop.
+   Responsive column count is set at the tablet/desktop breakpoints below;
+   base (mobile) is a single column. align-items:start keeps each tile at its
+   natural height — a card whose comments are expanded grows on its own without
+   stretching the rest of its row. */
 .feed {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-4);
   padding: var(--sp-2) 0;
+  align-items: start;
 }
 
 .media-card {
@@ -535,10 +541,12 @@ img {
   pointer-events: none;
 }
 
-/* Grid: thumbnail | content */
+/* Vertical tile: thumbnail on top, content below (Nebula layout). Was a
+   horizontal 280px|content row; stacking makes the card tile cleanly in the
+   feed grid. */
 .media-card__grid {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 1fr;
   gap: 0;
 }
 
@@ -578,6 +586,9 @@ img {
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  /* Reserve two lines so a one-line title still occupies the same height as a
+     two-line one — keeps tile bottoms aligned across a grid row. */
+  min-height: calc(2 * var(--lh-tight) * 1em);
 }
 
 .media-card__title a {
@@ -1229,11 +1240,15 @@ body.fullscreen-mode {
    LOADING SKELETONS
    ============================================================ */
 
+/* Mirrors the real feed grid so the loading state tiles exactly like the cards
+   it stands in for (responsive columns are set at the breakpoints alongside
+   .feed). */
 .feed-skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-4);
   padding: var(--sp-2) 0;
+  align-items: start;
 }
 
 .skeleton-card {
@@ -1243,9 +1258,11 @@ body.fullscreen-mode {
   overflow: hidden;
 }
 
+/* Vertical tile: shimmer thumbnail on top, lines below — matches
+   .media-card__grid. */
 .skeleton-card__grid {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 1fr;
   gap: 0;
 }
 
@@ -1262,10 +1279,9 @@ body.fullscreen-mode {
 }
 
 .skeleton-content {
-  padding: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
   display: flex;
   flex-direction: column;
-  justify-content: center;
 }
 
 .skeleton-line {
@@ -1291,10 +1307,12 @@ body.fullscreen-mode {
   height: 12px;
 }
 
-@media (max-width: 540px) {
-  .skeleton-card__grid {
-    grid-template-columns: 1fr;
-  }
+/* Hints at the vote/comments/expand action bar below each tile's content. */
+.skeleton-line--actions {
+  width: 40%;
+  height: 12px;
+  margin-top: var(--sp-1);
+  margin-bottom: 0;
 }
 
 @keyframes shimmer {
@@ -1415,11 +1433,24 @@ body.fullscreen-mode {
   .header__user-name {
     display: block;
   }
+
+  /* Two tiles across on tablet (feed + its loading skeleton in lockstep) */
+  .feed,
+  .feed-skeleton {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 @media (min-width: 960px) {
   :root {
-    --max-width: 860px;
+    /* Wider canvas so three tiles have room to breathe (~355px each). */
+    --max-width: 1120px;
+  }
+
+  /* Three tiles across on desktop — the Nebula grid (feed + skeleton) */
+  .feed,
+  .feed-skeleton {
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
