@@ -277,6 +277,25 @@ that component's heading.
 
 ## Repo
 
+### 1.1.7 — 2026-07-08
+- Deploys are now **skill-only**: removed the post-commit auto-deploy hook so a
+  commit never ships anything. `setup:deploy` no longer installs a hook (and
+  removes any legacy one); the backend goes live only when the deploy skill runs
+  the release gate and then calls `npm run deploy:backend` explicitly. This
+  followed an incident where committing a work-in-progress backend auto-shipped
+  it. Comments in `deploy-backend.sh` updated to match.
+- New release gate `npm run validate:release` (`scripts/validate-release.js`):
+  compares the working tree against `origin/main` and blocks unless every changed
+  Frontend/Backend component was version-bumped and has a dated CHANGELOG entry;
+  a changed repo/tooling version is a non-blocking warning. The deploy skill runs
+  it before committing.
+- `setup:deploy` hardening: it now probes a stored `~/.clasprc.json` with a real
+  authenticated call and re-runs `clasp login` when the token is stale (the
+  periodic Google `invalid_rapt` re-auth that silently broke unattended deploys),
+  and honors `CLASP_CREDS` to log in with your own published OAuth client for
+  long-lived tokens. `.gitignore` now excludes `.clasprc.json` and
+  `*client_secret*.json` so credentials can't be committed.
+
 ### 1.1.6 — 2026-07-08
 - New `fetch-avatars` script (`npm run fetch-avatars`) resolves each creator's
   YouTube channel avatar into an `avatar` field on `creators.json` by scraping

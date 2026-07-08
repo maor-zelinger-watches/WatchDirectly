@@ -1,6 +1,9 @@
 node_modules/
 .env
 .env.local
+# clasp / Google OAuth secrets — never commit these
+.clasprc.json
+*client_secret*.json
 test-results/
 playwright-report/
 .npm-cache/

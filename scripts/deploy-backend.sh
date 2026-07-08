@@ -3,8 +3,12 @@
 # Deploys apps-script/ to the live Apps Script web app.
 #
 # Idempotent: skips instantly when apps-script/ content is unchanged since the
-# last successful deploy (hash stored under .git/, machine-local), so the
-# post-commit hook can call this on every commit at ~zero cost.
+# last successful deploy (hash stored under .git/, machine-local), so the deploy
+# skill can call it on every ship at ~zero cost when the backend hasn't moved.
+#
+# This is the ONLY backend-deploy path, and the deploy skill invokes it
+# explicitly (never a git hook) — deploying is always a deliberate, validated
+# step, never a side-effect of committing.
 #
 # The deployment ID is read from CONFIG.APPS_SCRIPT_URL in js/config.js — the
 # frontend's URL is the single source of truth, and redeploying that same ID

@@ -1,6 +1,6 @@
 {
   "name": "watchdirectly",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "Chronological watch content aggregator with community comments",
   "type": "module",
   "scripts": {
@@ -14,7 +14,8 @@
     "fetch-avatars": "node scripts/fetch-avatars.js",
     "serve": "npx serve . -l 3000",
     "deploy:backend": "./scripts/deploy-backend.sh",
-    "setup:deploy": "./scripts/setup-backend-deploy.sh"
+    "setup:deploy": "./scripts/setup-backend-deploy.sh",
+    "validate:release": "node scripts/validate-release.js"
   },
   "keywords": [
     "watches",
