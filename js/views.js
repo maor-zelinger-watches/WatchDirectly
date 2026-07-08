@@ -23,6 +23,7 @@ import {
   loadFeedCache, loadSearchIndex, saveSearchIndex,
   loadTopCache, saveTopCache,
   loadChannelsCache, saveChannelsCache,
+  loadFilterTypes, saveFilterTypes,
 } from './cache.js';
 
 // True while the current index build is running off a cached catalog, so a
@@ -700,6 +701,11 @@ export function setOnTypeFilterChanged(cb) { onTypeFilterChanged = cb; }
 function renderTypeChips(container) {
   if (!container) return;
 
+  // Restore last session's selection over the state.js default. null means
+  // nothing was ever saved, so the default (Videos + Articles) stands.
+  const saved = loadFilterTypes();
+  if (saved) state.filter.types = saved;
+
   container.innerHTML = TYPE_CHIPS.map(({ value, label }) =>
     `<button type="button" class="chip" data-type="${sanitizeHtml(value)}">${sanitizeHtml(label)}</button>`
   ).join('');
@@ -707,6 +713,8 @@ function renderTypeChips(container) {
   container.querySelectorAll('.chip').forEach(chip => {
     chip.addEventListener('click', () => {
       toggleType(chip.dataset.type);
+      // Persist the new selection so it survives across sessions ([] = "All").
+      saveFilterTypes(state.filter.types);
       syncTypeChips(container);
       // Pure CSS visibility flip — no re-render, no search-index build.
       // Re-rendering here is what froze the app: a type-only filter matches

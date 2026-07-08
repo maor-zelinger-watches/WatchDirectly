@@ -35,6 +35,9 @@ const mostlyVideo = (i) => (i % 5 === 0 ? 'article' : i % 5 === 1 ? 'short' : 'v
 test.describe('PERF · filter & search', () => {
   test('T6 type-chip toggle is instant and re-renders nothing', async ({ page }) => {
     const control = await installMocks(page, { items: makeItems(60, mostlyVideo) });
+    // Start from a saved "All" selection so the Videos click selects (not
+    // deselects) — the default filter is Videos + Articles.
+    await page.addInitScript(() => window.localStorage.setItem('wd_filter_types', '[]'));
     await page.goto('/');
     await expect(page.locator('.media-card')).toHaveCount(10, { timeout: 10000 });
 
@@ -74,6 +77,9 @@ test.describe('PERF · filter & search', () => {
     // so selecting Articles pulls every page the backend has.
     const items = makeItems(30, (i) => (i % 10 === 2 || i % 10 === 7 ? 'article' : 'video'));
     await installMocks(page, { items });
+    // Start from a saved "All" selection so the Articles click selects it —
+    // the default filter is Videos + Articles.
+    await page.addInitScript(() => window.localStorage.setItem('wd_filter_types', '[]'));
     await page.goto('/');
     await expect(page.locator('.media-card')).toHaveCount(10, { timeout: 10000 });
 

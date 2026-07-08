@@ -18,6 +18,7 @@ import {
   loadTopCache, saveTopCache, clearTopCache,
   loadChannelsCache, saveChannelsCache, clearChannelsCache,
   loadStarredChannels, saveStarredChannels, clearStarredChannels,
+  loadFilterTypes, saveFilterTypes, clearFilterTypes,
 } from '../../js/cache.js';
 
 let store = {};
@@ -254,6 +255,51 @@ describe('starred channels', () => {
     saveStarredChannels(['Hodinkee']);
     clearStarredChannels();
     expect(loadStarredChannels().size).toBe(0);
+  });
+});
+
+describe('content-type filter selection', () => {
+  it('round-trips a selection', () => {
+    saveFilterTypes(['video', 'article']);
+    expect(loadFilterTypes()).toEqual(['video', 'article']);
+  });
+
+  it('returns null when nothing was ever saved (caller applies the default)', () => {
+    expect(loadFilterTypes()).toBeNull();
+  });
+
+  it('distinguishes a saved "All" ([]) from never-saved (null)', () => {
+    saveFilterTypes([]);
+    expect(loadFilterTypes()).toEqual([]); // real value, not the default
+  });
+
+  it('normalizes to canonical order and drops duplicates', () => {
+    store[CACHE_KEYS.FILTER_TYPES] = JSON.stringify(['article', 'video', 'article']);
+    expect(loadFilterTypes()).toEqual(['video', 'article']);
+  });
+
+  it('clears and returns null on corrupt JSON', () => {
+    store[CACHE_KEYS.FILTER_TYPES] = '[not json';
+    expect(loadFilterTypes()).toBeNull();
+    expect(store[CACHE_KEYS.FILTER_TYPES]).toBeUndefined();
+  });
+
+  it('clears a payload with an unknown type value', () => {
+    store[CACHE_KEYS.FILTER_TYPES] = JSON.stringify(['video', 'podcast']);
+    expect(loadFilterTypes()).toBeNull();
+    expect(store[CACHE_KEYS.FILTER_TYPES]).toBeUndefined();
+  });
+
+  it('clears a non-array payload', () => {
+    store[CACHE_KEYS.FILTER_TYPES] = JSON.stringify({ types: ['video'] });
+    expect(loadFilterTypes()).toBeNull();
+    expect(store[CACHE_KEYS.FILTER_TYPES]).toBeUndefined();
+  });
+
+  it('clearFilterTypes removes the key', () => {
+    saveFilterTypes(['short']);
+    clearFilterTypes();
+    expect(loadFilterTypes()).toBeNull();
   });
 });
 

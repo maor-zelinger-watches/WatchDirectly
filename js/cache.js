@@ -17,6 +17,7 @@
  * - wd_top_cache    — Top This Week first-page snapshot {videos, total, cursor}
  * - wd_channels     — curated creator list {creators} (small, fully cached)
  * - wd_my_stars     — starred channel names, instant paint before server reconcile
+ * - wd_filter_types — persisted content-type chip selection ([] = "All")
  * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.)
  */
 
@@ -26,7 +27,13 @@ export const CACHE_KEYS = {
   TOP: 'wd_top_cache',
   CHANNELS: 'wd_channels',
   STARS: 'wd_my_stars',
+  FILTER_TYPES: 'wd_filter_types',
 };
+
+// The content-type values a saved selection may contain — must mirror the
+// chips in views.js. Unknown values in a stored payload mean it's stale or
+// tampered, so the whole payload is discarded and the default applies.
+const VALID_FILTER_TYPES = ['video', 'article', 'short'];
 
 // --- storage primitives — never throw -------------------------------
 
@@ -234,4 +241,42 @@ export function saveStarredChannels(channels) {
 
 export function clearStarredChannels() {
   remove(CACHE_KEYS.STARS);
+}
+
+// --- content-type filter selection (persists across sessions) --------
+
+/**
+ * Loads the saved content-type chip selection.
+ * Returns an array of type values, or null when nothing was ever saved (so
+ * the caller applies the default). A saved empty array [] is a real value —
+ * it means the user chose "All" — and is returned as-is, distinct from null.
+ * Corrupt payloads or ones with unknown type values are cleared and reported
+ * as absent so the default takes over.
+ */
+export function loadFilterTypes() {
+  const raw = read(CACHE_KEYS.FILTER_TYPES);
+  if (raw === null) return null;
+
+  try {
+    const stored = JSON.parse(raw);
+    if (!Array.isArray(stored) || stored.some(v => !VALID_FILTER_TYPES.includes(v))) {
+      remove(CACHE_KEYS.FILTER_TYPES);
+      return null;
+    }
+    // Normalize to canonical order and drop duplicates.
+    return VALID_FILTER_TYPES.filter(v => stored.includes(v));
+  } catch (e) {
+    remove(CACHE_KEYS.FILTER_TYPES);
+    return null;
+  }
+}
+
+/** Saves the content-type chip selection ([] = "All"). Best-effort. */
+export function saveFilterTypes(types) {
+  if (!Array.isArray(types)) return false;
+  return write(CACHE_KEYS.FILTER_TYPES, JSON.stringify(types));
+}
+
+export function clearFilterTypes() {
+  remove(CACHE_KEYS.FILTER_TYPES);
 }

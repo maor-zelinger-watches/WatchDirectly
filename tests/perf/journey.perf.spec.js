@@ -28,6 +28,10 @@ const mixed = (i) => (i % 4 === 0 ? 'article' : i % 4 === 1 ? 'short' : 'video')
  * the caller so the throttled variant can relax the ceilings.
  */
 async function runJourney(page, budgets) {
+  // Seed a saved "All" selection so Stage 3's Videos click selects (not
+  // deselects) — the default content-type filter is Videos + Articles.
+  await page.addInitScript(() => window.localStorage.setItem('wd_filter_types', '[]'));
+
   // Stage 1 — cold load: first card visible within budget.
   await page.goto('/', { waitUntil: 'commit' });
   await expect(page.locator('.media-card').first()).toBeVisible({ timeout: budgets.load });

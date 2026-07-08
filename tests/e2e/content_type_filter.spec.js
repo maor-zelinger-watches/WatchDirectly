@@ -33,6 +33,12 @@ const chip = (page, label) => page.locator('#category-chips .chip', { hasText: n
 const visibleCards = (page) => page.locator('.media-card:visible');
 const allCards = (page) => page.locator('.media-card');
 
+// A saved [] selection means the user previously chose "All". Seeding it gives
+// the interaction tests a stable "All" baseline that's independent of the
+// default (Videos + Articles) — the default itself is covered separately below.
+const seedAllBaseline = (page) =>
+  page.addInitScript(() => window.localStorage.setItem('wd_filter_types', '[]'));
+
 function mockRoutes(page, feedBody) {
   return page.route('**/macros/**', async (route) => {
     const url = route.request().url();
@@ -51,13 +57,13 @@ function mockRoutes(page, feedBody) {
 
 test.describe('Content-type filter chips (UI visibility)', () => {
   test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => window.localStorage.clear());
+    await seedAllBaseline(page);
     await mockRoutes(page, () => MOCK_FEED);
     await page.goto('/');
     await expect(allCards(page)).toHaveCount(4);
   });
 
-  test('renders the four content-type chips, All active by default', async ({ page }) => {
+  test('renders the four content-type chips, All active for a saved "All" selection', async ({ page }) => {
     await expect(chip(page, 'All')).toBeVisible();
     await expect(chip(page, 'Videos')).toBeVisible();
     await expect(chip(page, 'Articles')).toBeVisible();
@@ -174,6 +180,62 @@ test.describe('Content-type filter chips (UI visibility)', () => {
   });
 });
 
+test.describe('Content-type filter default & persistence', () => {
+  test('a first-time visitor defaults to Videos + Articles (Shorts hidden)', async ({ page }) => {
+    // Fresh context = empty localStorage; no init script (which would also
+    // re-run on reload and wipe the saved selection the next tests rely on).
+    await mockRoutes(page, () => MOCK_FEED);
+    await page.goto('/');
+    await expect(allCards(page)).toHaveCount(4);
+
+    await expect(chip(page, 'Videos')).toHaveClass(/chip--active/);
+    await expect(chip(page, 'Articles')).toHaveClass(/chip--active/);
+    await expect(chip(page, 'All')).not.toHaveClass(/chip--active/);
+    await expect(chip(page, 'Shorts')).not.toHaveClass(/chip--active/);
+
+    // The two videos + the article are visible; the short is hidden.
+    await expect(visibleCards(page)).toHaveCount(3);
+    await expect(page.locator('.media-card--short:visible')).toHaveCount(0);
+  });
+
+  test('the selection persists across a reload', async ({ page }) => {
+    await mockRoutes(page, () => MOCK_FEED);
+    await page.goto('/');
+    await expect(allCards(page)).toHaveCount(4);
+
+    // Narrow to just Videos, then reload — the choice must come back.
+    await chip(page, 'Articles').click(); // drop articles from the default
+    await expect(chip(page, 'Videos')).toHaveClass(/chip--active/);
+    await expect(chip(page, 'Articles')).not.toHaveClass(/chip--active/);
+    await expect(visibleCards(page)).toHaveCount(2);
+
+    await page.reload();
+    await expect(allCards(page)).toHaveCount(4);
+
+    await expect(chip(page, 'Videos')).toHaveClass(/chip--active/);
+    await expect(chip(page, 'Articles')).not.toHaveClass(/chip--active/);
+    await expect(chip(page, 'All')).not.toHaveClass(/chip--active/);
+    await expect(visibleCards(page)).toHaveCount(2);
+  });
+
+  test('choosing All persists as All across a reload', async ({ page }) => {
+    await mockRoutes(page, () => MOCK_FEED);
+    await page.goto('/');
+    await expect(allCards(page)).toHaveCount(4);
+
+    await chip(page, 'All').click();
+    await expect(chip(page, 'All')).toHaveClass(/chip--active/);
+    await expect(visibleCards(page)).toHaveCount(4);
+
+    await page.reload();
+    await expect(allCards(page)).toHaveCount(4);
+
+    await expect(chip(page, 'All')).toHaveClass(/chip--active/);
+    await expect(page.locator('.chip--active')).toHaveCount(1);
+    await expect(visibleCards(page)).toHaveCount(4);
+  });
+});
+
 test.describe('Content-type filter top-up (pull more when under 20)', () => {
   function pagedCatalog(items) {
     return (url) => {
@@ -208,7 +270,7 @@ test.describe('Content-type filter top-up (pull more when under 20)', () => {
     const items = Array.from({ length: 30 }, (_, i) =>
       mockItem(i, i % 10 === 2 || i % 10 === 7 ? 'article' : 'video'));
 
-    await page.addInitScript(() => window.localStorage.clear());
+    await seedAllBaseline(page);
     await mockRoutes(page, pagedCatalog(items));
     await page.goto('/');
     await expect(page.locator('.media-card')).toHaveCount(10);
@@ -225,7 +287,7 @@ test.describe('Content-type filter top-up (pull more when under 20)', () => {
     // more page to reach the 20 threshold — page 3 must NOT be rendered.
     const items = Array.from({ length: 30 }, (_, i) => mockItem(i, 'video'));
 
-    await page.addInitScript(() => window.localStorage.clear());
+    await seedAllBaseline(page);
     await mockRoutes(page, pagedCatalog(items));
     await page.goto('/');
     await expect(page.locator('.media-card')).toHaveCount(10);

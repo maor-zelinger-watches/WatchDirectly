@@ -21,6 +21,16 @@ that component's heading.
 
 ## Frontend
 
+### 1.14.0 — 2026-07-08
+- The content-type filter now defaults to **Videos + Articles** (Shorts hidden)
+  for a first-time visitor, and the selection **persists across sessions** in
+  localStorage (`wd_filter_types`). Whatever chips a user leaves selected come
+  back on their next visit; choosing **All** is remembered as All (stored as
+  `[]`, kept distinct from "never chose" so the default only applies to genuine
+  first-timers). Restored on chip render over the state default; saved on every
+  chip toggle. Corrupt or unknown-value payloads self-heal to the default, in
+  keeping with the rest of `cache.js`.
+
 ### 1.13.0 — 2026-07-08
 - Extended stale-while-revalidate caching to every tab, so navigating and
   refreshing paint instantly from localStorage and reconcile in the background

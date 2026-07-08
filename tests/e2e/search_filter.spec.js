@@ -71,6 +71,10 @@ const MOCK_CHANNELS = {
 
 test.describe('Search & Category Filter', () => {
   test.beforeEach(async ({ page }) => {
+    // Seed a saved "All" selection so these tests keep an All baseline —
+    // independent of the default content-type filter (Videos + Articles),
+    // which is covered in content_type_filter.spec.js.
+    await page.addInitScript(() => window.localStorage.setItem('wd_filter_types', '[]'));
     await page.route('**/macros/**', async (route) => {
       const url = route.request().url();
       if (url.includes('action=feed')) {

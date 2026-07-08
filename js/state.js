@@ -23,8 +23,10 @@ export const state = {
   expandedComments: new Set(),
   commentsCache: {},   // videoId -> { comments, tree } — prefetched comment data
   initialLoadComplete: false,
-  filter: { query: '', types: [] }, // types: content-type multi-select ('video'|'article'|'short');
-                                    // [] === All. Applied as pure CSS visibility, never a re-render.
+  filter: { query: '', types: ['video', 'article'] }, // types: content-type multi-select ('video'|'article'|'short');
+                                    // [] === All. Default is Videos + Articles; a saved selection from a
+                                    // prior session (cache.js loadFilterTypes) overrides this at setup.
+                                    // Applied as pure CSS visibility, never a re-render.
   searchIndex: null,        // videos available to search — seeded from memory/cache,
                             // grows as index chunks land (may be partial mid-build)
   searchIndexComplete: false, // true once the whole catalog is loaded (or restored
