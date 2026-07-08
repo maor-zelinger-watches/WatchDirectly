@@ -304,10 +304,14 @@ async function switchView(view) {
     sentinel.style.display = 'none';
     skeleton.style.display = '';
     try {
-      const data = await api.fetchTopWeek(50);
-      // Cache the list even if this switch is stale — reopening the tab
-      // then renders instantly. Only the DOM work below needs the guard.
+      const data = await api.fetchTopWeek(CONFIG.PAGE_SIZE);
+      // Keep the loaded list even if this switch is stale — reopening the tab
+      // renders it instantly and keeps paginating. Only the DOM work below
+      // needs the token guard.
       state.topVideos = data.videos || [];
+      state.topTotal = data.total || 0;
+      state.topCursor = data.next_cursor;
+      state.topHasMore = typeof data.next_cursor === 'string' && data.next_cursor !== '';
       // Don't freeze an empty result for the whole session. An empty list can
       // come from a transient hiccup or a refresh still in flight; leaving
       // topLoaded false lets reopening the tab refetch instead of sticking.
@@ -359,8 +363,10 @@ async function switchView(view) {
 }
 
 /**
- * Renders the Top This Week list (already fetched), honoring any active filter.
- * No infinite scroll — the weekly list is bounded.
+ * Renders the Top This Week list loaded so far, honoring any active filter.
+ * Cursor-paginated with infinite scroll (loadMoreTop appends further pages) —
+ * this full render is for tab switches and filter changes; scroll-in pages
+ * append without re-rendering what's already shown.
  */
 function renderTop() {
   const container = document.getElementById('feed-container');
@@ -368,22 +374,86 @@ function renderTop() {
   const empty = document.getElementById('feed-empty');
   if (!container) return;
 
-  sentinel.style.display = 'none';
-
+  const filtered = isFilterActive();
   let list = state.topVideos || [];
-  if (isFilterActive()) list = filterVideos(list, activeFilter());
+  if (filtered) list = filterVideos(list, activeFilter());
 
   state.renderToken++;
   container.innerHTML = '';
   state.expandedComments.clear();
   renderList(container, list);
 
-  empty.querySelector('p').textContent = isFilterActive()
+  empty.querySelector('p').textContent = filtered
     ? 'No videos match your search.'
     : 'No videos yet this week. Check back soon!';
   empty.style.display = list.length === 0 ? '' : 'none';
 
+  // Infinite scroll: reveal the sentinel while more ranked pages remain and no
+  // search query is narrowing the loaded set. A query pauses pagination — we
+  // just filter what's already loaded — exactly like the Latest feed.
+  sentinel.style.display = (state.topHasMore && !filtered) ? '' : 'none';
+
   prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
+}
+
+/**
+ * Loads and appends the next page of the Top This Week ranking. The list is
+ * cursor-paginated and vote-ranked server-side; new cards append in rank order
+ * (no re-render of what's already shown). An active search query pauses this —
+ * renderTop filters the loaded set instead — mirroring the Latest feed.
+ *
+ * Exported so the shared infinite-scroll observer in app.js can drive it when
+ * the Top tab is active.
+ */
+export async function loadMoreTop() {
+  if (state.view !== 'top' || state.topLoading || !state.topHasMore || isFilterActive()) return;
+  if (!state.topCursor) { state.topHasMore = false; return; }
+
+  const token = viewToken;
+  state.topLoading = true;
+  const sentinel = document.getElementById('load-more-container');
+
+  try {
+    const data = await api.fetchTopWeek(CONFIG.PAGE_SIZE, state.topCursor);
+    // A tab switch landed while we waited — don't paint into a view we've left.
+    if (token !== viewToken || state.view !== 'top') return;
+
+    state.topTotal = data.total || state.topTotal;
+    state.topCursor = data.next_cursor;
+    state.topHasMore = typeof data.next_cursor === 'string' && data.next_cursor !== '';
+
+    // Dedupe against what's already loaded: a vote that reorders the ranking
+    // mid-scroll can nudge one item across the page boundary.
+    const seen = new Set((state.topVideos || []).map(v => v.video_id));
+    const fresh = (data.videos || []).filter(v => v.video_id && !seen.has(v.video_id));
+    state.topVideos = (state.topVideos || []).concat(fresh);
+
+    // Append only when a search filter isn't currently overriding the render.
+    if (!isFilterActive() && fresh.length) {
+      const container = document.getElementById('feed-container');
+      if (container) renderList(container, fresh);
+    }
+    prefetchComments(fresh);
+  } catch (e) {
+    console.error('Failed to load more top videos:', e);
+    // Leave what's shown in place; a later scroll retries.
+  } finally {
+    state.topLoading = false;
+    if (token === viewToken && state.view === 'top') {
+      const show = state.topHasMore && !isFilterActive();
+      if (sentinel) sentinel.style.display = show ? '' : 'none';
+      // The observer only fires on intersection CHANGES. If the sentinel is
+      // still within the root margin after this append (a tall viewport, or a
+      // short page), nudge the next load manually — the same guard the feed uses.
+      if (show && sentinel) {
+        requestAnimationFrame(() => {
+          if (state.view !== 'top' || !state.topHasMore || isFilterActive() || state.topLoading) return;
+          const rect = sentinel.getBoundingClientRect();
+          if (rect.top > 0 && rect.top <= window.innerHeight + 600) loadMoreTop();
+        });
+      }
+    }
+  }
 }
 
 /**

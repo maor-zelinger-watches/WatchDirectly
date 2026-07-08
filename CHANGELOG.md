@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.10.0 — 2026-07-08
+- **Top This Week** now infinite-scrolls instead of showing a fixed first
+  slice. The tab was capped at a single 50-item response; because votes are
+  sparse the ranking degrades to reverse-chronological, so that cap only ever
+  reached the newest ~2 days of a busy week. The tab now paginates by cursor
+  like the Latest feed — `fetchTopWeek` takes the previous response's
+  `next_cursor`, `switchView` loads the first page and `loadMoreTop` appends
+  the rest in rank order as you scroll (new `state.topCursor` / `topLoading` /
+  `topHasMore` / `topTotal`). The shared infinite-scroll observer routes to the
+  active tab's loader. A search query still pauses pagination and filters the
+  loaded set, exactly as on Latest; appended cards inherit the content-type
+  chips' CSS visibility automatically. Requires backend ≥ 1.5.0 for the deep
+  pages; against an older backend the tab simply shows the first page as before.
+
 ### 1.9.0 — 2026-07-08
 - New **Channels** feed tab (after Favorites): a three-up grid of every curated
   creator, each card showing the channel's avatar, its name (linking to the
@@ -171,6 +185,23 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.5.0 — 2026-07-08
+- `handleTopWeek` is now cursor-paginated, mirroring `getVideos`. It still
+  ranks the rolling 7-day window by upvotes (newest, then `video_id`, as
+  deterministic tiebreaks — the tiebreak is what keeps a cursor from skipping
+  or repeating items whose votes and timestamps collide), but it now accepts
+  `page`/`cursor` and returns a `next_cursor`. Early no-cursor pages are served
+  from the cached ranked head (still 50 rows, 5-min TTL); deeper pages resume
+  strictly after the `(vote_count, published_at, video_id)` position the client
+  last saw via a live sorted scan — so the WHOLE week is reachable by scrolling
+  even though the cache only holds the head, without materializing a second
+  sheet or re-scanning per request for the common early pages. A vote that
+  reorders the window mid-scroll can at worst nudge one item across a page
+  boundary (the client dedupes), never skip a page the way an offset would.
+  Backwards compatible: a no-cursor request (e.g. an older client's
+  `limit=50`) returns the first page exactly as before, now with an ignored
+  `next_cursor` field alongside.
 
 ### 1.4.0 — 2026-07-08
 - Each crawl now refreshes the live YouTube view count for every video still in

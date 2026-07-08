@@ -510,4 +510,59 @@ describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
     expect(reads()).toBe(2);                            // no extra scan
     expect(small.videos.length).toBe(50);
   });
+
+  it('pages through the entire week by cursor with no gaps or duplicates', () => {
+    // 25 items, each a distinct vote count so the rank order is total and
+    // deterministic; a page size of 10 forces three cursor-linked pages.
+    const rows = [];
+    for (let i = 0; i < 25; i++) rows.push(['v' + i, 'https://x/' + i, daysAgo(1), 100 - i, 0, 'Chan']);
+    const { be } = setup(rows);
+
+    const seen = [];
+    let cursor = '';
+    for (let guard = 0; guard < 10; guard++) {
+      const res = be.handleTopWeek({ limit: 10, cursor });
+      expect(res.total).toBe(25);
+      seen.push(...res.videos.map((v) => v.video_id));
+      cursor = res.next_cursor;
+      if (!cursor) break;
+    }
+    // The full ranked order, once each: v0 (100 votes) .. v24 (76 votes).
+    expect(seen).toEqual(rows.map((r) => r[0]));
+    expect(new Set(seen).size).toBe(25);
+  });
+
+  it('reaches the oldest end of the week when votes are sparse (the reported bug)', () => {
+    // 30 unvoted items spanning the week, ~5h apart, newest first. With no
+    // votes the ranking is pure recency, so page 1 is only the newest slice —
+    // the ~6-day-old items are reachable ONLY by paging, which is exactly what
+    // a single capped response could never surface.
+    const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+    const rows = [];
+    for (let i = 0; i < 30; i++) rows.push(['n' + i, 'https://x/' + i, hoursAgo(i * 5), 0, 0, 'Chan']);
+    const { be } = setup(rows);
+
+    const page1 = be.handleTopWeek({ limit: 10 });
+    expect(page1.videos.map((v) => v.video_id))
+      .toEqual(['n0', 'n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7', 'n8', 'n9']);
+
+    let res = page1;
+    const ids = [...page1.videos.map((v) => v.video_id)];
+    while (res.next_cursor) {
+      res = be.handleTopWeek({ limit: 10, cursor: res.next_cursor });
+      ids.push(...res.videos.map((v) => v.video_id));
+    }
+    // The oldest item (n29, ~6 days old) is only reachable by paginating.
+    expect(ids.length).toBe(30);
+    expect(new Set(ids).size).toBe(30);
+    expect(ids[ids.length - 1]).toBe('n29');
+  });
+
+  it('a malformed cursor is ignored — serves the first page rather than erroring', () => {
+    const rows = [['a', 'https://a', daysAgo(1), 5, 0, 'Chan'], ['b', 'https://b', daysAgo(2), 3, 0, 'Chan']];
+    const { be } = setup(rows);
+    const res = be.handleTopWeek({ limit: 10, cursor: 'not-a-real-cursor' });
+    expect(res.status).toBe('ok');
+    expect(res.videos.map((v) => v.video_id)).toEqual(['a', 'b']);
+  });
 });

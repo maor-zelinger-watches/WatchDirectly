@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -1438,10 +1438,64 @@ function invalidateTopWeek() {
 }
 
 /**
- * Returns videos published in the last 7 days, ranked by upvotes
- * (most-voted first, newest as the tiebreak). When votes are sparse
- * this gracefully degrades to the week's videos in reverse-chron order,
- * so the tab is never empty.
+ * Total order for Top This Week: vote_count descending, then published_at
+ * descending, then video_id descending as a deterministic tiebreak. The
+ * tiebreak matters for cursor pagination — without it two items with equal
+ * votes and equal timestamps could swap between requests, letting a cursor
+ * skip or repeat them (the same reason compareVideos carries an id tiebreak).
+ */
+function compareTopWeek(a, b) {
+  var av = Number(a.vote_count) || 0;
+  var bv = Number(b.vote_count) || 0;
+  if (bv !== av) return bv - av;
+  var diff = pubTime(b) - pubTime(a);
+  if (diff !== 0) return diff;
+  var aId = String(a.video_id || '');
+  var bId = String(b.video_id || '');
+  return aId < bId ? 1 : (aId > bId ? -1 : 0);
+}
+
+/** Opaque cursor for the position AFTER this video in the top-week order. */
+function topCursorFor(video) {
+  return (Number(video.vote_count) || 0) + '|' +
+    new Date(pubTime(video)).toISOString() + '|' + video.video_id;
+}
+
+/** Parses a top-week cursor "votes|iso|id" into its parts, or null if malformed. */
+function parseTopCursor(cursor) {
+  var i1 = cursor.indexOf('|');
+  if (i1 === -1) return null;
+  var i2 = cursor.indexOf('|', i1 + 1);
+  if (i2 === -1) return null;
+  var votes = Number(cursor.slice(0, i1));
+  var time = new Date(cursor.slice(i1 + 1, i2)).getTime();
+  if (isNaN(votes) || isNaN(time)) return null;
+  // video_id is the remainder — it never itself contains '|' (YouTube ids and
+  // web-safe base64 article ids are alphanumeric), so this slice is exact.
+  return { votes: votes, time: time, id: String(cursor.slice(i2 + 1)) };
+}
+
+/** True if `video` sorts strictly AFTER cursor position `c` in top-week order. */
+function topAfterCursor(video, c) {
+  var vv = Number(video.vote_count) || 0;
+  if (vv !== c.votes) return vv < c.votes;
+  var vt = pubTime(video);
+  if (vt !== c.time) return vt < c.time;
+  return String(video.video_id || '') < c.id;
+}
+
+/**
+ * Returns videos published in the last 7 days, ranked by upvotes (most-voted
+ * first, newest then video_id as tiebreaks). When votes are sparse this
+ * gracefully degrades to the week's videos in reverse-chron order, so the tab
+ * is never empty.
+ *
+ * Cursor-paginated exactly like getVideos: early no-cursor pages are served
+ * from the cached ranked head; deeper pages resume strictly after the
+ * (vote_count, published_at, video_id) position the client last saw. So the
+ * WHOLE week is reachable by scrolling even though the cache only holds the
+ * head — with sparse votes the order is reverse-chron, so paging simply walks
+ * back through the week instead of stopping at the newest cap.
  */
 function handleTopWeek(params) {
   // Read-only by design. The Videos sheet is kept fresh by the feed request
@@ -1451,14 +1505,30 @@ function handleTopWeek(params) {
   // unlike the feed the top-week tab has no cached fallback, so a slow crawl
   // surfaced to the user as an outright failure.
   var limit = parseInt(params.limit) || 50;
+  var page = parseInt(params.page) || 1;
+  var cursor = params.cursor || '';
+  var start = (page - 1) * limit;
 
-  // Fast path: serve the ranked window from cache and skip the full sheet scan
-  // + sort. Only usable when the cached slice can satisfy the request — it holds
-  // at least `limit` rows, or it already holds the entire week (fewer rows than
-  // the stored cap). A larger request falls through to a live scan below.
-  var cached = readTopWeek();
-  if (cached && (limit <= cached.videos.length || cached.videos.length >= cached.total)) {
-    return { status: 'ok', videos: cached.videos.slice(0, limit), total: cached.total };
+  // Fast path: serve early no-cursor pages from the cached ranked head, skipping
+  // the full sheet scan + sort. Cursor requests always take the live path —
+  // resolving an arbitrary cursor position needs the whole sorted window.
+  if (!cursor && start + limit <= TOP_WEEK_CACHE_COUNT) {
+    var cached = readTopWeek();
+    // The head can answer iff the window fits inside it — or it already holds
+    // the ENTIRE week (fewer rows than the cap), in which case a short/empty
+    // slice is the true answer.
+    if (cached && (start + limit <= cached.videos.length || cached.videos.length >= cached.total)) {
+      var fromCache = cached.videos.slice(start, start + limit);
+      return {
+        status: 'ok',
+        videos: fromCache,
+        total: cached.total,
+        page: page,
+        next_cursor: (fromCache.length > 0 && start + fromCache.length < cached.total)
+          ? topCursorFor(fromCache[fromCache.length - 1])
+          : '',
+      };
+    }
   }
 
   var cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -1468,10 +1538,7 @@ function handleTopWeek(params) {
     return !isNaN(t) && t >= cutoff;
   });
 
-  recent.sort(function(a, b) {
-    if (b.vote_count !== a.vote_count) return b.vote_count - a.vote_count;
-    return new Date(b.published_at) - new Date(a.published_at);
-  });
+  recent.sort(compareTopWeek);
 
   // Read-through populate for the next caller. Best-effort — an oversized value
   // or cache hiccup just means the next request scans the sheet again.
@@ -1484,10 +1551,28 @@ function handleTopWeek(params) {
     /* cache write is optional */
   }
 
+  // Cursor pagination: resume strictly after the (vote_count, published_at,
+  // video_id) position the client last saw. Unlike a page offset, a vote that
+  // reorders the window mid-scroll can't make forward paging skip a whole page
+  // — at worst it nudges one item across the boundary, which the client dedupes.
+  if (cursor) {
+    var c = parseTopCursor(cursor);
+    if (c) {
+      start = 0;
+      while (start < recent.length && !topAfterCursor(recent[start], c)) start++;
+    }
+  }
+
+  var paged = recent.slice(start, start + limit);
+
   return {
     status: 'ok',
-    videos: recent.slice(0, limit),
+    videos: paged,
     total: recent.length,
+    page: page,
+    next_cursor: (paged.length > 0 && start + paged.length < recent.length)
+      ? topCursorFor(paged[paged.length - 1])
+      : '',
   };
 }
 

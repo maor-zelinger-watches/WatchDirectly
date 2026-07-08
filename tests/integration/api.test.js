@@ -235,6 +235,21 @@ describe('API Client', () => {
       expect(result.videos).toHaveLength(2);
       expect(result.videos[0].vote_count).toBe(9);
     });
+
+    it('appends the cursor param when resuming a later page', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', videos: [], total: 0, next_cursor: '' }),
+      });
+
+      const cursor = '8|2026-07-01T00:00:00.000Z|vid9';
+      await api.fetchTopWeek(10, cursor);
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${MOCK_APPS_SCRIPT_URL}?action=topWeek&limit=10&cursor=${encodeURIComponent(cursor)}`,
+        expect.any(Object)
+      );
+    });
   });
 
   describe('vote', () => {

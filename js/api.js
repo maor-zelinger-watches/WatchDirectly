@@ -140,13 +140,20 @@ export function createApiClient(baseUrl) {
     },
 
     /**
-     * Fetches the top videos of the past week, ranked by upvotes.
+     * Fetches a page of the Top This Week ranking (last 7 days, vote-ranked).
      *
-     * @param {number} [limit=50] - Max videos to return
-     * @returns {Promise<{videos: Object[], total: number}>}
+     * Cursor-paginated like fetchFeed: pass the previous response's
+     * `next_cursor` to resume strictly after the last ranked item seen; omit
+     * it for the first page. The server returns `next_cursor` on every page
+     * ('' once the end of the week is reached).
+     *
+     * @param {number} [limit=50] - Max videos to return in this page
+     * @param {string} [cursor=''] - "votes|published_at|video_id" of the last item seen
+     * @returns {Promise<{videos: Object[], total: number, next_cursor?: string}>}
      */
-    async fetchTopWeek(limit = 50) {
-      const data = await get(`action=topWeek&limit=${limit}`);
+    async fetchTopWeek(limit = 50, cursor = '') {
+      const cursorParam = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+      const data = await get(`action=topWeek&limit=${limit}${cursorParam}`);
       if (Array.isArray(data.videos)) data.videos = dedupeVideos(data.videos);
       return data;
     },

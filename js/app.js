@@ -34,7 +34,7 @@ import { loadStarsFromStorage, clearStarMarkings, setOnStarsChanged } from './st
 import { loadMyVotesAndStars } from './bootstrap.js';
 import { setupFullscreenKeys } from './fullscreen.js';
 import { setupSinglePlay } from './single-play.js';
-import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged } from './views.js';
+import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged, loadMoreTop } from './views.js';
 
 // The Starred view repaints when a star lands or the server reconciles —
 // registered here (not in stars.js) so stars.js stays view-agnostic.
@@ -539,7 +539,12 @@ function setupInfiniteScroll() {
 
   const scrollObserver = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
-      if (entry.isIntersecting && !state.loading && state.hasMore) {
+      if (!entry.isIntersecting) return;
+      // Route to the active feed's loader. Each self-guards (loading / hasMore /
+      // view / filter), so a stray fire on the wrong tab is a harmless no-op.
+      if (state.view === 'top') {
+        loadMoreTop();
+      } else if (!state.loading && state.hasMore) {
         loadNextPage();
       }
     });

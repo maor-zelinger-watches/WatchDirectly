@@ -38,8 +38,14 @@ export const state = {
   prefetchToken: 0,         // invalidates in-flight refills when pagination resets
   pendingFetchPage: 0,      // page loadNextPage is fetching on demand (0 = none)
   revalidating: false,      // revalidateFeed owns the DOM — pagination pauses
-  topVideos: null,          // cached Top This Week list
-  topLoaded: false,         // whether the top list has been fetched
+  topVideos: null,          // Top This Week list loaded so far (accumulates as you scroll)
+  topLoaded: false,         // whether the first top page has been fetched
+  topCursor: undefined,     // server cursor after the last rendered top page:
+                            // string = resume here ('' = end of the week),
+                            // undefined = not loaded yet
+  topLoading: false,        // prevents concurrent top-page fetches
+  topHasMore: false,        // whether more ranked pages remain to load
+  topTotal: 0,              // total videos in the 7-day window (from the server)
   myVotes: new Set(),       // video IDs the signed-in user has upvoted
   myStars: new Set(),       // channel names the signed-in user has starred
   hostsByChannel: {},       // channel_name -> host, from creators.json (search matching)
