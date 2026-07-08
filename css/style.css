@@ -73,6 +73,7 @@
   /* Layout */
   --max-width: 760px;
   --header-height: 52px;
+  --footer-height: 52px;
 
   /* Borders */
   --radius-sm: 4px;
@@ -119,6 +120,9 @@ body {
   background-color: var(--bg-canvas);
   min-height: 100vh;
   overflow-x: hidden;
+  /* Reserve room for the fixed footer so page content ends above it and the
+     footer never overlaps the last cards / legal sections. */
+  padding-bottom: var(--footer-height);
 }
 
 a {
@@ -227,45 +231,6 @@ img {
   color: var(--text-primary);
 }
 
-/* Header navigation links */
-.header__nav {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-  overflow-x: auto;
-  scrollbar-width: none;
-  -webkit-overflow-scrolling: touch;
-}
-
-.header__nav::-webkit-scrollbar {
-  display: none;
-}
-
-.header__nav-link {
-  flex-shrink: 0;
-  white-space: nowrap;
-  font-size: var(--fs-sm);
-  color: var(--text-muted);
-  text-decoration: none;
-  transition: color var(--transition-fast);
-}
-
-.header__nav-link:hover {
-  color: var(--text-secondary);
-  text-decoration: none;
-}
-
-.header__nav-link--active {
-  color: var(--text-secondary);
-}
-
-/* Version badge — filled from CONFIG.APP_VERSION at boot */
-.header__version {
-  font-size: var(--fs-xs);
-  color: var(--text-muted);
-  opacity: 0.7;
-}
-
 .header__title-link {
   text-decoration: none;
   color: inherit;
@@ -276,6 +241,93 @@ img {
 }
 
 /* ============================================================
+   FOOTER
+   Fixed to the viewport bottom, mirroring the sticky header.
+   Holds the site nav (moved out of the header) and a copyright
+   line whose year is set at runtime. Sits below the fullscreen
+   overlay (z-index 300) so it hides during fullscreen playback.
+   ============================================================ */
+
+.footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: var(--bg-header);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+  height: var(--footer-height);
+}
+
+.footer__inner {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 var(--sp-4);
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.footer__nav {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.footer__nav::-webkit-scrollbar {
+  display: none;
+}
+
+.footer__nav-link {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+.footer__nav-link:hover {
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.footer__nav-link--active {
+  color: var(--text-secondary);
+}
+
+/* Copyright + version, right-aligned to mirror the nav */
+.footer__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.footer__copyright {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Version badge — filled from CONFIG.APP_VERSION at boot */
+.footer__version {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+/* ============================================================
    MAIN LAYOUT
    ============================================================ */
 
@@ -283,7 +335,9 @@ img {
   max-width: var(--max-width);
   margin: 0 auto;
   padding: var(--sp-3) 0;
-  min-height: calc(100vh - var(--header-height));
+  /* Viewport minus both fixed bars keeps a short page from scrolling; the
+     footer's own space comes from body's padding-bottom. */
+  min-height: calc(100vh - var(--header-height) - var(--footer-height));
 }
 
 

@@ -21,6 +21,21 @@ that component's heading.
 
 ## Frontend
 
+### 1.8.0 — 2026-07-08
+- Added a sticky footer, fixed to the bottom of the viewport, mirroring the
+  existing sticky header (same blur/border, `z-index: 100` so it tucks under the
+  fullscreen overlay). The Terms/Privacy nav — and the version badge on the home
+  page — moved out of the header and into the footer, leaving the header with just
+  the logo and auth button. Applies to `index.html`, `terms.html`, and
+  `privacy.html`; active-link highlighting is preserved on the legal pages.
+- The footer carries a copyright line whose year is set at runtime from
+  `new Date().getFullYear()`, so it rolls over automatically each January (a small
+  inline script sets it, since the legal pages don't load `app.js`).
+- Page content now reacts to the footer instead of hiding behind it: `<body>`
+  gains `padding-bottom: var(--footer-height)` and `.main`'s `min-height` subtracts
+  both bars, so the last card / legal section always ends above the footer and a
+  short page gains no spurious scroll. Removed the now-dead `.header__nav*` CSS.
+
 ### 1.7.1 — 2026-07-08
 - Toaster notifications now linger 30% longer (3.0s → 3.9s) so messages are
   easier to catch before they fade. The `toastOut` fade animation delay moves in

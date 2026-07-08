@@ -23,10 +23,6 @@
         <span class="header__logo-icon">⌚</span>
         <a href="index.html" class="header__title-link"><h1 class="header__title">WatchDirectly</h1></a>
       </div>
-      <nav class="header__nav" id="header-nav">
-        <a href="terms.html" class="header__nav-link">Terms</a>
-        <a href="privacy.html" class="header__nav-link header__nav-link--active">Privacy</a>
-      </nav>
     </div>
   </header>
 
@@ -117,6 +113,20 @@
       </section>
     </article>
   </main>
+
+  <!-- ===== FOOTER ===== -->
+  <footer class="footer" id="footer">
+    <div class="footer__inner">
+      <nav class="footer__nav" id="footer-nav">
+        <a href="terms.html" class="footer__nav-link">Terms</a>
+        <a href="privacy.html" class="footer__nav-link footer__nav-link--active">Privacy</a>
+      </nav>
+      <div class="footer__meta">
+        <span class="footer__copyright">© <span id="footer-year">2026</span> WatchDirectly</span>
+      </div>
+    </div>
+  </footer>
+  <script>document.getElementById('footer-year').textContent = new Date().getFullYear();</script>
 
 </body>
 </html>
