@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -423,10 +423,32 @@ function fetchAllFeeds() {
 }
 
 /**
+ * Extracts the registrable host from a URL for use as a favicon lookup key
+ * (e.g. 'https://www.wornandwound.com/article1' -> 'wornandwound.com').
+ * Strips a leading 'www.' so the favicon service gets the bare domain.
+ * @param {string} url
+ * @returns {string} Hostname, or '' if the URL can't be parsed.
+ */
+function extractDomain(url) {
+  if (!url) return '';
+  var match = String(url).match(/^https?:\/\/([^/?#]+)/i);
+  if (!match) return '';
+  return match[1].replace(/^www\./i, '');
+}
+
+/**
  * Serves the curated creator list (name, host, url, avatar, etc.) from the
  * CHANNELS sheet for the frontend's Channels tab and search host-matching —
  * the same sheet crawlAllFeeds reads to know which feeds to poll. Disabled
  * channels are omitted so a paused feed doesn't still show up as browsable.
+ *
+ * News/article outlets have no YouTube channel page to scrape an avatar
+ * from, so a channel with no `avatar` set and a non-YouTube `url` falls back
+ * to that site's favicon (via Google's public s2 favicon service) instead of
+ * shipping blank and relying on the Channels-tab monogram. YouTube channels
+ * are left alone here — their avatar is populated once via
+ * populateChannelAvatars, and a generic YouTube favicon would be a worse
+ * fallback than the monogram.
  */
 function handleGetChannels() {
   var sheet = getSheet('CHANNELS');
@@ -447,6 +469,14 @@ function handleGetChannels() {
     for (var j = 0; j < headers.length; j++) {
       channel[headers[j]] = row[j];
     }
+
+    if (!channel.avatar && channel.url) {
+      var domain = extractDomain(channel.url);
+      if (domain && !/(^|\.)youtube\.com$/i.test(domain) && domain !== 'youtu.be') {
+        channel.avatar = 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=128';
+      }
+    }
+
     channels.push(channel);
   }
 

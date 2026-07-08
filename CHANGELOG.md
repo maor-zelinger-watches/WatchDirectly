@@ -211,6 +211,17 @@ that component's heading.
 
 ## Backend
 
+### 1.7.0 — 2026-07-08
+- `getChannels` now falls back to a favicon for news/article outlets that have
+  no `avatar` set — those channels have no YouTube channel page to scrape a
+  logo from the way `populateChannelAvatars` did for video creators. When a
+  channel's `avatar` is blank and its `url` isn't a `youtube.com`/`youtu.be`
+  link, the new `extractDomain` helper pulls the registrable domain and builds
+  `https://www.google.com/s2/favicons?domain=<domain>&sz=128` (Google's public
+  s2 favicon service). YouTube channels are left alone — a generic YouTube
+  favicon would be a worse fallback than the Channels-tab monogram they
+  already get.
+
 ### 1.6.0 — 2026-07-08
 - New `getChannels` action serves the curated creator list straight from the
   CHANNELS sheet — the same sheet `crawlAllFeeds` already reads to know which

@@ -88,6 +88,7 @@ function loadBackend(mocks = {}) {
     'verifyGoogleToken', 'toIsoDate', 'handleAddComment', 'decodeHtmlEntities',
     'handleFeed', 'handleBootstrap', 'kickoffRefresh',
     'getVideos', 'updateVoteCount', 'updateCommentCount', 'handleTopWeek',
+    'handleGetChannels', 'extractDomain',
   ];
   const factory = new Function(...Object.keys(globals), `${SRC}\nreturn { ${names.join(', ')} };`);
   return factory(...Object.values(globals));
@@ -564,5 +565,83 @@ describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
     const res = be.handleTopWeek({ limit: 10, cursor: 'not-a-real-cursor' });
     expect(res.status).toBe('ok');
     expect(res.videos.map((v) => v.video_id)).toEqual(['a', 'b']);
+  });
+});
+
+describe('extractDomain (favicon lookup key)', () => {
+  it('strips scheme, path, and a leading www.', () => {
+    const { extractDomain } = loadBackend();
+    expect(extractDomain('https://www.wornandwound.com/article1?x=1')).toBe('wornandwound.com');
+  });
+
+  it('leaves a bare domain (no www.) untouched', () => {
+    const { extractDomain } = loadBackend();
+    expect(extractDomain('https://hodinkee.com')).toBe('hodinkee.com');
+  });
+
+  it('is empty-safe', () => {
+    const { extractDomain } = loadBackend();
+    expect(extractDomain('')).toBe('');
+    expect(extractDomain(undefined)).toBe('');
+    expect(extractDomain('not a url')).toBe('');
+  });
+});
+
+describe('handleGetChannels (Channels tab + search host-matching data)', () => {
+  const HEADERS = ['channel_name', 'host', 'url', 'avatar', 'enabled'];
+
+  function channelsSheet(rows) {
+    return blankSheet({ getDataRange: () => ({ getValues: () => [HEADERS, ...rows] }) });
+  }
+
+  it('omits disabled channels', () => {
+    const rows = [
+      ['A', 'Host A', 'https://a.com', '', true],
+      ['B', 'Host B', 'https://b.com', '', false],
+    ];
+    const be = loadBackend({ sheet: channelsSheet(rows) });
+    const res = be.handleGetChannels();
+    expect(res.channels.map((c) => c.channel_name)).toEqual(['A']);
+  });
+
+  it('treats a missing enabled column as enabled', () => {
+    const sheet = blankSheet({
+      getDataRange: () => ({ getValues: () => [
+        ['channel_name', 'host', 'url', 'avatar'],
+        ['A', 'Host A', 'https://a.com', ''],
+      ] }),
+    });
+    const be = loadBackend({ sheet });
+    expect(be.handleGetChannels().channels).toHaveLength(1);
+  });
+
+  it('leaves an already-set avatar untouched', () => {
+    const rows = [['A', 'Host A', 'https://a.com', 'https://cdn.example.com/a.png', true]];
+    const be = loadBackend({ sheet: channelsSheet(rows) });
+    expect(be.handleGetChannels().channels[0].avatar).toBe('https://cdn.example.com/a.png');
+  });
+
+  it('falls back to a favicon for a non-YouTube channel with no avatar', () => {
+    const rows = [['Worn & Wound', 'Various', 'https://www.wornandwound.com', '', true]];
+    const be = loadBackend({ sheet: channelsSheet(rows) });
+    expect(be.handleGetChannels().channels[0].avatar)
+      .toBe('https://www.google.com/s2/favicons?domain=wornandwound.com&sz=128');
+  });
+
+  it('does NOT add a favicon fallback for a YouTube channel with no avatar', () => {
+    const rows = [
+      ['Nico Leonard', 'Nico Leonard', 'https://www.youtube.com/@NicoLeonard', '', true],
+      ['Some Short Link', 'Host', 'https://youtu.be/abc123', '', true],
+    ];
+    const be = loadBackend({ sheet: channelsSheet(rows) });
+    const channels = be.handleGetChannels().channels;
+    expect(channels[0].avatar).toBe('');
+    expect(channels[1].avatar).toBe('');
+  });
+
+  it('leaves avatar blank when there is no url to derive a favicon from', () => {
+    const rows = [['A', 'Host A', '', '', true]];
+    const be = loadBackend({ sheet: channelsSheet(rows) });
+    expect(be.handleGetChannels().channels[0].avatar).toBe('');
   });
 });
