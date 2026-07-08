@@ -237,13 +237,6 @@ export async function paintMetrics(page) {
   );
 }
 
-/** Times an async interaction in wall-clock ms. */
-export async function timed(fn) {
-  const t0 = Date.now();
-  const value = await fn();
-  return { ms: Date.now() - t0, value };
-}
-
 /** All rendered card ids, in DOM order. */
 export async function cardIds(page) {
   return page.locator('.media-card[data-video-id]').evaluateAll((cards) => cards.map((c) => c.dataset.videoId));

@@ -177,12 +177,9 @@ let creatorsPromise = null;
 export function loadCreators() {
   if (state.creators) return Promise.resolve(state.creators);
   if (!creatorsPromise) {
-    creatorsPromise = fetch('./creators.json')
-      .then(r => {
-        if (!r.ok) throw new Error(`creators.json ${r.status}`);
-        return r.json();
-      })
-      .then(creators => {
+    creatorsPromise = api.fetchChannels()
+      .then(data => {
+        const creators = data.channels || [];
         state.creators = creators;
         const hosts = {};
         for (const c of creators) {

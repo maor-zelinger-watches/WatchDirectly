@@ -21,6 +21,17 @@ that component's heading.
 
 ## Frontend
 
+### 1.12.0 — 2026-07-08
+- Removed `creators.json`: the Channels tab and search's host-name matching now
+  fetch the curated creator list from the backend's new `getChannels` action
+  (requires backend ≥ 1.6.0) instead of a static JSON file shipped with the
+  frontend. `loadCreators()` calls `api.fetchChannels()` in place of
+  `fetch('./creators.json')`; the shape consumed by `createChannelCard` and the
+  host map is unchanged, so no other frontend code moved. Keeping creator
+  metadata (host, avatar, focus, etc.) in the same CHANNELS sheet the backend
+  already reads for crawling means one source of truth instead of two that
+  could drift.
+
 ### 1.11.0 — 2026-07-08
 - Nebula-style feed grid: the video/article feed now tiles up to **three across
   on desktop** (two on tablet, one on mobile) instead of a single column of
@@ -200,6 +211,16 @@ that component's heading.
 
 ## Backend
 
+### 1.6.0 — 2026-07-08
+- New `getChannels` action serves the curated creator list straight from the
+  CHANNELS sheet — the same sheet `crawlAllFeeds` already reads to know which
+  feeds to poll — so the frontend no longer needs its own copy in
+  `creators.json`. Returns every enabled row as an object keyed by column
+  header (`channel_name`, `host`, `url`, `avatar`, etc.), skipping disabled
+  channels the same way the crawler does. A one-time `populateChannelAvatars`
+  in `Setup.gs` backfills the sheet's new `avatar` column from the data that
+  used to live in `creators.json`.
+
 ### 1.5.0 — 2026-07-08
 - `handleTopWeek` is now cursor-paginated, mirroring `getVideos`. It still
   ranks the rolling 7-day window by upvotes (newest, then `video_id`, as
@@ -290,6 +311,27 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.0 — 2026-07-08
+- Removed the `resolve-channels` and `fetch-avatars` maintenance scripts and
+  their npm scripts — both existed only to maintain `creators.json`, which is
+  gone now that creator metadata lives in the CHANNELS sheet (see Frontend
+  1.12.0 / Backend 1.6.0).
+- Playwright config hardening: CI now retries flaky live/API-backed suites
+  (`retries: 2`) while local runs stay at 0 so a flake is seen, not silently
+  retried away; CI pins to a single worker for reproducible timing while dev
+  machines parallelize freely; added `forbidOnly` on CI to catch an
+  accidentally-committed `test.only`; trace/screenshot capture is now
+  failure-only to keep local runs cheap; and the HTML report now writes
+  outside `outputDir` so the reporter's own directory wipe can't clobber
+  trace/video artifacts. The perf project explicitly pins `retries: 0` — a
+  retried run is a fresh timing sample, not the same test.
+- `tests/perf/helpers.js`: removed the `timed()` wall-clock stopwatch helper.
+  Perf assertions now express a budget as a native Playwright assertion
+  timeout (e.g. `expect(...).toPass({ timeout })`) instead of manually timing
+  with `Date.now()` and asserting on the delta — the native form fails with a
+  clearer message and doesn't race the event loop the way a manual stopwatch
+  can.
 
 ### 1.1.7 — 2026-07-08
 - Deploys are now **skill-only**: removed the post-commit auto-deploy hook so a

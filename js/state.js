@@ -48,8 +48,8 @@ export const state = {
   topTotal: 0,              // total videos in the 7-day window (from the server)
   myVotes: new Set(),       // video IDs the signed-in user has upvoted
   myStars: new Set(),       // channel names the signed-in user has starred
-  hostsByChannel: {},       // channel_name -> host, from creators.json (search matching)
-  creators: null,           // full creators.json list, loaded once (Channels tab + host map)
+  hostsByChannel: {},       // channel_name -> host, from getChannels (search matching)
+  creators: null,           // full channel list, loaded once via getChannels (Channels tab + host map)
   renderToken: 0,           // invalidates deferred short inserts after a re-render
   fullscreenVideoId: null,      // video expanded to fullscreen, or null
   fullscreenReturnId: null,     // topmost visible card before fullscreen (scroll anchor)

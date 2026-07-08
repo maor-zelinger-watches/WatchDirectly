@@ -56,6 +56,19 @@ const MOCK_FEED = {
   page: 1,
 };
 
+// Host names for the channels above, as would be served by the backend's
+// getChannels action. Only Bark and Jack's host is exercised by a test below,
+// but the others are included for realism.
+const MOCK_CHANNELS = {
+  status: 'ok',
+  channels: [
+    { channel_name: 'Teddy Baldassarre', host: 'Teddy Baldassarre' },
+    { channel_name: 'Nico Leonard', host: 'Nico Leonard' },
+    { channel_name: 'Just One More Watch', host: 'Jody Musgrove' },
+    { channel_name: 'Bark and Jack', host: 'Adrian Barker' },
+  ],
+};
+
 test.describe('Search & Category Filter', () => {
   test.beforeEach(async ({ page }) => {
     await page.route('**/macros/**', async (route) => {
@@ -65,6 +78,12 @@ test.describe('Search & Category Filter', () => {
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify(MOCK_FEED),
+        });
+      } else if (url.includes('action=getChannels')) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(MOCK_CHANNELS),
         });
       } else if (url.includes('action=commentsBatch')) {
         await route.fulfill({
@@ -122,9 +141,9 @@ test.describe('Search & Category Filter', () => {
     await expect(page.locator('.media-card')).toHaveCount(4);
   });
 
-  test('query matches the channel host from creators.json', async ({ page }) => {
+  test('query matches the channel host from getChannels', async ({ page }) => {
     // "Adrian" appears nowhere in titles or channel names — the channel is
-    // "Bark and Jack", hosted by Adrian Barker (per creators.json).
+    // "Bark and Jack", hosted by Adrian Barker (per MOCK_CHANNELS).
     await page.fill('#search-input', 'adrian');
 
     await expect(page.locator('.media-card')).toHaveCount(1);

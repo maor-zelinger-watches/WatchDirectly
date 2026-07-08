@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -157,6 +157,8 @@ function doGet(e) {
         return jsonResponse(handleCommentsBatch(e.parameter));
       case 'topWeek':
         return jsonResponse(handleTopWeek(e.parameter));
+      case 'getChannels':
+        return jsonResponse(handleGetChannels());
       case 'refresh':
         return jsonResponse(handleRefresh());
       case 'logs':
@@ -418,6 +420,37 @@ function fetchAllFeeds() {
   } finally {
     setMeta('fetch_in_progress', '');
   }
+}
+
+/**
+ * Serves the curated creator list (name, host, url, avatar, etc.) from the
+ * CHANNELS sheet for the frontend's Channels tab and search host-matching —
+ * the same sheet crawlAllFeeds reads to know which feeds to poll. Disabled
+ * channels are omitted so a paused feed doesn't still show up as browsable.
+ */
+function handleGetChannels() {
+  var sheet = getSheet('CHANNELS');
+  var data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return { status: 'ok', channels: [] };
+
+  var headers = data[0];
+  var enabledCol = headers.indexOf('enabled');
+  var channels = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var rawEnabled = enabledCol === -1 ? true : row[enabledCol];
+    var enabled = rawEnabled === true || String(rawEnabled).toUpperCase() === 'TRUE';
+    if (!enabled) continue;
+
+    var channel = {};
+    for (var j = 0; j < headers.length; j++) {
+      channel[headers[j]] = row[j];
+    }
+    channels.push(channel);
+  }
+
+  return { status: 'ok', channels: channels };
 }
 
 function crawlAllFeeds() {

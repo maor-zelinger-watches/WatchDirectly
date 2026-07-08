@@ -176,7 +176,7 @@ export function avatarUrl(url, size = 176) {
  * the `media-card__star` class + `data-channel` attribute so the existing star
  * engine (toggle, sign-in reconcile, cross-view sync) drives it unchanged.
  *
- * @param {Object} creator - A creators.json entry
+ * @param {Object} creator - A channel entry from the getChannels backend action
  * @returns {string} HTML string for the card
  */
 export function createChannelCard(creator) {
@@ -312,7 +312,7 @@ function scoreVideo(v, queryTokens, hostsByChannel) {
  * channel name, and the channel's host name (typo-tolerant, diacritic-
  * insensitive). Host matching lets "Adrian" find Bark and Jack videos —
  * feed items only carry channel_name, so hosts come in via a channel→host
- * map built from creators.json.
+ * map built from the getChannels backend action.
  *
  * Content-type filtering (the Videos/Articles/Shorts chips) is deliberately
  * NOT handled here: it's a pure CSS visibility filter over already-rendered

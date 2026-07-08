@@ -19,7 +19,6 @@ import {
   cardIds,
   allUnique,
   scrollToBottom,
-  timed,
   sleep,
 } from './helpers.js';
 
@@ -37,18 +36,12 @@ test.describe('PERF · scrolling', () => {
 
     control.feedBlocked = true; // any further fetch would hang forever
 
-    const { ms } = await timed(async () => {
-      await scrollToBottom(page);
-      await expect
-        .poll(() => page.locator('.media-card').count(), { timeout: 3000 })
-        .toBeGreaterThanOrEqual(20);
-    });
-    console.log(`[T4] buffered page rendered in ${ms}ms with the network blocked`);
-
-    // The point: it renders at all with the network cut, so no fetch was on
-    // the critical path. The elapsed time is the staggered entrance animation
-    // (local work), not I/O.
-    expect(ms).toBeLessThan(2200);
+    // The point: with the network cut, the next page still renders (the 20th
+    // card appears) — so no fetch was on the critical path. The elapsed time is
+    // the staggered entrance animation (local work), not I/O; the 2200ms
+    // timeout IS the budget.
+    await scrollToBottom(page);
+    await expect(page.locator('.media-card').nth(19)).toBeVisible({ timeout: 2200 });
     expect(allUnique(await cardIds(page))).toBe(true);
   });
 

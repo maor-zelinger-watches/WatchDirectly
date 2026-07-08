@@ -71,7 +71,7 @@ const COMPONENTS = {
 // require a bump of their own; null = ignored entirely.
 function classify(path) {
   if (path.startsWith('apps-script/')) return 'Backend';
-  if (path.endsWith('.html') || path === 'creators.json'
+  if (path.endsWith('.html')
       || path.startsWith('css/') || path.startsWith('js/')) return 'Frontend';
   if (path.startsWith('tests/')) return 'RideAlong';
   if (path === 'CHANGELOG.md') return null; // the release notes themselves

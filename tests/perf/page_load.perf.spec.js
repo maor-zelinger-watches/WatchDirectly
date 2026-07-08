@@ -13,12 +13,10 @@ import {
   installMocks,
   installLongTaskObserver,
   paintMetrics,
-  timed,
   makeItems,
   cardIds,
   allUnique,
   scrollToBottom,
-  sleep,
 } from './helpers.js';
 
 test.describe('PERF · page load', () => {
@@ -27,22 +25,17 @@ test.describe('PERF · page load', () => {
     await installLongTaskObserver(page);
     await installMocks(page, { items: makeItems(60), feedDelay: 300 });
 
-    const { ms } = await timed(async () => {
-      await page.goto('/', { waitUntil: 'commit' });
-      await page.locator('.media-card').first().waitFor({ state: 'visible' });
-    });
-    console.log(`[T1] first card visible: ${ms}ms`);
+    await page.goto('/', { waitUntil: 'commit' });
+    // Loose backstop: two 300ms page-1 fetches + render. The timeout IS the budget.
+    await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 3500 });
 
     const paint = await paintMetrics(page);
     console.log(`[T1] FCP=${paint.fcp}ms LCP=${paint.lcp}ms`);
 
     // The in-page paint timeline is the trustworthy "first card painted"
-    // signal (wall-clock also carries goto/polling overhead). With a 300ms
-    // API round-trip the largest card must still paint fast.
+    // signal. With a 300ms API round-trip the largest card must still paint fast.
     expect(paint.fcp).toBeLessThan(1500);
     expect(paint.lcp).toBeLessThan(2500);
-    // Loose wall-clock backstop: two 300ms page-1 fetches + render.
-    expect(ms).toBeLessThan(3500);
   });
 
   test('T2 warm reload — cache paints before the network responds', async ({ page }) => {
@@ -56,15 +49,11 @@ test.describe('PERF · page load', () => {
     control.feedBlocked = true;
     control.feedPages.length = 0;
 
-    const { ms } = await timed(async () => {
-      await page.reload({ waitUntil: 'commit' });
-      await page.locator('.media-card').first().waitFor({ state: 'visible' });
-    });
-    console.log(`[T2] cached first card: ${ms}ms, feed requests completed after reload: 0 (all blocked)`);
-
     // Cache paint is local work — must be fast and must not need the network.
-    expect(ms).toBeLessThan(1500);
-    await expect(page.locator('.media-card').first()).toBeVisible();
+    // A card visible within 1500ms while every fetch hangs proves the paint
+    // came from cache. The timeout IS the budget.
+    await page.reload({ waitUntil: 'commit' });
+    await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 1500 });
   });
 
   test('T3 revalidation never blocks pagination', async ({ page }) => {
@@ -85,16 +74,11 @@ test.describe('PERF · page load', () => {
     // Kick pagination while the 3s page-1 refresh is still in flight. A
     // bottom-pinned scroll auto-fills a *variable* number of pages, so assert
     // the invariant (>= 20, duplicate-free) not an exact count.
-    const { ms } = await timed(async () => {
-      await scrollToBottom(page);
-      await expect
-        .poll(() => page.locator('.media-card').count(), { timeout: 2500 })
-        .toBeGreaterThanOrEqual(20);
-    });
-    console.log(`[T3] page-2 appended in ${ms}ms while a 3s revalidation was in flight`);
-
-    // Well under the 3s revalidation — pagination did not wait for it.
-    expect(ms).toBeLessThan(2000);
+    // Kick pagination: the 20th card must render within 2000ms — well under
+    // the 3s revalidation, proving pagination did not wait for it. The timeout
+    // IS the budget.
+    await scrollToBottom(page);
+    await expect(page.locator('.media-card').nth(19)).toBeVisible({ timeout: 2000 });
 
     const ids = await cardIds(page);
     expect(allUnique(ids)).toBe(true); // no duplicates slipped in during the race

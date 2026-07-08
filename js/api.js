@@ -159,6 +159,16 @@ export function createApiClient(baseUrl) {
     },
 
     /**
+     * Fetches the curated creator list (name, host, url, avatar, etc.) that
+     * backs the Channels tab and search's host-name matching.
+     *
+     * @returns {Promise<{channels: Object[]}>}
+     */
+    async fetchChannels() {
+      return get('action=getChannels');
+    },
+
+    /**
      * Toggles the signed-in user's upvote on a video.
      * Requires a valid Google ID token.
      *

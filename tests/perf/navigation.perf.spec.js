@@ -10,7 +10,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { installMocks, makeItems, timed, sleep } from './helpers.js';
+import { installMocks, makeItems, sleep } from './helpers.js';
 
 const tab = (page, label) => page.locator('.feed-tab', { hasText: label });
 
@@ -24,24 +24,16 @@ test.describe('PERF · navigation', () => {
     await page.evaluate(() => window.scrollTo(0, 1200));
     await sleep(150);
 
-    const toTop = await timed(async () => {
-      await tab(page, 'Top This Week').click();
-      await expect(tab(page, 'Top This Week')).toHaveClass(/feed-tab--active/);
-      await expect(page.locator('.media-card').first()).toBeVisible();
-    });
-    console.log(`[T10] Latest -> Top in ${toTop.ms}ms (topWeek requests: ${control.topRequests})`);
-    expect(toTop.ms).toBeLessThan(2000);
+    // Latest -> Top must settle within budget (timeout IS the budget).
+    await tab(page, 'Top This Week').click();
+    await expect(tab(page, 'Top This Week')).toHaveClass(/feed-tab--active/, { timeout: 2000 });
+    await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 2000 });
     expect(control.topRequests).toBe(1); // fetched once
 
-    const backToLatest = await timed(async () => {
-      await tab(page, 'Latest').click();
-      await expect(tab(page, 'Latest')).toHaveClass(/feed-tab--active/);
-      await expect(page.locator('.media-card').first()).toBeVisible();
-    });
-    console.log(`[T10] Top -> Latest in ${backToLatest.ms}ms`);
-
     // Returning to Latest comes from memory — fast, and scrolled back to top.
-    expect(backToLatest.ms).toBeLessThan(1000);
+    await tab(page, 'Latest').click();
+    await expect(tab(page, 'Latest')).toHaveClass(/feed-tab--active/, { timeout: 1000 });
+    await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 1000 });
     expect(control.topRequests).toBe(1); // Top not refetched on return
     const scrollY = await page.evaluate(() => window.scrollY);
     expect(scrollY).toBeLessThan(50);
@@ -56,25 +48,19 @@ test.describe('PERF · navigation', () => {
     await target.evaluate((el) => el.scrollIntoView({ block: 'start' }));
     const topBefore = await target.evaluate((el) => el.getBoundingClientRect().top);
 
-    const enter = await timed(async () => {
-      await target.locator('.media-card__expand').click();
-      await expect(page.locator('body')).toHaveClass(/fullscreen-mode/);
-      await expect(target).toHaveClass(/media-card--fullscreen/);
-    });
-    console.log(`[T11] enter fullscreen in ${enter.ms}ms`);
-    expect(enter.ms).toBeLessThan(600);
+    // Enter fullscreen within budget (timeout IS the budget).
+    await target.locator('.media-card__expand').click();
+    await expect(page.locator('body')).toHaveClass(/fullscreen-mode/, { timeout: 600 });
+    await expect(target).toHaveClass(/media-card--fullscreen/, { timeout: 600 });
 
     // Fullscreen force-loads the embed so the video is ready immediately.
     // (Scoped to the embed — the fullscreen comments' auth prompt can inject
     // a Google Sign-In iframe into the same card.)
     await expect(target.locator('.media-card__embed iframe')).toHaveAttribute('src', /.+/);
 
-    const exit = await timed(async () => {
-      await page.keyboard.press('Escape');
-      await expect(page.locator('body')).not.toHaveClass(/fullscreen-mode/);
-    });
-    console.log(`[T11] exit fullscreen in ${exit.ms}ms`);
-    expect(exit.ms).toBeLessThan(500);
+    // Exit fullscreen within budget (timeout IS the budget).
+    await page.keyboard.press('Escape');
+    await expect(page.locator('body')).not.toHaveClass(/fullscreen-mode/, { timeout: 500 });
 
     // Re-anchored to the same card (within a small tolerance).
     const topAfter = await target.evaluate((el) => el.getBoundingClientRect().top);

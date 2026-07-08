@@ -1,16 +1,38 @@
 /**
- * E2E tests for the Channels tab (mocked API, real creators.json)
+ * E2E tests for the Channels tab (mocked API)
  *
- * Covers: the 3-up channel grid rendering from creators.json, the signed-out
- * favorite gate, and the integration contract that starring a creator on the
- * Channels tab surfaces their videos on the Favorites tab.
+ * Covers: the 3-up channel grid rendering from the getChannels backend
+ * action, the signed-out favorite gate, and the integration contract that
+ * starring a creator on the Channels tab surfaces their videos on the
+ * Favorites tab.
  */
 
 import { test, expect } from '@playwright/test';
 
 const now = Date.now();
 
-// Teddy and Nico both exist in the real creators.json, so a star toggled on a
+// A stand-in for the curated creator list normally served by the backend's
+// getChannels action. Teddy and Nico are named explicitly so a star toggled
+// on a channel card can be checked against the Favorites feed built from
+// MOCK_FEED below.
+const MOCK_CHANNELS = {
+  status: 'ok',
+  channels: [
+    'Nico Leonard', 'Producer Michael', 'Teddy Baldassarre', 'Watchfinder & Co.',
+    'The Urban Gentry', 'Roman Sharf (Luxury Bazaar)', 'Hodinkee', 'Just One More Watch',
+    'Jenni Elle', 'Bark and Jack', "Ben's Watch Club", 'Federico Talks Watches',
+    'The Time Teller', 'Long Island Watch', 'YoureTerrific',
+    'The 1916 Company (formerly WatchBox)', 'Andrew Morgan Watches', 'Archieluxury',
+    'Britt Pearce',
+  ].map((channel_name) => ({
+    channel_name,
+    host: channel_name,
+    url: `https://www.youtube.com/@${channel_name.replace(/\W/g, '')}`,
+    avatar: `https://yt3.googleusercontent.com/${channel_name.replace(/\W/g, '')}`,
+  })),
+};
+
+// Teddy and Nico both exist in MOCK_CHANNELS, so a star toggled on a
 // channel card can be checked against the Favorites feed built from this mock.
 const MOCK_FEED = {
   status: 'ok',
@@ -35,6 +57,9 @@ async function setup(page, { signedIn = false, myStars = [] } = {}) {
 
     if (url.includes('action=feed')) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_FEED) });
+    }
+    if (url.includes('action=getChannels')) {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_CHANNELS) });
     }
     if (url.includes('action=commentsBatch')) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', byVideo: {} }) });
@@ -89,7 +114,7 @@ test.describe('Channels tab', () => {
     await setup(page);
     await openChannels(page);
 
-    // One card per creator in creators.json (19 curated creators)
+    // One card per creator in MOCK_CHANNELS (19 curated creators)
     const count = await page.locator('.channel-card').count();
     expect(count).toBeGreaterThanOrEqual(15);
 
