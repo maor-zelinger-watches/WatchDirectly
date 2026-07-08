@@ -646,6 +646,93 @@ img {
   color: var(--text-muted);
 }
 
+/* ============================================================
+   CHANNELS TAB — 3-up grid of favouritable creator cards.
+   Reuses .media-card__star for the favourite button, so these
+   star overrides must sit AFTER the base star rules to win.
+   ============================================================ */
+
+.feed.feed--channels {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-3);
+}
+
+.channel-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition-normal);
+}
+
+.channel-card:hover {
+  border-color: var(--text-muted);
+}
+
+.channel-card__figure {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--accent-dim);
+  text-decoration: none;
+}
+
+/* Fallback tile, revealed when there's no avatar or the image fails to load. */
+.channel-card__monogram {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  color: var(--accent);
+  line-height: 1;
+}
+
+.channel-card__avatar {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--bg-surface);
+}
+
+.channel-card__name {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+  text-decoration: none;
+  line-height: var(--lh-tight);
+}
+
+.channel-card__name:hover {
+  color: var(--accent);
+}
+
+/* Favourite star, pinned to the card's top-right corner. Resets the negative
+   inline-meta offsets .media-card__star carries and enlarges the tap target. */
+.channel-card__star {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+  margin: 0;
+  font-size: var(--fs-lg);
+}
+
+@media (max-width: 640px) {
+  .feed.feed--channels {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 /* Stack on narrow mobile */
 @media (max-width: 540px) {
   .media-card__grid {

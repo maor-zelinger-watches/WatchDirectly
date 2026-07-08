@@ -1,6 +1,6 @@
 {
   "name": "watchdirectly",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Chronological watch content aggregator with community comments",
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "test:smoke": "playwright test --project=smoke --workers=1",
     "test:all": "vitest run && npm run test:e2e && npm run test:smoke && npm run test:perf",
     "resolve-channels": "node scripts/resolve-channels.js",
+    "fetch-avatars": "node scripts/fetch-avatars.js",
     "serve": "npx serve . -l 3000",
     "deploy:backend": "./scripts/deploy-backend.sh",
     "setup:deploy": "./scripts/setup-backend-deploy.sh"

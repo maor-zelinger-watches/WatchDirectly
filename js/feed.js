@@ -153,6 +153,59 @@ export function createMediaCard(item) {
   `.trim();
 }
 
+/**
+ * Rewrites a YouTube avatar URL to request a specific pixel size. Avatar URLs
+ * carry the rendered size in a `=sNNN-...` segment (e.g. `=s900-c-k-...`); the
+ * scrape stores the large default, so we down-request to what the grid shows
+ * (2× the CSS size for retina) instead of shipping 900px images. Any URL that
+ * doesn't match the pattern is returned untouched.
+ *
+ * @param {string} url
+ * @param {number} size - target pixel size
+ * @returns {string}
+ */
+export function avatarUrl(url, size = 176) {
+  if (!url) return '';
+  return url.replace(/=s\d+-/, `=s${size}-`);
+}
+
+/**
+ * Creates an HTML string for a channel card on the Channels tab: the creator's
+ * avatar (with a monogram fallback beneath, revealed if the image is missing or
+ * fails to load), their name, and a favorite ☆ button. The star button reuses
+ * the `media-card__star` class + `data-channel` attribute so the existing star
+ * engine (toggle, sign-in reconcile, cross-view sync) drives it unchanged.
+ *
+ * @param {Object} creator - A creators.json entry
+ * @returns {string} HTML string for the card
+ */
+export function createChannelCard(creator) {
+  const name = sanitizeHtml(creator.channel_name || '');
+  const url = safeUrl(creator.url);
+  const avatar = safeUrl(avatarUrl(creator.avatar));
+  const initial = sanitizeHtml((creator.channel_name || '?').trim().charAt(0).toUpperCase());
+
+  const linkOpen = url
+    ? `<a href="${sanitizeHtml(url)}" target="_blank" rel="noopener noreferrer"`
+    : '<span';
+  const linkClose = url ? '</a>' : '</span>';
+
+  const imgHtml = avatar
+    ? `<img src="${sanitizeHtml(avatar)}" alt="" class="channel-card__avatar" loading="lazy" referrerpolicy="no-referrer">`
+    : '';
+
+  return `
+    <article class="channel-card" data-channel="${name}">
+      <button class="media-card__star channel-card__star" data-channel="${name}" aria-pressed="false" title="Favorite this creator" aria-label="Favorite ${name}">☆</button>
+      ${linkOpen} class="channel-card__figure" aria-label="${name} on YouTube">
+        <span class="channel-card__monogram" aria-hidden="true">${initial}</span>
+        ${imgHtml}
+      ${linkClose}
+      ${linkOpen} class="channel-card__name">${name}${linkClose}
+    </article>
+  `.trim();
+}
+
 // --- fuzzy search --------------------------------------------------------
 //
 // Matching is deliberately client-side and tolerant: after the (cheap) exact

@@ -32,7 +32,7 @@ export const state = {
   searchIndexPromise: null, // in-flight index build (dedupes concurrent requests)
   searchIndexProgress: new Set(), // onProgress callbacks fired as chunks merge in
   filterRenderToken: 0,     // invalidates stale filter renders after async index load
-  view: 'latest',           // 'latest' (chronological), 'top' (weekly upvotes), or 'starred'
+  view: 'latest',           // 'latest' (chronological), 'top' (weekly upvotes), 'starred', or 'channels'
   prefetchBuffer: [],       // [{page, videos}] fetched ahead, contiguous from currentPage+1
   prefetching: false,       // single refill loop at a time
   prefetchToken: 0,         // invalidates in-flight refills when pagination resets
@@ -43,6 +43,7 @@ export const state = {
   myVotes: new Set(),       // video IDs the signed-in user has upvoted
   myStars: new Set(),       // channel names the signed-in user has starred
   hostsByChannel: {},       // channel_name -> host, from creators.json (search matching)
+  creators: null,           // full creators.json list, loaded once (Channels tab + host map)
   renderToken: 0,           // invalidates deferred short inserts after a re-render
   fullscreenVideoId: null,      // video expanded to fullscreen, or null
   fullscreenReturnId: null,     // topmost visible card before fullscreen (scroll anchor)

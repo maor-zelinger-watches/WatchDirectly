@@ -21,6 +21,21 @@ that component's heading.
 
 ## Frontend
 
+### 1.9.0 — 2026-07-08
+- New **Channels** feed tab (after Favorites): a three-up grid of every curated
+  creator, each card showing the channel's avatar, its name (linking to the
+  channel on YouTube), and a favorite ☆. The star reuses the existing
+  media-card star machinery — same `media-card__star` class and `data-channel`
+  hook — so favoriting here toggles, persists, reconciles on sign-in, and syncs
+  with the video cards' stars with no change to the star engine; a creator
+  favorited on this tab immediately populates the Favorites feed. Browsing the
+  grid needs no sign-in (favoriting does, which the existing gate enforces).
+  Avatars come from a new `avatar` field on each creator in `creators.json`
+  (see the repo's `fetch-avatars` script), down-requested to display size at
+  render time, and fall back to a monogram tile when absent or if the image
+  fails to load. The grid collapses to two columns under 640px; the video
+  search/type controls hide on this tab since they filter videos, not channels.
+
 ### 1.8.0 — 2026-07-08
 - Added a sticky footer, fixed to the bottom of the viewport, mirroring the
   existing sticky header (same blur/border, `z-index: 100` so it tucks under the
@@ -230,6 +245,17 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.1.6 — 2026-07-08
+- New `fetch-avatars` script (`npm run fetch-avatars`) resolves each creator's
+  YouTube channel avatar into an `avatar` field on `creators.json` by scraping
+  the channel page's Open Graph image — no API key required (`--force`
+  re-fetches all). Backs the Channels tab.
+- Test coverage for the Channels tab: `tests/unit/channels.test.js`
+  (`createChannelCard` avatar/monogram/name/star markup and the `avatarUrl`
+  size rewrite) and `tests/e2e/channels_tab.spec.js` (grid renders from
+  `creators.json`, the signed-out favorite gate, the pre-marked signed-in star,
+  and the star-here-shows-in-Favorites integration).
 
 ### 1.1.5 — 2026-07-08
 - Added test coverage for the single-play feature: `tests/unit/single-play.test.js`

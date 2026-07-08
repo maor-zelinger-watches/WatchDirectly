@@ -13,7 +13,7 @@ import { state, isFilterActive, activeFilter } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
 import { filterVideos, sortVideos, dedupeVideos } from './feed.js';
-import { renderList } from './cards.js';
+import { renderList, buildChannelCard } from './cards.js';
 import { prefetchComments } from './comments-ui.js';
 import { exitFullscreen } from './fullscreen.js';
 import { isSignedIn } from './auth.js';
@@ -170,6 +170,35 @@ export function ensureSearchIndex(onProgress) {
   return state.searchIndexPromise;
 }
 
+// Single in-flight fetch of the creator list, shared by the host map (search
+// matching) and the Channels tab. Cached on state.creators; a failure clears
+// the promise so the next caller retries.
+let creatorsPromise = null;
+export function loadCreators() {
+  if (state.creators) return Promise.resolve(state.creators);
+  if (!creatorsPromise) {
+    creatorsPromise = fetch('./creators.json')
+      .then(r => {
+        if (!r.ok) throw new Error(`creators.json ${r.status}`);
+        return r.json();
+      })
+      .then(creators => {
+        state.creators = creators;
+        const hosts = {};
+        for (const c of creators) {
+          if (c.channel_name && c.host) hosts[c.channel_name] = c.host;
+        }
+        state.hostsByChannel = hosts;
+        return creators;
+      })
+      .catch(err => {
+        creatorsPromise = null; // allow a later view to retry
+        throw err;
+      });
+  }
+  return creatorsPromise;
+}
+
 export function setupFeedControls() {
   const input = document.getElementById('search-input');
   const chipsContainer = document.getElementById('category-chips');
@@ -178,17 +207,10 @@ export function setupFeedControls() {
   // Content-type chips are a fixed set — render them right away, no fetch needed.
   renderTypeChips(chipsContainer);
 
-  // The channel→host map (search matching) still comes from the creator list.
-  fetch('./creators.json')
-    .then(r => r.json())
-    .then(creators => {
-      const hosts = {};
-      for (const c of creators) {
-        if (c.channel_name && c.host) hosts[c.channel_name] = c.host;
-      }
-      state.hostsByChannel = hosts;
-    })
-    .catch(() => { /* host matching is an enhancement — search still works without it */ });
+  // Warm the creator list so the host map (search matching) and the Channels
+  // tab are ready before they're needed. Host matching is an enhancement —
+  // search still works without it — so a failure is swallowed here.
+  loadCreators().catch(() => {});
 
   // Warm the search index as soon as the user shows intent
   input.addEventListener('focus', () => {
@@ -218,10 +240,21 @@ export function update() {
   // fullscreen card (it would leave the page scroll-locked with no exit).
   if (state.fullscreenVideoId) exitFullscreen();
 
+  const isChannels = state.view === 'channels';
+  // The Channels grid layout and the video search/type controls belong only to
+  // their own views — flip both here so every entry point (tab click, star
+  // re-render, filter) leaves the container in the right mode.
+  const container = document.getElementById('feed-container');
+  if (container) container.classList.toggle('feed--channels', isChannels);
+  const controls = document.getElementById('feed-controls');
+  if (controls) controls.style.display = isChannels ? 'none' : '';
+
   if (state.view === 'top') {
     renderTop();
   } else if (state.view === 'starred') {
     renderStarred();
+  } else if (isChannels) {
+    renderChannels();
   } else {
     applyFilter();
   }
@@ -413,6 +446,58 @@ async function renderStarred() {
   empty.style.display = list.length === 0 ? '' : 'none';
 
   prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
+}
+
+/**
+ * Renders the Channels tab: every curated creator as a card (avatar, name, and
+ * a favorite ☆), three across on desktop. Browsing here doesn't depend on being
+ * signed in — starring does, which toggleStar enforces. Cards are sorted by
+ * name so the grid is scannable and stable across reloads.
+ */
+async function renderChannels() {
+  const container = document.getElementById('feed-container');
+  const sentinel = document.getElementById('load-more-container');
+  const empty = document.getElementById('feed-empty');
+  if (!container) return;
+
+  sentinel.style.display = 'none';
+
+  // Clear the prior view's cards up front so they don't linger while the
+  // creator list loads on a cold open (it's usually already warm from boot).
+  if (!state.creators) {
+    state.renderToken++;
+    state.expandedComments.clear();
+    container.innerHTML = '';
+  }
+
+  let creators;
+  try {
+    creators = await loadCreators();
+  } catch (error) {
+    console.error('Failed to load channels:', error);
+    if (state.view !== 'channels') return;
+    state.renderToken++;
+    container.innerHTML = '';
+    empty.querySelector('p').textContent = 'Channels are unavailable right now. Please try again.';
+    empty.style.display = '';
+    return;
+  }
+
+  // The user may have switched tabs while the list was loading.
+  if (state.view !== 'channels') return;
+
+  const sorted = [...creators].sort((a, b) =>
+    String(a.channel_name).localeCompare(String(b.channel_name)));
+
+  state.renderToken++;
+  state.expandedComments.clear();
+  container.innerHTML = '';
+  for (const creator of sorted) {
+    container.appendChild(buildChannelCard(creator));
+  }
+
+  empty.querySelector('p').textContent = 'No channels yet.';
+  empty.style.display = sorted.length === 0 ? '' : 'none';
 }
 
 // Fixed content-type chips. '' is the exclusive "All" chip; the rest map to

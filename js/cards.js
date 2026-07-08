@@ -7,7 +7,7 @@
  * here so every card behaves the same regardless of which list it's in.
  */
 
-import { createMediaCard } from './feed.js';
+import { createMediaCard, createChannelCard } from './feed.js';
 import { state } from './state.js';
 import { toggleComments } from './comments-ui.js';
 import { toggleVote } from './votes.js';
@@ -63,6 +63,36 @@ export function buildCard(video) {
       e.stopPropagation();
       toggleFullscreen(card);
     });
+  }
+
+  return card;
+}
+
+/**
+ * Builds a channel card element (Channels tab) and wires its favorite button
+ * and avatar fallback. The star reuses the media-card star machinery, so
+ * toggling here syncs every other star for the same channel and reconciles on
+ * sign-in like any card star. If the avatar image fails to load, it's removed
+ * to reveal the monogram tile rendered beneath it.
+ */
+export function buildChannelCard(creator) {
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = createChannelCard(creator);
+  const card = wrapper.firstElementChild;
+
+  const starBtn = card.querySelector('.media-card__star');
+  if (starBtn) {
+    if (state.myStars.has(creator.channel_name)) markStarButton(starBtn, true);
+    starBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleStar(creator.channel_name);
+    });
+  }
+
+  const avatar = card.querySelector('.channel-card__avatar');
+  if (avatar) {
+    avatar.addEventListener('error', () => avatar.remove());
   }
 
   return card;
