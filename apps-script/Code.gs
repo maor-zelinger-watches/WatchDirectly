@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -500,7 +500,8 @@ function crawlAllFeeds() {
     try {
       var videos = fetchAndParseFeed(feedUrl, channelName, tier, category);
 
-      // Recover premiere/live state (invisible in RSS) before persisting.
+      // Recover premiere/live state and a fresh view count (both unreliable in
+      // RSS) from the Data API before persisting.
       enrichLiveMetadata(videos);
 
       for (var v = 0; v < videos.length; v++) {
@@ -541,9 +542,10 @@ function crawlAllFeeds() {
         } else if (existingRowById[video.video_id]) {
           var existingRow = existingRowById[video.video_id];
           if (viewCountCol !== -1 && video.view_count) {
-            // Views were captured at first ingest (hours after publish, when
-            // they're lowest) — refresh them while the video is still inside
-            // the ~15-entry RSS window. Older videos keep their last count.
+            // enrichLiveMetadata just refreshed this from the Data API. Only
+            // videos still inside the channel's ~15-entry RSS window are fetched
+            // and reach here, so a count stops updating once the video falls out
+            // of the feed — older videos keep their last recorded count.
             videosSheet.getRange(existingRow, viewCountCol + 1).setValue(video.view_count);
           }
           // Re-enrich live state in place. A premiere/stream keeps its video id
@@ -852,13 +854,15 @@ function fetchOgImage(articleUrl) {
 }
 
 /**
- * Enriches parsed YouTube items in place with premiere/live broadcast state.
+ * Enriches parsed YouTube items in place with premiere/live broadcast state
+ * and a fresh view count, from a single YouTube Data API videos.list call.
  *
  * A channel RSS entry for a premiere or scheduled live stream is byte-for-byte
  * indistinguishable from a normal upload — the feed carries no broadcast state
- * and no air time. We batch the 11-char video ids into the YouTube Data API
- * videos.list endpoint (part=snippet,liveStreamingDetails; up to 50 ids/call,
- * 1 quota unit each) to recover, per item:
+ * and no air time. The RSS feed likewise no longer carries a dependable view
+ * count. We batch the 11-char video ids into the YouTube Data API videos.list
+ * endpoint (part=snippet,liveStreamingDetails,statistics; up to 50 ids/call,
+ * 1 quota unit per call regardless of parts) to recover, per item:
  *   - live_status:     snippet.liveBroadcastContent — 'upcoming' | 'live' | 'none'
  *   - scheduled_start: liveStreamingDetails.scheduledStartTime (upcoming/live)
  *   - expires_at:      when a still-unaired premiere or still-running stream
@@ -866,10 +870,14 @@ function fetchOgImage(articleUrl) {
  *                      time if unknown, + LIVE_GRACE_MS). Left blank for 'none',
  *                      so a finished broadcast — which keeps the SAME video id
  *                      as it becomes a VOD — is permanent once it airs.
+ *   - view_count:      statistics.viewCount — the live view count. Only videos
+ *                      still inside the channel's ~15-entry RSS window reach
+ *                      this call, so a video's count stops refreshing once it
+ *                      falls out of the feed (it keeps its last recorded value).
  *
  * Requires a 'youtube_api_key' Meta value. Without a key, or on any API error,
  * this is a no-op and the crawl degrades to plain RSS behaviour (every item
- * treated as a normal, permanent upload).
+ * treated as a normal, permanent upload; view counts left as first ingested).
  *
  * @param {Object[]} videos - Parsed item objects, mutated in place.
  */
@@ -895,8 +903,8 @@ function enrichLiveMetadata(videos) {
   for (var b = 0; b < ids.length; b += 50) {
     var batch = ids.slice(b, b + 50);
     var url = 'https://www.googleapis.com/youtube/v3/videos'
-      + '?part=snippet,liveStreamingDetails'
-      + '&fields=' + encodeURIComponent('items(id,snippet/liveBroadcastContent,liveStreamingDetails/scheduledStartTime)')
+      + '?part=snippet,liveStreamingDetails,statistics'
+      + '&fields=' + encodeURIComponent('items(id,snippet/liveBroadcastContent,liveStreamingDetails/scheduledStartTime,statistics/viewCount)')
       + '&id=' + batch.join(',')
       + '&key=' + encodeURIComponent(apiKey);
 
@@ -921,11 +929,18 @@ function enrichLiveMetadata(videos) {
           expires = new Date(base + LIVE_GRACE_MS).toISOString();
         }
 
+        // statistics.viewCount is a decimal string, and absent when a video
+        // hides its stats. Only overwrite when the API returned an actual
+        // number, so a hidden-stats item leaves the ingested count untouched.
+        var views = (it.statistics && it.statistics.viewCount != null)
+          ? parseInt(it.statistics.viewCount, 10) : NaN;
+
         var rows = byId[it.id] || [];
         for (var r = 0; r < rows.length; r++) {
           rows[r].live_status = status;
           rows[r].scheduled_start = scheduled;
           rows[r].expires_at = expires;
+          if (!isNaN(views)) rows[r].view_count = views;
         }
       }
     } catch (e) {

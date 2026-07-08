@@ -157,6 +157,20 @@ that component's heading.
 
 ## Backend
 
+### 1.4.0 — 2026-07-08
+- Each crawl now refreshes the live YouTube view count for every video still in
+  the feed. The channel `videos.xml` RSS feed only lists a channel's ~15 most
+  recent uploads and no longer carries a dependable `media:community` view count,
+  so counts were effectively frozen at ingest. `enrichLiveMetadata` — the single
+  batched `videos.list` call the crawl already makes for premiere/live state —
+  now also requests `part=statistics` and writes `statistics.viewCount` back to
+  the Videos sheet's `view_count` column (both at first ingest and on every
+  re-crawl). Adding a part costs no extra quota (videos.list is 1 unit per call).
+  Because only videos still inside the ~15-entry RSS window are fetched, a
+  video's count stops updating once it drops out of the feed — it keeps its last
+  recorded value. Degrades cleanly with no key or on an API error (count left as
+  ingested), and items that hide their stats keep their existing count.
+
 ### 1.3.0 — 2026-07-08
 - Top-week cache: `handleTopWeek` now serves the ranked last-7-days window from
   `CacheService` (50 rows, 5 min TTL) instead of rescanning the whole Videos

@@ -60,7 +60,7 @@ function loadBackend({ metaRows = [['key', 'value']], videoRows = null, fetch } 
 
 /**
  * A UrlFetchApp.fetch mock for videos.list. `byId` maps video id ->
- * { status, scheduled }. Records every requested URL in `calls`.
+ * { status, scheduled, views? }. Records every requested URL in `calls`.
  */
 function youtubeFetch(byId, calls, code = 200) {
   return (url) => {
@@ -69,11 +69,17 @@ function youtubeFetch(byId, calls, code = 200) {
     const ids = idMatch ? idMatch[1].split(',') : [];
     const items = ids
       .filter((id) => byId[id])
-      .map((id) => ({
-        id,
-        snippet: { liveBroadcastContent: byId[id].status },
-        liveStreamingDetails: byId[id].scheduled ? { scheduledStartTime: byId[id].scheduled } : {},
-      }));
+      .map((id) => {
+        const item = {
+          id,
+          snippet: { liveBroadcastContent: byId[id].status },
+          liveStreamingDetails: byId[id].scheduled ? { scheduledStartTime: byId[id].scheduled } : {},
+        };
+        // Mirror the API: statistics.viewCount is a decimal string, and the
+        // whole statistics block is absent when a video hides its counts.
+        if (byId[id].views !== undefined) item.statistics = { viewCount: String(byId[id].views) };
+        return item;
+      });
     return { getResponseCode: () => code, getContentText: () => JSON.stringify({ items }) };
   };
 }
@@ -182,6 +188,52 @@ describe('enrichLiveMetadata', () => {
     const { enrichLiveMetadata } = loadBackend({ metaRows: withKey, fetch: youtubeFetch(byId, calls) });
     enrichLiveMetadata(videos);
     expect(calls).toHaveLength(2); // 50 + 1
+  });
+});
+
+describe('enrichLiveMetadata — view counts', () => {
+  it('writes the live view count from statistics.viewCount as a number', () => {
+    const { enrichLiveMetadata } = loadBackend({
+      metaRows: withKey,
+      fetch: youtubeFetch({ vid00000020: { status: 'none', scheduled: '', views: 12345 } }, []),
+    });
+    const videos = [{ video_id: 'vid00000020', media_type: 'video', view_count: 0 }];
+    enrichLiveMetadata(videos);
+    expect(videos[0].view_count).toBe(12345);
+  });
+
+  it('refreshes both live state and view count from the one batched call', () => {
+    const calls = [];
+    const start = '2026-08-01T18:00:00.000Z';
+    const { enrichLiveMetadata } = loadBackend({
+      metaRows: withKey,
+      fetch: youtubeFetch({ vid00000021: { status: 'upcoming', scheduled: start, views: 42 } }, calls),
+    });
+    const videos = [{ video_id: 'vid00000021', media_type: 'video', view_count: 0 }];
+    enrichLiveMetadata(videos);
+    expect(videos[0].live_status).toBe('upcoming');
+    expect(videos[0].view_count).toBe(42);
+    expect(calls).toHaveLength(1); // one videos.list call serves both
+  });
+
+  it('leaves the ingested count intact when the item hides its stats', () => {
+    const { enrichLiveMetadata } = loadBackend({
+      metaRows: withKey,
+      fetch: youtubeFetch({ vid00000022: { status: 'none', scheduled: '' } }, []), // no views
+    });
+    const videos = [{ video_id: 'vid00000022', media_type: 'video', view_count: 999 }];
+    enrichLiveMetadata(videos);
+    expect(videos[0].view_count).toBe(999);
+  });
+
+  it('does not touch view_count on an API error', () => {
+    const { enrichLiveMetadata } = loadBackend({
+      metaRows: withKey,
+      fetch: youtubeFetch({ vid00000023: { status: 'none', scheduled: '', views: 5000 } }, [], 403),
+    });
+    const videos = [{ video_id: 'vid00000023', media_type: 'video', view_count: 10 }];
+    enrichLiveMetadata(videos);
+    expect(videos[0].view_count).toBe(10);
   });
 });
 
