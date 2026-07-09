@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.17.0 — 2026-07-09
+- **Search and Favorites now reach the archive** — videos aged past the
+  backend's retention window and moved to the Archive tab. `buildSearchIndex`
+  gained a second phase: after the live catalog is indexed (which is what keeps
+  search feeling instant), `appendArchiveToIndex` backfills the full history from
+  the new backend `archive` action, merging each offset page in as it arrives so
+  results keep repainting. It's strictly best-effort and off the hot path — the
+  archive load never delays live results, honors the same `SEARCH_INDEX_LIMIT`
+  ceiling (the long tail is what the cap bites first), and fails silent on an
+  older backend (`Unknown action`), an empty archive, or a flaky network,
+  leaving the live index as the whole index. New `api.fetchArchive(page, limit)`
+  mirrors `fetchFeed`'s offset shape and dedupes like the feed. **Requires
+  backend ≥ 1.10.0.**
+
 ### 1.16.1 — 2026-07-09
 - **Feed revalidation no longer orphans stale cards when the top page turned
   over server-side.** `revalidateFeed`'s tail-preserving merge assumes an item
@@ -310,6 +324,36 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.10.0 — 2026-07-09
+- **`archive` action — serve the aged-out history to full-catalog search.**
+  `pruneOldVideos` (1.9.0) moves videos past the retention window into an Archive
+  tab that nothing read back. The new `handleArchive` serves it, offset-paginated
+  and newest-first, mirroring the feed's page/limit shape so the frontend's
+  chunked index-build loop consumes it unchanged — so search and Favorites reach
+  the whole history without the archive ever touching the live feed's hot path.
+  The read path is factored so live and archive serve the identical shape
+  (`normalizeVideoRows` now backs both `readAllVideos` and `readArchiveVideos`:
+  same expiry drop, media-type inference, integer counts, URL dedupe). Reads go
+  through a short-lived sorted-archive cache (`readSortedArchive`) so a multi-page
+  index build costs one scan+sort per window instead of one per page; it's
+  dropped (`invalidateArchive`) whenever a crawl adds to the archive, and an
+  archive too large for the 100KB cache value falls through to a live scan.
+  Read-only, and absent-tab-safe (a never-pruned catalog just returns `[]`).
+- **Channel onboarding from just a URL — `enrichChannels`.** Adding a channel
+  used to mean hand-writing every field (channel_id, feed_url, avatar). Now paste
+  a URL into a new CHANNELS row and run `enrichChannels` from the script editor:
+  it fetches the page once and fills only the blanks in place. YouTube URLs
+  (any of /@handle, /channel/UC…, /c/…, /user/…, or the RSS feed URL) resolve to
+  channel_id, feed_url, name, and avatar; news/blog sites resolve to a feed
+  (declared `<link rel=alternate>` or a probed conventional path) and name, with
+  the favicon rendered at read time. Existing non-blank cells are never
+  overwritten (safe to re-run), a blank `enabled` defaults to TRUE once the row
+  has a feed, and missing columns are created. Fetches are SSRF-safe (manual
+  redirect re-checks mirroring `fetchOgImage`, `isSafeUrl` on every hop) and use
+  the crawl's existing `external_request` scope — no new permissions.
+- Operator guide added at [`apps-script/README.md`](apps-script/README.md)
+  covering adding channels, settings, moderation, and refreshes.
 
 ### 1.9.0 — 2026-07-09
 - **Retention/archival to keep the every-request scan bounded.** `readAllVideos`

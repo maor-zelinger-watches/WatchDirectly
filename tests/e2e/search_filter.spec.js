@@ -207,4 +207,41 @@ test.describe('Search & Category Filter', () => {
 
     await expect(page.locator('#load-more-container')).toBeHidden();
   });
+
+  test('search reaches the archive (older videos aged out of the live feed)', async ({ page }) => {
+    // An archived video not present in the live feed. The frontend backfills the
+    // archive into the search index via the separate `archive` action, so a
+    // query must find it even though it never appears in the paginated feed.
+    const ARCHIVED = {
+      status: 'ok',
+      total: 1,
+      page: 1,
+      videos: [
+        {
+          video_id: 'archived_sub_1',
+          channel_name: 'Teddy Baldassarre',
+          title: 'Vintage Submariner Retrospective',
+          url: 'https://www.youtube.com/watch?v=archived_sub_1',
+          published_at: new Date(Date.now() - 120 * 24 * 3600 * 1000).toISOString(),
+          comment_count: 0,
+        },
+      ],
+    };
+    await page.route('**/macros/**', async (route) => {
+      if (route.request().url().includes('action=archive')) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(ARCHIVED),
+        });
+      } else {
+        await route.fallback();
+      }
+    });
+
+    // "submariner" matches nothing in the live feed, only the archived item.
+    await page.fill('#search-input', 'submariner');
+    await expect(page.locator('.media-card')).toHaveCount(1);
+    await expect(page.locator('.media-card__title')).toContainText('Vintage Submariner Retrospective');
+  });
 });

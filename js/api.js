@@ -159,6 +159,25 @@ export function createApiClient(baseUrl) {
     },
 
     /**
+     * Fetches a page of the archive — videos aged out of the live catalog
+     * (older than the backend's retention window) into the Archive tab. A
+     * SEPARATE endpoint from the feed by design: the live catalog loads first
+     * and stays fast, and this backfills full history into the search index in
+     * the background. Offset-paginated like fetchFeed so the same chunked
+     * index-build loop consumes it. Requires backend ≥ 1.10.0; an older backend
+     * throws "Unknown action" here, which the caller treats as an empty archive.
+     *
+     * @param {number} [page=1]
+     * @param {number} [limit=500]
+     * @returns {Promise<{videos: Object[], total: number, page: number}>}
+     */
+    async fetchArchive(page = 1, limit = 500) {
+      const data = await get(`action=archive&page=${page}&limit=${limit}`);
+      if (Array.isArray(data.videos)) data.videos = dedupeVideos(data.videos);
+      return data;
+    },
+
+    /**
      * Fetches the curated creator list (name, host, url, avatar, etc.) that
      * backs the Channels tab and search's host-name matching.
      *

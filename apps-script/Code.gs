@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.9.0';
+const VERSION = '1.10.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -82,6 +82,13 @@ const LIVE_GRACE_MS = 12 * 60 * 60 * 1000;
 // longer scanned.
 const PRUNE_AFTER_DAYS = 60;
 const ARCHIVE_SHEET_NAME = 'Archive';
+
+// The Archive tab, sorted newest-first, is cached whole so the frontend's
+// multi-page full-history index build costs one scan+sort per cache window
+// instead of one per page. Dropped whenever a crawl adds to the archive; an
+// archive too large for the 100KB cap silently falls through to a live scan.
+const ARCHIVE_CACHE_KEY = 'archive_sorted_v1';
+const ARCHIVE_CACHE_SECONDS = 600;
 
 // OAuth client ID this app's Google Sign-In tokens are minted for. Every ID
 // token MUST carry this as its `aud` claim, or it was issued to a different
@@ -180,6 +187,8 @@ function doGet(e) {
         return jsonResponse(handleCommentsBatch(e.parameter));
       case 'topWeek':
         return jsonResponse(handleTopWeek(e.parameter));
+      case 'archive':
+        return jsonResponse(handleArchive(e.parameter));
       case 'getChannels':
         return jsonResponse(handleGetChannels());
       case 'refresh':
@@ -797,6 +806,10 @@ function pruneOldVideos() {
       sheet.deleteRows(keep.length + 2, surplus);
     }
 
+    // The archive grew — drop its cache so the next full-history index build
+    // sees the newly-archived rows.
+    invalidateArchive();
+
     log('INFO', 'pruneOldVideos', 'Archived ' + archive.length + ' rows; ' + keep.length + ' remain');
     return archive.length;
   } catch (e) {
@@ -1076,6 +1089,396 @@ function fetchOgImage(articleUrl) {
   } catch (e) {
     return '';
   }
+}
+
+// ============================================================
+// CHANNEL ONBOARDING — add a channel from just a URL
+// ============================================================
+//
+// Onboarding a channel used to mean hand-writing every field (channel_id,
+// feed_url, avatar). enrichChannels() removes that: paste a URL into a new
+// CHANNELS row's `url` cell — leaving the derivable fields blank — and run
+// enrichChannels from the Apps Script editor. It fetches the page once and
+// fills whatever is missing, deriving everything from the URL.
+
+// Realistic desktop UA — YouTube and many sites serve a bot/consent variant to
+// crawler UAs; the metadata this scraper reads (canonical id, og:title,
+// og:image, feed <link>) is what a normal browser gets.
+var CHANNEL_FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+/**
+ * Editor-run entry point. Scans the CHANNELS sheet and, for every row that has
+ * a `url` but is still missing derivable metadata, fetches the page and fills
+ * the blanks in place:
+ *   - YouTube channel URLs (/@handle, /channel/UC…, /c/…, /user/…, or the RSS
+ *     feed URL itself) → channel_id, feed_url, channel_name, avatar.
+ *   - News / blog / any RSS site → feed_url (discovered <link rel=alternate> or
+ *     a probed common feed path) and channel_name. The avatar is left blank;
+ *     handleGetChannels renders the site favicon at read time.
+ * A blank `enabled` is defaulted to TRUE once the row has a feed, so a freshly
+ * added channel is actually crawled and shown. Existing non-blank cells are
+ * NEVER overwritten, so this is safe to re-run and won't clobber curated
+ * tier/category/name edits.
+ *
+ * Missing columns (channel_id / feed_url / avatar / channel_name / enabled) are
+ * created automatically, mirroring populateChannelAvatars.
+ *
+ * Run: open the script editor, select enrichChannels, click Run. Returns a
+ * summary (also written to the log). Uses the external_request OAuth scope
+ * already granted for the crawl — no extra permissions.
+ *
+ * @returns {{processed:number, filled:number, results:Object[]}}
+ */
+function enrichChannels() {
+  var sheet = getSheet('CHANNELS');
+  var data = sheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    Logger.log('enrichChannels: CHANNELS sheet has no data rows.');
+    return { processed: 0, filled: 0, results: [] };
+  }
+
+  var headers = data[0].slice();
+  var urlCol = headers.indexOf('url');
+  if (urlCol === -1) {
+    Logger.log('enrichChannels: CHANNELS sheet has no "url" column — nothing to enrich.');
+    return { processed: 0, filled: 0, results: [] };
+  }
+
+  // Create any target column we may need to write into.
+  var nameCol    = ensureChannelColumn(sheet, headers, 'channel_name');
+  var idCol      = ensureChannelColumn(sheet, headers, 'channel_id');
+  var feedCol    = ensureChannelColumn(sheet, headers, 'feed_url');
+  var avatarCol  = ensureChannelColumn(sheet, headers, 'avatar');
+  var enabledCol = ensureChannelColumn(sheet, headers, 'enabled');
+
+  var processed = 0, filled = 0;
+  var results = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var rawUrl = row[urlCol];
+    if (isBlankCell(rawUrl)) continue;
+    var url = String(rawUrl).trim();
+
+    var domain = extractDomain(normalizeChannelUrl(url));
+    var isYt = /(^|\.)youtube\.com$/i.test(domain) || domain === 'youtu.be';
+
+    // A network resolve is only worth it when something it can supply is blank.
+    var needResolve = isBlankCell(row[nameCol]) || isBlankCell(row[feedCol]) ||
+      (isYt && (isBlankCell(row[idCol]) || isBlankCell(row[avatarCol])));
+    var needEnable = isBlankCell(row[enabledCol]);
+    if (!needResolve && !needEnable) continue;
+
+    processed++;
+    var sheetRow = i + 1;
+    var info = needResolve ? resolveChannelFromUrl(url) : { ok: true };
+
+    var rowFilled = 0;
+    if (info.ok) {
+      rowFilled += fillIfBlank_(sheet, sheetRow, row, nameCol,   info.channel_name);
+      rowFilled += fillIfBlank_(sheet, sheetRow, row, feedCol,   info.feed_url);
+      rowFilled += fillIfBlank_(sheet, sheetRow, row, idCol,     info.channel_id);
+      rowFilled += fillIfBlank_(sheet, sheetRow, row, avatarCol, info.avatar);
+    }
+    // Enable only once the row actually has a feed to crawl — enabling a row
+    // with no feed_url would just log a warning every crawl.
+    if (isBlankCell(row[enabledCol]) && !isBlankCell(row[feedCol])) {
+      rowFilled += fillIfBlank_(sheet, sheetRow, row, enabledCol, true);
+    }
+
+    filled += rowFilled;
+    results.push({
+      row: sheetRow, url: url, ok: !!info.ok,
+      media_type: info.media_type || '', filled: rowFilled, error: info.error || ''
+    });
+    Logger.log((info.ok ? '✅ ' : '⚠️ ') + 'row ' + sheetRow + ' ' + url + ' — ' +
+      (info.ok ? ('filled ' + rowFilled + ' field(s)') : ('ERROR: ' + info.error)));
+
+    if (needResolve) Utilities.sleep(300); // polite pause between external fetches
+  }
+
+  Logger.log('enrichChannels: done. Rows processed: ' + processed + ', cells filled: ' + filled);
+  return { processed: processed, filled: filled, results: results };
+}
+
+/** True for an empty sheet cell ('', null, or undefined). */
+function isBlankCell(v) {
+  return v === '' || v === null || v === undefined;
+}
+
+/**
+ * Writes `value` into (sheetRow, col) only if the current cell is blank and the
+ * value is non-empty. Mutates the in-memory `row` too, so subsequent checks in
+ * the same run see the fill. Returns 1 if it wrote, else 0.
+ */
+function fillIfBlank_(sheet, sheetRow, row, col, value) {
+  if (col === -1 || !isBlankCell(row[col])) return 0;
+  if (value === '' || value === null || value === undefined) return 0;
+  sheet.getRange(sheetRow, col + 1).setValue(value);
+  row[col] = value;
+  return 1;
+}
+
+/**
+ * Returns the index of the named CHANNELS column, appending it (header + return
+ * new index) when absent so enrichChannels can populate a sheet that predates a
+ * column. Keeps the passed `headers` array in sync with the sheet.
+ */
+function ensureChannelColumn(sheet, headers, name) {
+  var idx = headers.indexOf(name);
+  if (idx !== -1) return idx;
+  idx = headers.length;
+  sheet.getRange(1, idx + 1).setValue(name);
+  headers.push(name);
+  return idx;
+}
+
+/**
+ * Derives everything the CHANNELS sheet needs from a bare channel/site URL.
+ * Dispatches to the YouTube or generic-site resolver. Never throws — a bad or
+ * unreachable URL comes back as { ok:false, error }.
+ *
+ * @param {string} url
+ * @returns {{ok:boolean, media_type?:string, channel_name?:string,
+ *   channel_id?:string, feed_url?:string, avatar?:string, error?:string}}
+ */
+function resolveChannelFromUrl(url) {
+  var clean = normalizeChannelUrl(url);
+  if (!clean) return { ok: false, error: 'Empty or unparseable URL' };
+  if (!isSafeUrl(clean)) return { ok: false, error: 'Not a safe public https URL: ' + clean };
+
+  var domain = extractDomain(clean);
+  var isYouTube = /(^|\.)youtube\.com$/i.test(domain) || domain === 'youtu.be';
+  return isYouTube ? resolveYouTubeChannel(clean) : resolveSiteFeed(clean);
+}
+
+/** Trims, upgrades http→https, and prepends https:// to a bare host/URL. */
+function normalizeChannelUrl(url) {
+  if (!url) return '';
+  var s = String(url).trim();
+  if (!s) return '';
+  if (/^http:\/\//i.test(s)) return s.replace(/^http:\/\//i, 'https://');
+  if (!/^https:\/\//i.test(s)) return 'https://' + s;
+  return s;
+}
+
+/**
+ * Resolves a YouTube channel URL to its id, RSS feed, name, and avatar.
+ * The channel id is taken from the URL when it already contains one
+ * (/channel/UC… or a feed URL's channel_id); otherwise the channel page is
+ * scraped. Name and avatar come from the page's og:title / og:image.
+ */
+function resolveYouTubeChannel(url) {
+  var m = url.match(/\/channel\/(UC[A-Za-z0-9_-]{22})/) ||
+          url.match(/[?&]channel_id=(UC[A-Za-z0-9_-]{22})/);
+  var channelId = m ? m[1] : '';
+
+  // Prefer the canonical /channel/ page when we know the id — it reliably
+  // carries the og tags; otherwise fetch the given handle/custom URL.
+  var pageUrl = channelId ? 'https://www.youtube.com/channel/' + channelId : url;
+  var html = fetchHtmlSafely(pageUrl);
+
+  if (!channelId && html) channelId = extractYouTubeChannelId(html);
+  if (!channelId) {
+    return { ok: false, media_type: 'video',
+      error: 'Could not find a YouTube channel id at ' + url +
+             ' — open the channel, copy its /channel/UC… URL, or paste the RSS feed URL directly' };
+  }
+
+  var name = html ? cleanChannelTitle(extractMetaTag(html, 'og:title')) : '';
+  var avatar = html ? extractMetaTag(html, 'og:image') : '';
+  // Only trust a genuine YouTube avatar host; ignore any generic share image.
+  if (!/^https:\/\/yt[0-9]*\.googleusercontent\.com\//i.test(avatar)) avatar = '';
+
+  return {
+    ok: true,
+    media_type: 'video',
+    channel_id: channelId,
+    feed_url: 'https://www.youtube.com/feeds/videos.xml?channel_id=' + channelId,
+    channel_name: name,
+    avatar: avatar
+  };
+}
+
+/**
+ * Extracts a YouTube channel id (UC…) from channel-page HTML. Uses only the
+ * authoritative sources — the canonical /channel/ link, itemprop=identifier,
+ * or "externalId" — and deliberately NOT the bare "channelId" JSON key, which
+ * on a channel page can refer to a recommended/related channel, not this one.
+ */
+function extractYouTubeChannelId(html) {
+  var m = html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{22})["']/i)
+       || html.match(/<link[^>]+href=["']https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{22})["'][^>]+rel=["']canonical["']/i)
+       || html.match(/itemprop=["']identifier["'][^>]+content=["'](UC[A-Za-z0-9_-]{22})["']/i)
+       || html.match(/["']externalId["']\s*:\s*["'](UC[A-Za-z0-9_-]{22})["']/i);
+  return m ? m[1] : '';
+}
+
+/**
+ * Resolves a news/blog/generic site URL to an RSS/Atom feed and a display name.
+ * First reads the homepage's declared feed <link>; if none is declared, probes
+ * a short list of conventional feed paths. Avatar is intentionally left blank —
+ * handleGetChannels renders the favicon for feed-only channels.
+ */
+function resolveSiteFeed(url) {
+  var html = fetchHtmlSafely(url);
+  var name = '';
+  var feedUrl = '';
+  if (html) {
+    feedUrl = discoverFeedFromHtml(html, url);
+    name = cleanChannelTitle(
+      extractMetaTag(html, 'og:site_name') ||
+      extractMetaTag(html, 'og:title') ||
+      extractTitleTag(html));
+  }
+  if (!feedUrl) feedUrl = probeCommonFeedPaths(url);
+
+  if (!feedUrl) {
+    return { ok: false, media_type: 'article', channel_name: name,
+      error: 'No RSS/Atom feed found for ' + url +
+             ' — locate the site’s feed URL and paste it into feed_url manually' };
+  }
+  return { ok: true, media_type: 'article', channel_id: '', avatar: '',
+    feed_url: feedUrl, channel_name: name };
+}
+
+/**
+ * Finds a feed URL declared in the page head via
+ * <link rel="alternate" type="application/rss+xml|atom+xml" href="…">,
+ * resolving a relative href against the page URL and rejecting unsafe hosts.
+ */
+function discoverFeedFromHtml(html, baseUrl) {
+  var linkRe = /<link\b[^>]*>/gi;
+  var tag;
+  while ((tag = linkRe.exec(html)) !== null) {
+    var t = tag[0];
+    if (!/rel=["'][^"']*alternate/i.test(t)) continue;
+    if (!/type=["'](?:application\/(?:rss|atom)\+xml|text\/xml)["']/i.test(t)) continue;
+    var href = (t.match(/href=["']([^"']+)["']/i) || [])[1];
+    if (!href) continue;
+    var abs = resolveRelativeUrl(href, baseUrl);
+    if (abs && isSafeUrl(abs)) return abs;
+  }
+  return '';
+}
+
+/** Resolves an absolute/protocol-relative/root-relative/relative href against baseUrl (https only). */
+function resolveRelativeUrl(href, baseUrl) {
+  href = String(href).trim();
+  if (/^https:\/\//i.test(href)) return href;
+  if (/^http:\/\//i.test(href)) return href.replace(/^http:/i, 'https:');
+  var origin = (baseUrl.match(/^https?:\/\/[^/?#]+/i) || [])[0];
+  if (!origin) return '';
+  origin = origin.replace(/^http:/i, 'https:');
+  if (/^\/\//.test(href)) return 'https:' + href;      // protocol-relative
+  if (href.charAt(0) === '/') return origin + href;    // root-relative
+  return origin + '/' + href.replace(/^\.?\//, '');    // path-relative (best effort)
+}
+
+/**
+ * Probes a short list of conventional feed paths on the site's origin, returning
+ * the first that responds 200 with feed-shaped XML. Covers WordPress (/feed/),
+ * common static generators (/index.xml, /atom.xml), and Blogger.
+ */
+function probeCommonFeedPaths(url) {
+  var origin = (url.match(/^https?:\/\/[^/?#]+/i) || [])[0];
+  if (!origin) return '';
+  origin = origin.replace(/^http:/i, 'https:');
+  var paths = ['/feed/', '/feed', '/rss', '/rss.xml', '/feed.xml', '/index.xml', '/atom.xml', '/feeds/posts/default?alt=rss'];
+  for (var i = 0; i < paths.length; i++) {
+    var candidate = origin + paths[i];
+    if (isSafeUrl(candidate) && looksLikeFeed(candidate)) return candidate;
+  }
+  return '';
+}
+
+/** GETs a URL and reports whether the body looks like an RSS/Atom feed. */
+function looksLikeFeed(url) {
+  try {
+    var resp = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: { 'User-Agent': CHANNEL_FETCH_UA }
+    });
+    if (resp.getResponseCode() !== 200) return false;
+    var body = String(resp.getContentText()).slice(0, 1000).toLowerCase();
+    if (body.indexOf('<rss') !== -1 || body.indexOf('<feed') !== -1) return true;
+    if (body.indexOf('<?xml') !== -1 &&
+        (body.indexOf('<channel') !== -1 || body.indexOf('atom') !== -1)) return true;
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Fetches a page as HTML text, following redirects MANUALLY so every hop is
+ * re-checked with isSafeUrl (mirrors fetchOgImage's SSRF-safe loop). Returns
+ * the first 300KB of the body, or '' on any failure/non-200.
+ */
+function fetchHtmlSafely(url) {
+  var maxHops = 4;
+  var response = null;
+  try {
+    for (var hop = 0; hop <= maxHops; hop++) {
+      if (!isSafeUrl(url)) return '';
+      response = UrlFetchApp.fetch(url, {
+        muteHttpExceptions: true,
+        followRedirects: false,
+        headers: { 'User-Agent': CHANNEL_FETCH_UA }
+      });
+      var code = response.getResponseCode();
+      if (code >= 300 && code < 400) {
+        var headers = response.getAllHeaders();
+        var location = headers['Location'] || headers['location'] || '';
+        if (Array.isArray(location)) location = location[0] || '';
+        if (!location) return '';
+        if (/^https:\/\//i.test(location)) {
+          url = location;
+        } else if (location.charAt(0) === '/' && location.charAt(1) !== '/') {
+          var origin = url.match(/^https:\/\/[^/?#]+/i);
+          if (!origin) return '';
+          url = origin[0] + location;
+        } else {
+          return ''; // http downgrade / protocol-relative / exotic — give up
+        }
+        continue;
+      }
+      break;
+    }
+    if (!response || response.getResponseCode() !== 200) return '';
+    return String(response.getContentText()).substring(0, 300000);
+  } catch (e) {
+    log('WARN', 'fetchHtmlSafely', e.message);
+    return '';
+  }
+}
+
+/**
+ * Reads a <meta> tag's content by property/name key (e.g. 'og:title'), tolerant
+ * of either attribute order, HTML-decoding the value.
+ */
+function extractMetaTag(html, key) {
+  if (!html) return '';
+  var k = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  var re1 = new RegExp('<meta[^>]*(?:property|name)=["\']' + k + '["\'][^>]*content=["\']([^"\']*)["\']', 'i');
+  var re2 = new RegExp('<meta[^>]*content=["\']([^"\']*)["\'][^>]*(?:property|name)=["\']' + k + '["\']', 'i');
+  var m = html.match(re1) || html.match(re2);
+  return m ? decodeHtmlEntities(m[1]).trim() : '';
+}
+
+/** Reads the document <title>, HTML-decoded. */
+function extractTitleTag(html) {
+  if (!html) return '';
+  var m = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+  return m ? decodeHtmlEntities(m[1]).trim() : '';
+}
+
+/** Normalizes whitespace and strips a trailing " - YouTube" from a scraped title. */
+function cleanChannelTitle(name) {
+  if (!name) return '';
+  var s = String(name).replace(/\s+/g, ' ').trim();
+  return s.replace(/\s*[-|–—]\s*YouTube\s*$/i, '').trim();
 }
 
 /**
@@ -1402,9 +1805,20 @@ function parseRegex(xml, channelName, tier, category) {
  */
 function readAllVideos() {
   var sheet = getSheet('VIDEOS');
-  var data = sheet.getDataRange().getValues();
+  return normalizeVideoRows(sheet.getDataRange().getValues());
+}
 
-  if (data.length <= 1) return [];
+/**
+ * Turns a raw sheet grid (header + rows) into normalized, deduped video
+ * objects. Shared by readAllVideos (live sheet) and readArchiveVideos (the
+ * Archive tab) so both serve the exact same shape — same expiry drop, same
+ * media_type inference, same integer counts, same URL dedupe.
+ *
+ * @param {Array[]} data - sheet.getDataRange().getValues()
+ * @returns {Object[]}
+ */
+function normalizeVideoRows(data) {
+  if (!data || data.length <= 1) return [];
 
   var headers = data[0];
   var videos = [];
@@ -1441,6 +1855,87 @@ function readAllVideos() {
   }
 
   return dedupeByUrl(videos);
+}
+
+/**
+ * Reads and normalizes every row from the Archive tab (videos pruned out of the
+ * live sheet by pruneOldVideos). Returns [] when the tab doesn't exist yet — a
+ * catalog that has never been pruned simply has no archive. The archive is NOT
+ * scanned by the feed (readAllVideos reads only the first sheet); it's served
+ * exclusively through handleArchive so full-history search/favorites can reach
+ * it as a separate, off-the-hot-path request.
+ *
+ * @returns {Object[]}
+ */
+function readArchiveVideos() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS);
+  var sheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
+  if (!sheet) return [];
+  return normalizeVideoRows(sheet.getDataRange().getValues());
+}
+
+/**
+ * The full archive, sorted newest-first, read through a short-lived cache.
+ *
+ * The archive request is cold (only a full-history search/favorites build hits
+ * it) but the frontend pulls it in several offset pages back-to-back; caching
+ * the sorted list means the whole burst costs ONE sheet scan+sort instead of
+ * one per page. Best-effort: an archive too large for the 100KB cache value
+ * silently falls through to a live scan per request (the try/catch), and the
+ * cache is dropped whenever a crawl adds to the archive (invalidateArchive).
+ *
+ * @returns {Object[]} archived videos, sorted by compareVideos
+ */
+function readSortedArchive() {
+  try {
+    var raw = CacheService.getScriptCache().get(ARCHIVE_CACHE_KEY);
+    if (raw) {
+      var cached = JSON.parse(raw);
+      if (cached && Array.isArray(cached.videos)) return cached.videos;
+    }
+  } catch (e) {
+    /* fall through to a live scan */
+  }
+
+  var videos = readArchiveVideos();
+  videos.sort(compareVideos);
+
+  try {
+    CacheService.getScriptCache().put(
+      ARCHIVE_CACHE_KEY, JSON.stringify({ videos: videos }), ARCHIVE_CACHE_SECONDS);
+  } catch (e) {
+    /* oversized archive or cache hiccup — next request re-scans */
+  }
+  return videos;
+}
+
+/** Drops the cached sorted archive. Called when a crawl adds rows to it. */
+function invalidateArchive() {
+  try {
+    CacheService.getScriptCache().remove(ARCHIVE_CACHE_KEY);
+  } catch (e) {
+    /* best-effort */
+  }
+}
+
+/**
+ * Serves a page of the archive (offset-paginated, newest-first) for the
+ * frontend's full-history search/favorites index. Mirrors the offset shape the
+ * search-index build already consumes from the feed, so the same chunked
+ * fetch-and-merge loop drives it. Read-only.
+ *
+ * @param {Object} params - { page, limit }
+ * @returns {Object} { status:'ok', videos, total, page }
+ */
+function handleArchive(params) {
+  var page = parseInt(params.page) || 1;
+  var limit = parseInt(params.limit) || DEFAULT_PAGE_LIMIT;
+
+  var videos = readSortedArchive();
+  var start = (page - 1) * limit;
+  var paged = start >= 0 ? videos.slice(start, start + limit) : [];
+
+  return { status: 'ok', videos: paged, total: videos.length, page: page };
 }
 
 /** Engagement weight for dedupe tiebreaks: votes dominate, comments break ties. */

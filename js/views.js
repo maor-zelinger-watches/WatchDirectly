@@ -77,6 +77,12 @@ function mergeIndexChunk(index, chunkVideos) {
  * Every merge notifies progress subscribers so results paint incrementally.
  * Uses offset pagination — unlike cursors, pages are order-independent and
  * can be fetched concurrently. Returns the complete index.
+ *
+ * Two phases: the live catalog (recent, small — this is what makes search feel
+ * instant) first, then the archive (everything aged past the backend's
+ * retention window) via a SEPARATE endpoint so it never delays the live
+ * results. Archived items merge in as they arrive, extending search and
+ * Favorites back through the whole history.
  */
 async function buildSearchIndex() {
   const chunk = CONFIG.SEARCH_CHUNK_SIZE;
@@ -103,7 +109,53 @@ async function buildSearchIndex() {
     ));
   }
 
+  // Phase 2: backfill the archive (older than the live window) into the index.
+  await appendArchiveToIndex();
+
   return state.searchIndex;
+}
+
+/**
+ * Backfills the archive into the search index as a separate, best-effort phase.
+ * Runs after the live catalog so recent results are already searchable; each
+ * archived chunk merges in and repaints via the progress subscribers. Honors
+ * the same SEARCH_INDEX_LIMIT ceiling as the live build (the archive is the
+ * long tail, so it's what the cap bites first). Fully silent on any failure —
+ * an older backend without the `archive` action, an empty archive, or a flaky
+ * network just leaves the live index as the whole index.
+ */
+async function appendArchiveToIndex() {
+  const chunk = CONFIG.SEARCH_CHUNK_SIZE;
+  const cap = CONFIG.SEARCH_INDEX_LIMIT;
+  if ((state.searchIndex ? state.searchIndex.length : 0) >= cap) return;
+
+  let firstArchive;
+  try {
+    firstArchive = await api.fetchArchive(1, chunk);
+  } catch (e) {
+    return; // no archive action / empty / offline — live index stands
+  }
+  const firstVideos = firstArchive.videos || [];
+  if (firstVideos.length === 0) return;
+
+  state.searchIndex = mergeIndexChunk(state.searchIndex || [], firstVideos);
+  notifyIndexProgress();
+
+  const total = Math.min(firstArchive.total || firstVideos.length, cap);
+  if (total <= firstVideos.length) return;
+
+  const pages = [];
+  for (let p = 2; (p - 1) * chunk < total; p++) pages.push(p);
+  await Promise.all(pages.map(p =>
+    api.fetchArchive(p, chunk)
+      .then(data => {
+        // Stop merging once the combined index hits the ceiling.
+        if ((state.searchIndex ? state.searchIndex.length : 0) >= cap) return;
+        state.searchIndex = mergeIndexChunk(state.searchIndex, data.videos || []);
+        notifyIndexProgress();
+      })
+      .catch(() => { /* best-effort — those archived items miss this session */ })
+  ));
 }
 
 /**
