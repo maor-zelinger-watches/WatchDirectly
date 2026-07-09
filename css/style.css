@@ -863,8 +863,9 @@ img {
   justify-content: flex-start;
 }
 
-/* Expand-to-fullscreen button, bottom right of every card */
-.media-card__expand {
+/* Expand-to-fullscreen and share buttons, bottom right of every card */
+.media-card__expand,
+.media-card__share {
   display: flex;
   align-items: center;
   padding: var(--sp-3) var(--sp-4);
@@ -874,9 +875,17 @@ img {
   transition: color var(--transition-fast), background var(--transition-fast);
 }
 
-.media-card__expand:hover {
+.media-card__expand:hover,
+.media-card__share:hover {
   color: var(--accent);
   background: var(--accent-dim);
+}
+
+/* Mount point for a deep-linked (?v=) card that isn't in the feed. Shares
+   the .feed grid styling for the card itself, but must contribute zero
+   height while unused or the feed gets phantom top spacing. */
+#deeplink-container:empty {
+  display: none;
 }
 
 /* ============================================================

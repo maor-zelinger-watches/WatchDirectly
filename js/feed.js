@@ -121,6 +121,9 @@ export function createMediaCard(item) {
           <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}">
             💬 ${item.comment_count || 0} comments
           </button>
+          <button class="media-card__share" data-video-id="${escaped.videoId}" title="Share" aria-label="Share ${escaped.title}">
+            <span class="media-card__share-icon" aria-hidden="true">🔗</span>
+          </button>
           <button class="media-card__expand" data-video-id="${escaped.videoId}" title="Expand" aria-label="Expand ${escaped.title}">
             <span class="media-card__expand-icon" aria-hidden="true">⛶</span>
           </button>

@@ -13,6 +13,7 @@ import { toggleComments } from './comments-ui.js';
 import { toggleVote } from './votes.js';
 import { toggleStar, markStarButton } from './stars.js';
 import { toggleFullscreen } from './fullscreen.js';
+import { shareVideo } from './share.js';
 import { observeLazyIframe } from './lazy-iframe.js';
 
 /**
@@ -54,6 +55,14 @@ export function buildCard(video) {
     starBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleStar(video.channel_name);
+    });
+  }
+
+  const shareBtn = card.querySelector('.media-card__share');
+  if (shareBtn) {
+    shareBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      shareVideo(video.video_id, video.title);
     });
   }
 

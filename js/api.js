@@ -178,6 +178,21 @@ export function createApiClient(baseUrl) {
     },
 
     /**
+     * Fetches a single media item by id, for shared deep links (?v=<id>).
+     * The backend checks the live catalog first, then the archive, so links
+     * keep working after the video ages out of the feed. Resolves with
+     * `video: null` when the id genuinely doesn't exist — distinct from the
+     * thrown transport/backend errors. Requires backend ≥ 1.12.0; an older
+     * backend throws "Unknown action" here.
+     *
+     * @param {string} videoId - YouTube video ID or article item ID
+     * @returns {Promise<{video: Object|null}>}
+     */
+    async fetchVideo(videoId) {
+      return get(`action=video&videoId=${encodeURIComponent(videoId)}`);
+    },
+
+    /**
      * Fetches the curated creator list (name, host, url, avatar, etc.) that
      * backs the Channels tab and search's host-name matching.
      *

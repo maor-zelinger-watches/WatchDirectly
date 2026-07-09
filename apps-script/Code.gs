@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.11.0';
+const VERSION = '1.12.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -189,6 +189,8 @@ function doGet(e) {
         return jsonResponse(handleTopWeek(e.parameter));
       case 'archive':
         return jsonResponse(handleArchive(e.parameter));
+      case 'video':
+        return jsonResponse(handleVideo(e.parameter));
       case 'getChannels':
         return jsonResponse(handleGetChannels());
       case 'refresh':
@@ -2102,6 +2104,41 @@ function handleArchive(params) {
   var paged = start >= 0 ? videos.slice(start, start + limit) : [];
 
   return { status: 'ok', videos: paged, total: videos.length, page: page };
+}
+
+/**
+ * Looks up a single video by id for shared deep links (?v=<id>). Checks the
+ * cached feed head first (free for anything recent), then the live sheet, then
+ * the archive — a shared link keeps working after the video ages out of the
+ * feed. Every path serves the normalizeVideoRows item shape, so the frontend
+ * renders the result exactly like a feed item (expired premiere rows are
+ * already dropped by that normalization).
+ *
+ * Not-found is { status:'ok', video:null } rather than an error, so the
+ * frontend can tell "genuinely gone" from a transport failure.
+ *
+ * @param {Object} params - { videoId }
+ * @returns {Object} { status:'ok', video } | { status:'ok', video:null }
+ */
+function handleVideo(params) {
+  var videoId = String((params && params.videoId) || '').trim();
+  if (!videoId) {
+    return { status: 'error', message: 'Missing videoId' };
+  }
+
+  function findIn(videos) {
+    for (var i = 0; i < videos.length; i++) {
+      if (videos[i].video_id === videoId) return videos[i];
+    }
+    return null;
+  }
+
+  var head = readFeedHead();
+  var video = head ? findIn(head.videos) : null;
+  if (!video) video = findIn(readAllVideos());
+  if (!video) video = findIn(readSortedArchive());
+
+  return { status: 'ok', video: video };
 }
 
 /** Engagement weight for dedupe tiebreaks: votes dominate, comments break ties. */

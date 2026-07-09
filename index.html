@@ -77,6 +77,14 @@
         <div class="feed-controls__chips" id="category-chips" role="group" aria-label="Filter by category"></div>
       </div>
 
+      <!-- Deep-linked card mount (share.js). Outside #feed-container on
+           purpose: the feed's revalidation diff, dedupe, and scroll-anchor
+           logic are all scoped to that container and must never see the
+           temporary card a ?v= link fetches. Placed BEFORE the feed so a
+           duplicate data-video-id resolves global selectors to this (the
+           visible, fullscreen) card. -->
+      <div class="feed" id="deeplink-container"></div>
+
       <!-- Feed Cards Container -->
       <div class="feed" id="feed-container">
         <!-- Video cards with inline comments rendered here by JS -->

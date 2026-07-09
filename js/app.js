@@ -33,6 +33,7 @@ import { clearVoteMarkings } from './votes.js';
 import { loadStarsFromStorage, clearStarMarkings, setOnStarsChanged } from './stars.js';
 import { loadMyVotesAndStars } from './bootstrap.js';
 import { setupFullscreenKeys } from './fullscreen.js';
+import { handleDeepLink } from './share.js';
 import { setupSinglePlay } from './single-play.js';
 import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged, loadMoreTop } from './views.js';
 
@@ -82,6 +83,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Stale-while-revalidate: show cache instantly, then fetch fresh data
     revalidateFeed();
   }
+
+  // After the cache paint so a ?v= link to an already-cached video reuses its
+  // card; NOT awaited so a shared-link lookup never delays feed startup.
+  handleDeepLink();
 });
 
 // ============================================================

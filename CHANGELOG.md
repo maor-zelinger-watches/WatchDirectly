@@ -21,6 +21,27 @@ that component's heading.
 
 ## Frontend
 
+### 1.18.0 — 2026-07-09
+- **Share a specific video.** Every card gained a 🔗 share button (all views,
+  all card types including articles) that produces a `?v=<video_id>` link —
+  `navigator.share` on mobile, copy-to-clipboard with a "Link copied" toast
+  everywhere else. Opening such a link lands straight in the fullscreen
+  watch-and-discuss overlay for that video, with the normal feed behind it on
+  close. New `share.js` owns the URL format, the share action, and the on-load
+  deep-link handler: it reuses an already-painted feed card when the video is on
+  page 1, and otherwise fetches the item by id (new `api.fetchVideo`) and mounts
+  a temporary card in a dedicated `#deeplink-container` placed *outside*
+  `#feed-container`, so the feed's revalidation diff, dedupe, and scroll-anchor
+  logic never touch it. `enterFullscreen` is now exported so the deep-link path
+  can open the overlay directly; `exitFullscreen` removes the temp card and
+  strips `?v=` so the URL matches what's on screen (a refresh while open
+  reopens the video). `handleDeepLink` runs un-awaited from boot so a shared
+  link never delays feed startup, and every failure path — unknown/deleted id,
+  offline, old backend — toasts and falls back to the normal feed. Links to
+  videos that have aged into the archive keep working. **Requires backend
+  ≥ 1.12.0** for links to non-recent videos; degrades gracefully (error toast +
+  feed) against an older backend.
+
 ### 1.17.0 — 2026-07-09
 - **Search and Favorites now reach the archive** — videos aged past the
   backend's retention window and moved to the Archive tab. `buildSearchIndex`
@@ -324,6 +345,20 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.12.0 — 2026-07-09
+- **`video` action — look up a single item by id, for shared deep links.**
+  Backs the frontend's `?v=<video_id>` share links (frontend ≥ 1.18.0).
+  `handleVideo` resolves an id cheapest-path-first: the cached feed head
+  (`readFeedHead`, free for anything recent), then the live sheet
+  (`readAllVideos`), then the archive (`readSortedArchive`) — so a link keeps
+  working after the video ages out of the live catalog. Every path serves the
+  exact `normalizeVideoRows` item shape (same `media_type` inference, integer
+  counts, expired-premiere drop) so the frontend renders it like any feed item.
+  Composes existing cached readers, so no new cache keys. A genuinely unknown
+  id returns `{ status: 'ok', video: null }` (distinct from the error shape a
+  missing `videoId` param gets), letting the client tell "no longer available"
+  from a transport failure. Public GET, no auth — same as `feed`/`archive`.
 
 ### 1.11.0 — 2026-07-09
 - **RSS-first feed fetch with a YouTube Data API fallback.** YouTube began

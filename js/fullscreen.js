@@ -32,7 +32,7 @@ export function toggleFullscreen(card) {
   }
 }
 
-function enterFullscreen(card) {
+export function enterFullscreen(card) {
   const videoId = card.dataset.videoId;
   if (!videoId || state.fullscreenVideoId) return;
 
@@ -86,6 +86,20 @@ export function exitFullscreen() {
       const icon = expandBtn.querySelector('.media-card__expand-icon');
       if (icon) icon.textContent = '⛶';
     }
+    // A deep-linked card (share.js) is a temporary mount outside the feed —
+    // remove it so the feed is all that remains.
+    if (card.dataset.deepLink === '1') {
+      card.remove();
+    }
+  }
+
+  // A shared link's ?v= stays in the URL while the overlay is open (so a
+  // refresh reopens the video); leaving the overlay is leaving the video,
+  // whether it was a temp card or one already in the feed — strip it so the
+  // URL matches what's on screen. (Inline rather than share.js's
+  // clearShareParam: share.js imports enterFullscreen from here.)
+  if (new URLSearchParams(location.search).has('v')) {
+    history.replaceState(null, '', location.pathname);
   }
 
   // Land back exactly where the user was. The exact offset is right when
