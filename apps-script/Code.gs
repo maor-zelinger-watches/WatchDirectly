@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.10.0';
+const VERSION = '1.11.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -821,13 +821,59 @@ function pruneOldVideos() {
 }
 
 function fetchAndParseFeed(feedUrl, channelName, tier, category) {
-  var maxRetries = 4;
+  // Prefer RSS: it's free (no Data API quota) and returns the same items when
+  // YouTube isn't blocking the request. But YouTube now serves 404/500 to
+  // youtube.com/feeds/videos.xml requests from Apps Script's datacenter IPs, so
+  // when a YouTube channel feed fails — or comes back empty — and an API key is
+  // configured, fall back to the Data API's playlistItems.list on the channel's
+  // uploads playlist (a keyed googleapis.com endpoint that isn't IP-blocked and
+  // is already used by enrichLiveMetadata).
+  var ytChannelId = extractFeedChannelId(feedUrl);
+  var apiKey = ytChannelId ? getMeta('youtube_api_key') : '';
+  var canUseApi = !!(ytChannelId && apiKey);
+
+  // With a fallback available, don't burn ~30s retrying a blocked RSS feed — a
+  // 404/500 here is the IP block, which won't clear within a retry window — so
+  // give RSS a single shot, then fall back. A non-YouTube (blog/news) feed has
+  // no fallback, so it keeps the full retry budget as its only line of defence.
+  var rssResult = null;
+  try {
+    rssResult = fetchAndParseRss(feedUrl, channelName, tier, category, canUseApi ? 0 : 4);
+  } catch (rssError) {
+    if (!canUseApi) throw rssError;
+    log('WARN', 'fetchAndParseFeed', 'RSS failed for ' + channelName + ' (' + rssError.message + ') — falling back to Data API');
+  }
+
+  if (rssResult && rssResult.length > 0) return rssResult;
+  if (!canUseApi) return rssResult || [];
+
+  if (rssResult) {
+    log('INFO', 'fetchAndParseFeed', 'RSS returned 0 items for ' + channelName + ' — falling back to Data API');
+  }
+  return fetchYouTubeUploads(ytChannelId, channelName, tier, category, apiKey);
+}
+
+/**
+ * Fetches and parses an RSS/Atom feed with exponential-backoff retries.
+ * Any non-200 response is retried up to maxRetries times, then thrown as
+ * 'HTTP <code>' (caller decides whether to fall back). A 200 is parsed and
+ * returned even if it yields zero items — an empty parse is not an error here.
+ *
+ * @param {string} feedUrl
+ * @param {string} channelName
+ * @param {*} tier
+ * @param {*} category
+ * @param {number} maxRetries - Extra attempts after the first (0 = one shot).
+ * @returns {Object[]} Parsed items.
+ * @throws {Error} 'HTTP <code>' if every attempt is non-200.
+ */
+function fetchAndParseRss(feedUrl, channelName, tier, category, maxRetries) {
   var lastError = null;
 
   for (var attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
-      var delay = Math.pow(2, attempt) * 1000; // 2s, 4s
-      log('WARN', 'fetchAndParseFeed', 'Retry ' + attempt + '/' + maxRetries + ' for ' + channelName + ' after ' + (delay/1000) + 's');
+      var delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s, 16s
+      log('WARN', 'fetchAndParseRss', 'Retry ' + attempt + '/' + maxRetries + ' for ' + channelName + ' after ' + (delay/1000) + 's');
       Utilities.sleep(delay);
     }
 
@@ -835,14 +881,134 @@ function fetchAndParseFeed(feedUrl, channelName, tier, category) {
     var code = response.getResponseCode();
 
     if (code === 200) {
-      var xml = response.getContentText();
-      return parseRssFeed(xml, channelName, tier, category);
+      return parseRssFeed(response.getContentText(), channelName, tier, category);
     }
 
     lastError = 'HTTP ' + code;
   }
 
   throw new Error(lastError);
+}
+
+/**
+ * Extracts the YouTube channel id (UC…) from a videos.xml RSS feed URL.
+ * Returns '' for anything that isn't a YouTube channel feed — blog/news feeds
+ * added via onboarding stay on the RSS path.
+ * @param {string} feedUrl
+ * @returns {string} 'UC…' channel id, or '' if not a YouTube channel feed.
+ */
+function extractFeedChannelId(feedUrl) {
+  if (!feedUrl) return '';
+  var m = String(feedUrl).match(/youtube\.com\/feeds\/videos\.xml\?[^#]*\bchannel_id=(UC[\w-]+)/i);
+  return m ? m[1] : '';
+}
+
+/**
+ * Fetches a YouTube channel's recent uploads via the Data API instead of the
+ * IP-blocked public RSS feed. Every channel's uploads live in a playlist whose
+ * id is the channel id with its 'UC' prefix swapped for 'UU', so no extra
+ * lookup is needed. Costs 1 quota unit per channel (playlistItems.list).
+ *
+ * Produces the same item objects as parseAtom so the rest of crawlAllFeeds is
+ * unchanged; view_count is left 0 here and recovered by enrichLiveMetadata
+ * (which the crawl already runs on every batch).
+ *
+ * @param {string} channelId - 'UC…' channel id.
+ * @param {string} channelName
+ * @param {*} tier
+ * @param {*} category
+ * @param {string} apiKey - YouTube Data API key (from Meta 'youtube_api_key').
+ * @returns {Object[]} Parsed upload items, newest first (~15 entries).
+ * @throws {Error} 'HTTP <code>' on a non-200 response, matching the RSS path so
+ *         crawlAllFeeds' catch logs identically.
+ */
+function fetchYouTubeUploads(channelId, channelName, tier, category, apiKey) {
+  var uploadsPlaylistId = 'UU' + channelId.slice(2);
+  var url = 'https://www.googleapis.com/youtube/v3/playlistItems'
+    + '?part=snippet,contentDetails'
+    + '&maxResults=15'
+    + '&playlistId=' + encodeURIComponent(uploadsPlaylistId)
+    + '&key=' + encodeURIComponent(apiKey);
+
+  var maxRetries = 4;
+  var lastError = null;
+
+  for (var attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      var delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s, 16s
+      log('WARN', 'fetchYouTubeUploads', 'Retry ' + attempt + '/' + maxRetries + ' for ' + channelName + ' after ' + (delay/1000) + 's');
+      Utilities.sleep(delay);
+    }
+
+    var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    var code = response.getResponseCode();
+
+    if (code === 200) {
+      return parseYouTubeUploads(response.getContentText(), channelName, tier, category);
+    }
+
+    lastError = 'HTTP ' + code;
+    // 404 = playlist genuinely gone (deleted/renamed channel); 403 = quota
+    // exhausted or key restriction. Neither clears within a 30s retry window,
+    // so bail immediately rather than stalling the whole crawl per bad channel.
+    if (code === 404 || code === 403) break;
+  }
+
+  throw new Error(lastError);
+}
+
+/**
+ * Maps a playlistItems.list JSON response into the same item shape parseAtom
+ * yields, so downstream persistence, dedup and enrichLiveMetadata are unchanged.
+ * Skips private/deleted placeholder entries (they carry no real video).
+ *
+ * @param {string} jsonText - Raw response body from playlistItems.list.
+ * @param {string} channelName
+ * @param {*} tier
+ * @param {*} category
+ * @returns {Object[]} Parsed upload items.
+ */
+function parseYouTubeUploads(jsonText, channelName, tier, category) {
+  var data = JSON.parse(jsonText);
+  var items = data.items || [];
+  var videos = [];
+
+  for (var i = 0; i < items.length; i++) {
+    var snippet = items[i].snippet || {};
+    var details = items[i].contentDetails || {};
+    var videoId = details.videoId
+      || (snippet.resourceId && snippet.resourceId.videoId) || '';
+    if (!videoId) continue;
+
+    // Private/deleted uploads still occupy a playlist slot with a placeholder
+    // title and no usable video; skip them so they never reach the sheet.
+    var title = decodeHtmlEntities(snippet.title || '');
+    if (title === 'Private video' || title === 'Deleted video') continue;
+
+    var thumbs = snippet.thumbnails || {};
+    var thumb = thumbs.maxres || thumbs.standard || thumbs.high
+      || thumbs.medium || thumbs.default || {};
+
+    // contentDetails.videoPublishedAt is the true upload time; snippet.publishedAt
+    // is when it was added to the uploads playlist (same for real uploads, but
+    // videoPublishedAt is the authoritative field).
+    var published = details.videoPublishedAt || snippet.publishedAt;
+
+    videos.push({
+      video_id: videoId,
+      media_type: 'video',
+      channel_name: channelName,
+      title: title,
+      url: 'https://www.youtube.com/watch?v=' + videoId,
+      preview_image: thumb.url || ('https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg'),
+      published_at: toIsoDate(published),
+      tier: tier,
+      category: category,
+      view_count: 0,
+    });
+  }
+
+  return videos;
 }
 
 function extractYouTubeId(url) {

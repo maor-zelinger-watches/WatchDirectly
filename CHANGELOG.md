@@ -325,6 +325,31 @@ that component's heading.
 
 ## Backend
 
+### 1.11.0 — 2026-07-09
+- **RSS-first feed fetch with a YouTube Data API fallback.** YouTube began
+  serving `404`/`500` to `youtube.com/feeds/videos.xml` requests originating from
+  Apps Script's shared datacenter IPs, so a crawl failed *every* channel wholesale
+  even though the feeds were fine from any normal IP (the URLs, channel_ids, and
+  User-Agent were all fine — only the request origin was blocked). `fetchAndParseFeed`
+  still tries RSS first (it's free and returns the same items when the block
+  isn't in effect), but when a YouTube channel feed fails — or comes back with zero
+  items — it falls back to the Data API's `playlistItems.list` on the channel's
+  uploads playlist (the channel_id with its `UC` prefix swapped for `UU`), a keyed
+  `googleapis.com` endpoint that isn't IP-blocked and that `enrichLiveMetadata`
+  already uses. The fallback reuses the existing `youtube_api_key` and costs 1
+  quota unit per channel; results are mapped into the exact shape `parseAtom`
+  yields, so dedup, persistence, and live-metadata enrichment are unchanged. To
+  stay under the 6-minute execution cap, a YouTube feed with a key available gets a
+  single RSS attempt before falling back (a 404/500 there is the IP block, which
+  won't clear on retry), and the API path fails fast on 404/403; non-YouTube
+  (blog/news) feeds have no fallback, so they keep the full RSS retry budget.
+- **`Test_Code.gs` — editor-runnable feed diagnostics.** Adds a set of `test_…`
+  functions (run by hand from the Apps Script editor, never by the crawl or a
+  trigger) to check the fetch path live: pure-logic checks for channel-id
+  extraction and the API-JSON mapping, a key/quota check, a per-channel RSS-vs-API
+  probe (`test_rssVsApiAllChannels`) that makes the IP block visible at a glance,
+  and an end-to-end run of the real routing. Inert in production.
+
 ### 1.10.0 — 2026-07-09
 - **`archive` action — serve the aged-out history to full-catalog search.**
   `pruneOldVideos` (1.9.0) moves videos past the retention window into an Archive
