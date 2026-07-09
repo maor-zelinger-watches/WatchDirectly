@@ -421,11 +421,25 @@ async function revalidateFeed() {
       [...container.querySelectorAll('.media-card')].map(c => c.dataset.videoId)
     );
 
+    // The tail-preserving merge below rests on "missing from fresh page 1 ==
+    // pushed down, not deleted". That only holds when fresh page 1 still
+    // overlaps the cached front — a few items prepended, the rest shifted
+    // down. When the cached front shares ZERO ids with fresh page 1 the whole
+    // visible window is wholesale-stale, so nothing was "pushed down": keeping
+    // those cards strands them interleaved with the fresh ones (prefetch_races
+    // bug 4). Fall back to a full replace + re-paginate; a genuine burst of
+    // brand-new items simply re-fetches the tail, no data lost.
+    const frontOverlap = state.videos
+      .slice(0, freshVideos.length)
+      .some(v => freshIdSet.has(v.video_id));
+    const fullReplace = !hasTail || !frontOverlap;
+
     // --- 1. Animate out cards no longer in the fresh feed ---
-    // Only when the whole loaded feed fits within page 1. With a tail loaded,
-    // an item missing from fresh page 1 was pushed down to a page we didn't
-    // refetch, not deleted — removing it would wipe the scrolled feed.
-    if (!hasTail) {
+    // Skipped only for an incremental change with a tail loaded: there an item
+    // missing from fresh page 1 was pushed down to a page we didn't refetch,
+    // not deleted — removing it would wipe the scrolled feed. A full replace
+    // (single page, or a wholesale-stale front) animates the stale cards out.
+    if (fullReplace) {
       const removedCards = container.querySelectorAll('.media-card');
       const removePromises = [];
 
@@ -504,7 +518,7 @@ async function revalidateFeed() {
     }
 
     // --- 5. Update state and cache ---
-    if (hasTail) {
+    if (!fullReplace) {
       // Non-destructive merge (the "only add what's missing" reconcile): pull
       // fresh counts onto the items we already hold, splice in any genuinely-
       // new top items, and keep the whole scrolled tail. Pagination keeps its

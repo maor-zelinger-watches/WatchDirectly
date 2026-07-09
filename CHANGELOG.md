@@ -21,7 +21,20 @@ that component's heading.
 
 ## Frontend
 
-### 1.16.0 — 2026-07-09
+### 1.16.1 — 2026-07-09
+- **Feed revalidation no longer orphans stale cards when the top page turned
+  over server-side.** `revalidateFeed`'s tail-preserving merge assumes an item
+  missing from fresh page 1 was *pushed down* (still on a later page), not
+  deleted — true when a few items were prepended, but false when the whole
+  cached front is wholesale-stale. In that case the diff was inserting the fresh
+  page-1 cards while keeping the stale ones, leaving the feed permanently
+  interleaved (e.g. *fresh 3 / stale 3 / fresh 4 / stale 4 …*) once the user had
+  scrolled past page 1. Now, when the cached front shares zero ids with fresh
+  page 1, the diff full-replaces and re-paginates instead of merging; a genuine
+  burst of brand-new items simply re-fetches the tail, so no data is lost. This
+  is the regression `tests/e2e/prefetch_races.spec.js` "bug 4" guards — it was
+  silently broken when the tail-preserving merge (1.13.0) landed, since the e2e
+  suite isn't part of `npm test`.
 - **Content-Security-Policy + referrer policy** on `index.html`, `terms.html`,
   and `privacy.html` (shipped as `<meta>` since GitHub Pages can't set real HTTP
   headers). The policy is defense-in-depth for the app's `innerHTML` rendering:
