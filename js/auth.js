@@ -1,17 +1,34 @@
 /**
  * auth.js — Google Sign-In integration for WatchDirectly
- * 
- * Uses Google Identity Services (GIS) for one-tap sign-in.
- * Manages user session state and provides the ID token for comment authentication.
+ *
+ * Uses Google Identity Services (GIS) for one-tap sign-in. On first sign-in we
+ * verify the Google ID token once, then exchange it for a long-lived, app-issued
+ * session token (see apps-script/Code.gs). From then on `currentUser.token` holds
+ * that session token: page loads and authenticated calls reuse it, and it renews
+ * itself with a silent fetch — so a returning visitor never sees the One Tap
+ * overlay flash on open. GIS is only re-invoked if the session lapses entirely
+ * (an absence longer than the session lifetime).
  */
+
+import { api } from './api-client.js';
 
 /**
  * @typedef {Object} User
  * @property {string} name - Display name
  * @property {string} email - Email address
  * @property {string} picture - Avatar URL
- * @property {string} token - Google ID token (for API auth)
+ * @property {string} token - Auth token for the backend: an app session token
+ *   after exchange, or a raw Google ID token as a fallback before exchange.
  */
+
+// App session tokens are `wds1.<base64url(payload)>.<sig>`; the prefix lets us
+// tell one from a Google JWT without decoding. Kept in sync with
+// SESSION_TOKEN_PREFIX in apps-script/Code.gs.
+const SESSION_TOKEN_PREFIX = 'wds1.';
+
+// Slide a session forward once it's within this long of expiring, so a regular
+// visitor's token never lapses. Smaller than the backend's SESSION_TTL_DAYS.
+const SESSION_SLIDE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** @type {User|null} */
 let currentUser = null;
@@ -53,9 +70,36 @@ export function initAuth(clientId) {
     auto_select: true,
   });
 
-  // Only show the one-tap prompt if user isn't already signed in
+  // Only show the one-tap prompt if user isn't already signed in. A restored
+  // session token keeps currentUser set, so a returning visitor never triggers
+  // the overlay here.
   if (!currentUser) {
     google.accounts.id.prompt();
+  } else {
+    // Signed in from a restored session — if the token is getting old, slide it
+    // forward in the background. Fire-and-forget and fully silent (no UI); it
+    // never blocks first paint.
+    maybeSlideSession();
+  }
+}
+
+/**
+ * Silently renews the session token if it's within the slide window of expiry.
+ * Best-effort and strictly silent: on any failure the token is still valid, so
+ * we just try again on the next load — crucially NOT falling back to the
+ * interactive One Tap the way refreshToken() would. No-op for a Google-token
+ * fallback session (those can't be slid without GIS).
+ */
+async function maybeSlideSession() {
+  const token = getToken();
+  if (!token || !isSessionToken(token)) return;
+  const exp = tokenExpiryMs(token);
+  if (!(exp && exp > Date.now() && exp - Date.now() < SESSION_SLIDE_WINDOW_MS)) return;
+  try {
+    const res = await api.createSession(token);
+    if (res && res.sessionToken) updateSessionToken(res.sessionToken);
+  } catch (e) {
+    // Best-effort — the current token is still valid; retry next load.
   }
 }
 
@@ -82,24 +126,38 @@ export function renderSignInButton(container) {
 
 /**
  * Handles the credential response from Google Sign-In.
- * Decodes the JWT to extract user info (without verification — that happens server-side).
- * 
+ * Decodes the JWT for display identity (verification happens server-side), then
+ * exchanges the Google ID token for a long-lived app session token so future
+ * loads re-authenticate silently. Falls back to the raw Google token if the
+ * exchange fails (e.g. an older backend that doesn't mint sessions yet).
+ *
  * @param {Object} response - Google credential response
+ * @returns {Promise<void>}
  */
-function handleCredentialResponse(response) {
-  const token = response.credential;
+async function handleCredentialResponse(response) {
+  const googleToken = response.credential;
 
   try {
-    // Decode the JWT payload (base64) to get user info
-    // Note: actual verification happens server-side in Apps Script
-    const payload = JSON.parse(atob(token.split('.')[1]));
-
-    currentUser = {
+    // Decode the JWT payload (base64) to get user info.
+    const payload = JSON.parse(atob(googleToken.split('.')[1]));
+    const identity = {
       name: payload.name || payload.email.split('@')[0],
       email: payload.email,
       picture: payload.picture || '',
-      token: token,
     };
+
+    // Exchange the Google ID token for an app session token. If anything goes
+    // wrong, keep the Google token — sign-in still works, just without the
+    // silent-refresh benefit.
+    let token = googleToken;
+    try {
+      const res = await api.createSession(googleToken);
+      if (res && res.sessionToken) token = res.sessionToken;
+    } catch (e) {
+      console.warn('Session exchange failed; using Google token:', e);
+    }
+
+    currentUser = { ...identity, token };
 
     // Persist to localStorage so session survives refresh
     localStorage.setItem('wd_user', JSON.stringify(currentUser));
@@ -146,28 +204,92 @@ export function getToken() {
   return currentUser ? currentUser.token : null;
 }
 
+/** True if the token is an app session token (vs a Google ID token). */
+function isSessionToken(token) {
+  return typeof token === 'string' && token.indexOf(SESSION_TOKEN_PREFIX) === 0;
+}
+
+/**
+ * Expiry (ms since epoch) for either token format, or null if undecodable.
+ * Session tokens: wds1.<base64url(payload)>.<sig>; Google JWTs: header.payload.sig.
+ */
+function tokenExpiryMs(token) {
+  try {
+    if (isSessionToken(token)) {
+      const start = SESSION_TOKEN_PREFIX.length;
+      const body = token.slice(start, token.indexOf('.', start));
+      const b64 = body.replace(/-/g, '+').replace(/_/g, '/');
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const payload = JSON.parse(new TextDecoder().decode(bytes));
+      return payload.exp ? payload.exp * 1000 : null;
+    }
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return payload.exp ? payload.exp * 1000 : null; // JWT exp is in seconds
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Checks if the stored token is expired or about to expire (within 5 min buffer).
  * @returns {boolean}
  */
 export function isTokenExpired() {
   if (!currentUser || !currentUser.token) return true;
-  try {
-    const payload = JSON.parse(atob(currentUser.token.split('.')[1]));
-    const expiresAt = payload.exp * 1000; // JWT exp is in seconds
-    return Date.now() > expiresAt - 5 * 60 * 1000; // 5 min buffer
-  } catch {
-    return true;
-  }
+  const expiresAt = tokenExpiryMs(currentUser.token);
+  if (expiresAt === null) return true;
+  return Date.now() > expiresAt - 5 * 60 * 1000; // 5 min buffer
 }
 
 /**
- * Refreshes the Google ID token by requesting a fresh credential via GIS.
- * Returns a promise that resolves with the new token or null if refresh fails.
- * 
+ * Updates just the auth token in place — after a silent session renewal — and
+ * persists it. Deliberately does NOT notify listeners: the user's identity is
+ * unchanged, only the token rotated, so there's nothing for the UI to repaint.
+ *
+ * @param {string} newToken
+ */
+function updateSessionToken(newToken) {
+  if (!currentUser || !newToken) return;
+  currentUser.token = newToken;
+  localStorage.setItem('wd_user', JSON.stringify(currentUser));
+}
+
+/**
+ * Refreshes the auth token. The common path is SILENT: exchange the current
+ * session token for a fresh one via a plain fetch — no Google UI. Only if that
+ * fails (the session lapsed past its lifetime, or we're on a Google-token
+ * fallback) do we fall back to re-invoking Google One Tap.
+ *
  * @returns {Promise<string|null>} Fresh token or null
  */
-export function refreshToken() {
+export async function refreshToken() {
+  const current = getToken();
+
+  // Silent renewal — works whenever the backend still accepts the token
+  // (session token within its lifetime, or a still-valid Google token).
+  if (current) {
+    try {
+      const res = await api.createSession(current);
+      if (res && res.sessionToken) {
+        updateSessionToken(res.sessionToken);
+        return res.sessionToken;
+      }
+    } catch (e) {
+      // Fall through to interactive re-auth below.
+    }
+  }
+
+  return interactiveRefresh();
+}
+
+/**
+ * Last-resort refresh via Google One Tap. Shows the overlay, so it's reserved
+ * for a visitor whose session lapsed entirely (away longer than the session
+ * lifetime). Resolves with the fresh token or null.
+ *
+ * @returns {Promise<string|null>}
+ */
+function interactiveRefresh() {
   return new Promise((resolve) => {
     if (typeof google === 'undefined' || !google.accounts) {
       resolve(null);
@@ -182,9 +304,9 @@ export function refreshToken() {
     // Temporarily override the callback to capture the fresh token
     google.accounts.id.initialize({
       client_id: _clientId,
-      callback: (response) => {
+      callback: async (response) => {
         clearTimeout(timeout);
-        handleCredentialResponse(response);
+        await handleCredentialResponse(response); // exchanges for a session token
         resolve(currentUser ? currentUser.token : null);
       },
       auto_select: true,

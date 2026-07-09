@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -78,10 +78,21 @@ const LIVE_GRACE_MS = 12 * 60 * 60 * 1000;
 // in js/app.js.
 const GOOGLE_CLIENT_ID = '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com';
 
+// App-issued session tokens. After the first Google Sign-In we verify the
+// Google ID token ONCE, then mint our own HMAC-signed token the client reuses
+// for ~SESSION_TTL_DAYS. This lets the frontend re-authenticate silently (a
+// plain fetch to ?action=session) instead of re-invoking Google One Tap — no
+// visible overlay when a returning visitor opens the site. The token is opaque
+// bearer material; SESSION_TOKEN_PREFIX lets authenticateUser tell an app token
+// from a Google JWT without decoding it.
+const SESSION_TTL_DAYS = 30;
+const SESSION_TOKEN_PREFIX = 'wds1.';
+
 const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
 // Cache per execution
 let _cachedLogLevel = null;
+let _cachedSessionSecret = null;
 
 
 // ============================================================
@@ -192,6 +203,8 @@ function doPost(e) {
         return jsonResponse(handleMyStars(data));
       case 'bootstrap':
         return jsonResponse(handleBootstrap(data));
+      case 'session':
+        return jsonResponse(handleSession(data));
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -1746,7 +1759,7 @@ function handleAddComment(data) {
   }
 
   // 3. Verify Google token and get user info
-  var user = verifyGoogleToken(token);
+  var user = authenticateUser(token);
   if (!user) {
     log('ERROR', 'addComment', 'Invalid Google token');
     return { status: 'error', message: 'Invalid authentication token' };
@@ -1882,7 +1895,7 @@ function handleVote(data) {
     return { status: 'error', message: 'videoId and token are required' };
   }
 
-  var user = verifyGoogleToken(token);
+  var user = authenticateUser(token);
   if (!user) {
     log('ERROR', 'vote', 'Invalid Google token');
     return { status: 'error', message: 'Invalid authentication token' };
@@ -1944,7 +1957,7 @@ function handleMyVotes(data) {
     return { status: 'error', message: 'token is required' };
   }
 
-  var user = verifyGoogleToken(token);
+  var user = authenticateUser(token);
   if (!user) {
     return { status: 'error', message: 'Invalid authentication token' };
   }
@@ -2040,7 +2053,7 @@ function handleStar(data) {
     return { status: 'error', message: 'channel and token are required' };
   }
 
-  var user = verifyGoogleToken(token);
+  var user = authenticateUser(token);
   if (!user) {
     log('ERROR', 'star', 'Invalid Google token');
     return { status: 'error', message: 'Invalid authentication token' };
@@ -2106,7 +2119,7 @@ function handleMyStars(data) {
     return { status: 'error', message: 'token is required' };
   }
 
-  var user = verifyGoogleToken(token);
+  var user = authenticateUser(token);
   if (!user) {
     return { status: 'error', message: 'Invalid authentication token' };
   }
@@ -2146,7 +2159,7 @@ function handleBootstrap(data) {
     return { status: 'error', message: 'token is required' };
   }
 
-  var user = verifyGoogleToken(token);
+  var user = authenticateUser(token);
   if (!user) {
     return { status: 'error', message: 'Invalid authentication token' };
   }
@@ -2260,6 +2273,194 @@ function verifyGoogleToken(idToken) {
 function tokenHash(idToken) {
   var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken);
   return Utilities.base64EncodeWebSafe(bytes);
+}
+
+// ============================================================
+// SESSION TOKENS (app-issued, HMAC-signed)
+// ============================================================
+
+/**
+ * Resolves a request to a user, accepting EITHER an app session token or a
+ * Google ID token. Every POST handler calls this instead of verifyGoogleToken,
+ * so a signed-in client authenticates with its long-lived session token and
+ * never re-hits Google. Session verification is a local HMAC check — no
+ * tokeninfo round trip — so it's also cheaper than a Google verify.
+ *
+ * @param {string} token - App session token (wds1.…) or Google ID token
+ * @returns {{email:string,name:string,picture:string}|null}
+ */
+function authenticateUser(token) {
+  if (!token) return null;
+  if (token.indexOf(SESSION_TOKEN_PREFIX) === 0) {
+    return verifySessionToken(token);
+  }
+  return verifyGoogleToken(token);
+}
+
+/**
+ * The HMAC secret used to sign session tokens. Stored in Script Properties and
+ * generated on first use, so there is no manual setup step. Cached per
+ * execution. Clearing it invalidates every outstanding session — clients then
+ * silently re-mint on their next authenticated call.
+ */
+function getSessionSecret() {
+  if (_cachedSessionSecret) return _cachedSessionSecret;
+  var props = PropertiesService.getScriptProperties();
+  var secret = props.getProperty('SESSION_HMAC_SECRET');
+  if (!secret) {
+    secret = Utilities.getUuid() + Utilities.getUuid(); // ~256 bits of entropy
+    props.setProperty('SESSION_HMAC_SECRET', secret);
+  }
+  _cachedSessionSecret = secret;
+  return secret;
+}
+
+/** base64url(HMAC-SHA256(body, secret)) — the signature over a token body. */
+function sessionSignature(body) {
+  var sig = Utilities.computeHmacSha256Signature(body, getSessionSecret());
+  return Utilities.base64EncodeWebSafe(sig);
+}
+
+/**
+ * Mints a session token for a verified user: `wds1.<body>.<sig>` where body is
+ * base64url(JSON({e,n,p,iat,exp})) and sig is its HMAC. exp is SESSION_TTL_DAYS
+ * out; the client slides it forward by re-minting before it lapses.
+ *
+ * @param {{email:string,name:string,picture:string}} user
+ * @returns {string}
+ */
+function mintSessionToken(user) {
+  var nowSec = Math.floor(Date.now() / 1000);
+  var payload = {
+    e: user.email,
+    n: user.name || '',
+    p: user.picture || '',
+    iat: nowSec,
+    exp: nowSec + SESSION_TTL_DAYS * 24 * 60 * 60,
+  };
+  var body = Utilities.base64EncodeWebSafe(JSON.stringify(payload));
+  return SESSION_TOKEN_PREFIX + body + '.' + sessionSignature(body);
+}
+
+/**
+ * Verifies an app session token and returns { email, name, picture } or null.
+ * Recomputes the HMAC and compares it in constant time, then enforces expiry so
+ * a token can never outlive its own exp even if the signature checks out.
+ *
+ * @param {string} token
+ * @returns {{email:string,name:string,picture:string}|null}
+ */
+function verifySessionToken(token) {
+  try {
+    if (!token || token.indexOf(SESSION_TOKEN_PREFIX) !== 0) return null;
+    var rest = token.substring(SESSION_TOKEN_PREFIX.length);
+    var dot = rest.indexOf('.');
+    if (dot === -1) return null;
+    var body = rest.substring(0, dot);
+    var sig = rest.substring(dot + 1);
+
+    if (!constantTimeEquals(sig, sessionSignature(body))) return null;
+
+    var json = Utilities.newBlob(Utilities.base64DecodeWebSafe(body)).getDataAsString();
+    var payload = JSON.parse(json);
+    if (!payload.exp || parseInt(payload.exp, 10) * 1000 <= Date.now()) return null;
+    if (!payload.e) return null;
+
+    return { email: payload.e, name: payload.n || '', picture: payload.p || '' };
+  } catch (error) {
+    log('ERROR', 'verifySessionToken', error.message);
+    return null;
+  }
+}
+
+/** Length-then-content comparison with no early-out on the content byte loop. */
+function constantTimeEquals(a, b) {
+  a = String(a);
+  b = String(b);
+  if (a.length !== b.length) return false;
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/**
+ * Mints (or renews) an app session token. Accepts a Google ID token — the
+ * first exchange right after sign-in — OR an existing, still-valid session
+ * token — the silent slide a returning visitor's page does on load. Either way
+ * a fresh SESSION_TTL_DAYS token is issued, so an active user never re-hits
+ * Google One Tap.
+ *
+ * @param {{token:string}} data
+ * @returns {Object}
+ */
+function handleSession(data) {
+  var token = data.token;
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = authenticateUser(token);
+  if (!user) {
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  return {
+    status: 'ok',
+    sessionToken: mintSessionToken(user),
+    email: user.email,
+    name: user.name,
+    picture: user.picture,
+    exp: Math.floor(Date.now() / 1000) + SESSION_TTL_DAYS * 24 * 60 * 60,
+  };
+}
+
+/**
+ * Editor-runnable sanity check for the session-token crypto. Logs PASS/FAIL for
+ * the happy path, prefix routing, a tampered signature, a forged body, and an
+ * expired token. Run from the Apps Script editor after any change to the
+ * mint/verify functions.
+ */
+function runSessionSelfTest() {
+  var results = [];
+  var user = { email: 'test@example.com', name: 'Test User', picture: 'http://x/y.png' };
+  var nowSec = Math.floor(Date.now() / 1000);
+
+  // Happy path: mint → verify round-trips identity.
+  var tok = mintSessionToken(user);
+  var v = verifySessionToken(tok);
+  results.push(['happy path round-trips identity',
+    !!v && v.email === user.email && v.name === user.name && v.picture === user.picture]);
+
+  // Prefix routing: authenticateUser resolves a session token without Google.
+  var au = authenticateUser(tok);
+  results.push(['authenticateUser routes session token', !!au && au.email === user.email]);
+
+  // Tampered signature is rejected.
+  var tampered = tok.slice(0, -1) + (tok.slice(-1) === 'A' ? 'B' : 'A');
+  results.push(['tampered signature rejected', verifySessionToken(tampered) === null]);
+
+  // Forged body (attacker payload) with a valid-looking sig from another token is rejected.
+  var forgedBody = Utilities.base64EncodeWebSafe(JSON.stringify(
+    { e: 'attacker@example.com', n: '', p: '', iat: nowSec, exp: nowSec + 3600 }));
+  var origSig = tok.substring(tok.lastIndexOf('.') + 1);
+  results.push(['forged body rejected',
+    verifySessionToken(SESSION_TOKEN_PREFIX + forgedBody + '.' + origSig) === null]);
+
+  // Expired token is rejected even though its signature is valid.
+  var expiredBody = Utilities.base64EncodeWebSafe(JSON.stringify(
+    { e: user.email, n: user.name, p: user.picture, iat: nowSec - 120, exp: nowSec - 60 }));
+  var expiredTok = SESSION_TOKEN_PREFIX + expiredBody + '.' + sessionSignature(expiredBody);
+  results.push(['expired token rejected', verifySessionToken(expiredTok) === null]);
+
+  var allPass = true;
+  for (var i = 0; i < results.length; i++) {
+    if (!results[i][1]) allPass = false;
+    Logger.log((results[i][1] ? 'PASS' : 'FAIL') + ' — ' + results[i][0]);
+  }
+  Logger.log(allPass ? 'ALL PASSED' : 'SOME FAILED');
+  return allPass;
 }
 
 // ============================================================

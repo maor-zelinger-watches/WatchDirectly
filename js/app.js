@@ -666,8 +666,17 @@ function setupAuthUI() {
   }
 }
 
+// Identity currently painted into the header, so a token-only change (e.g. a
+// silent session renewal that re-fires onAuthChange) can't needlessly repaint
+// the avatar and name. Null until the first render.
+let _authUiKey = null;
+
 function updateAuthUI(user) {
   const container = document.getElementById('auth-container');
+
+  const key = user ? `${user.email}|${user.name}|${user.picture}` : '';
+  if (key === _authUiKey) return; // identity unchanged — nothing to repaint
+  _authUiKey = key;
 
   if (user) {
     container.innerHTML = `

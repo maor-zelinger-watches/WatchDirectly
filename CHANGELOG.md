@@ -21,6 +21,22 @@ that component's heading.
 
 ## Frontend
 
+### 1.15.0 — 2026-07-09
+- **Invisible auth refresh.** Opening the site after the ~1-hour Google ID-token
+  expiry used to flash the Google One Tap overlay and repaint the header, because
+  the boot reconcile eagerly called `refreshToken()`, which re-mounted One Tap.
+  Now, on first sign-in the client exchanges the Google ID token for a long-lived
+  app **session token** (`api.createSession`, backend `session` action) and stores
+  that as `currentUser.token`. Session tokens carry a 30-day sliding expiry, so a
+  returning visitor's token is still valid on open — no refresh, no overlay, no
+  repaint. When a token does near expiry, `auth.js` slides it forward with a
+  **silent** `fetch` (`maybeSlideSession` / `refreshToken`), never the interactive
+  One Tap; One Tap is now a last resort only if the session lapses entirely
+  (an absence longer than the session lifetime). `isTokenExpired` decodes either
+  token format; `updateAuthUI` is idempotent so a token rotation can't repaint the
+  avatar. Falls back to the raw Google token if the exchange fails, so sign-in
+  degrades gracefully against an older backend. Requires backend ≥ 1.8.0.
+
 ### 1.14.0 — 2026-07-08
 - The content-type filter now defaults to **Videos + Articles** (Shorts hidden)
   for a first-time visitor, and the selection **persists across sessions** in
@@ -261,6 +277,22 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.8.0 — 2026-07-09
+- **App-issued session tokens**, so the frontend can re-authenticate silently
+  instead of re-invoking Google One Tap. New `session` POST action mints an
+  HMAC-SHA256-signed token (`wds1.<base64url(payload)>.<sig>`) after verifying the
+  caller once; the same action renews a still-valid session token, so a returning
+  visitor never needs Google again until the 30-day (`SESSION_TTL_DAYS`) window
+  fully lapses. All six authenticated handlers now go through `authenticateUser`,
+  which accepts **either** a session token (local HMAC check — no `tokeninfo`
+  round trip, so also faster) or a Google ID token (unchanged path), keeping old
+  and new clients working during rollout. The signing secret is auto-generated
+  into Script Properties on first use (`getSessionSecret`, CSPRNG-backed
+  `Utilities.getUuid` ×2); `verifySessionToken` recomputes the HMAC with a
+  constant-time compare and enforces `exp` independently of the signature. Ship
+  this **before** frontend 1.15.0. Run `runSessionSelfTest()` in the editor once
+  after deploy to validate the crypto and materialize the secret before traffic.
 
 ### 1.7.0 — 2026-07-08
 - `getChannels` now falls back to a favicon for news/article outlets that have

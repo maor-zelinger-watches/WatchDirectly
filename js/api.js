@@ -226,6 +226,20 @@ export function createApiClient(baseUrl) {
     async fetchBootstrap(token) {
       return post({ action: 'bootstrap', token });
     },
+
+    /**
+     * Exchanges a credential for a fresh app session token. Pass a Google ID
+     * token (the first exchange right after sign-in) or an existing session
+     * token (a silent renewal) — the backend accepts either and mints a new
+     * long-lived session token. This is what lets the client re-authenticate
+     * without re-invoking Google One Tap.
+     *
+     * @param {string} token - Google ID token or existing app session token
+     * @returns {Promise<{sessionToken: string, email: string, name: string, picture: string, exp: number}>}
+     */
+    async createSession(token) {
+      return post({ action: 'session', token });
+    },
   };
 }
 
