@@ -54,13 +54,49 @@ function mockApi(page) {
     }
     if (url.includes('action=commentsBatch')) return json({ status: 'ok', byVideo: {} });
     if (url.includes('action=comments')) return json({ status: 'ok', comments: [] });
+
+    if (route.request().method() === 'POST') {
+      let body = {};
+      try { body = JSON.parse(route.request().postData() || '{}'); } catch { /* noop */ }
+      if (body.action === 'bootstrap') return json({ status: 'ok', video_ids: [], channels: [] });
+      if (body.action === 'myVotes') return json({ status: 'ok', video_ids: [] });
+      if (body.action === 'vote') return json({ status: 'ok', voted: true, vote_count: 1 });
+    }
     return json({ status: 'ok' });
+  });
+}
+
+/** Seeds a fake Google session so isSignedIn()/getCurrentUser() are true. */
+async function signIn(page) {
+  await page.addInitScript(() => {
+    const payload = btoa(JSON.stringify({ name: 'Test User', email: 't@example.com', picture: '', exp: Math.floor(Date.now() / 1000) + 3600 }));
+    localStorage.setItem('wd_user', JSON.stringify({ name: 'Test User', email: 't@example.com', picture: '', token: `h.${payload}.s` }));
   });
 }
 
 test.describe('Share links', () => {
   test.beforeEach(async ({ page }) => {
     await mockApi(page);
+  });
+
+  test('a signed-in user opening a shared link can comment and vote (not treated as signed out)', async ({ page }) => {
+    await signIn(page);
+    await page.goto(`/?v=${ARCHIVED_VIDEO.video_id}`);
+
+    const overlay = page.locator('.media-card--fullscreen');
+    await expect(overlay).toHaveAttribute('data-video-id', ARCHIVED_VIDEO.video_id);
+
+    // The deep-link card must reflect the signed-in session: comment form
+    // visible, sign-in prompt hidden. This is the reconciliation the feed's
+    // cards get on auth restore but the deep-link card was missing.
+    await expect(overlay.locator('.media-card__comment-form')).toBeVisible();
+    await expect(overlay.locator('.media-card__auth-prompt')).toBeHidden();
+
+    // ...and can vote: the click is taken (no "please sign in" gate) and the
+    // button reconciles to the server's voted-true.
+    await overlay.locator('.media-card__vote').click();
+    await expect(overlay.locator('.media-card__vote')).toHaveClass(/media-card__vote--active/);
+    await expect(page.locator('.toast')).toHaveCount(0);
   });
 
   test('every card has a share button', async ({ page }) => {

@@ -676,10 +676,16 @@ function setupAuthUI() {
     }
   });
 
+  // initAuth restores a saved session and broadcasts it via notifyListeners
+  // BEFORE this runs — so that first broadcast reaches no listener. Mirror the
+  // onAuthChange handler's reconciliation here so any comments already expanded
+  // by then (the deep-linked ?v= card auto-expands its own during load) flip to
+  // the signed-in form instead of being stuck on the sign-in prompt.
   const user = getCurrentUser();
   if (user) {
     updateAuthUI(user);
     loadMyVotesAndStars();
+    state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
   } else {
     renderSignInButton(container);
   }

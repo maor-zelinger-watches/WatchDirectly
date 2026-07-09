@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.18.1 — 2026-07-09
+- **Fix: a signed-in user opening a shared `?v=` link was treated as signed
+  out** — the deep-linked card showed the "Sign in to join the discussion"
+  prompt and voting was gated. The deep-link card auto-expands its comments
+  during load, but `initAuth` restores a saved session and broadcasts it
+  (`notifyListeners`) *before* `setupAuthUI` registers the `onAuthChange`
+  listener, so that first broadcast reached no one. `setupAuthUI`'s direct
+  signed-in path reconciled the header, votes, and stars but not expanded
+  comment forms — feed cards never hit this because they don't auto-expand, so
+  only the deep-link card was left on the sign-in prompt. It now mirrors the
+  `onAuthChange` handler and reconciles `state.expandedComments` too, so the
+  auto-expanded card flips to the signed-in form (and the vote button reflects
+  the live session) as soon as the session restores.
+
 ### 1.18.0 — 2026-07-09
 - **Share a specific video.** Every card gained a 🔗 share button (all views,
   all card types including articles) that produces a `?v=<video_id>` link —
