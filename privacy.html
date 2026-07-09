@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' https://accounts.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://accounts.google.com https://www.youtube-nocookie.com https://www.youtube.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com https://oauth2.googleapis.com">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>Privacy Policy — WatchDirectly</title>
   <meta name="description" content="Privacy Policy for WatchDirectly, a curated watch content feed.">
   
@@ -126,7 +128,7 @@
       </div>
     </div>
   </footer>
-  <script>document.getElementById('footer-year').textContent = new Date().getFullYear();</script>
+  <script src="js/footer-year.js"></script>
 
 </body>
 </html>

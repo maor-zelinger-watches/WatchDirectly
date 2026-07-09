@@ -36,7 +36,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.8.0';
+const VERSION = '1.9.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -70,6 +70,18 @@ const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
 // that never airs, or a stream that never ends, stops being surfaced once its
 // scheduled start (or, if unknown, its ingest time) is this far in the past.
 const LIVE_GRACE_MS = 12 * 60 * 60 * 1000;
+
+// Videos older than this are moved out of the live Videos sheet into an
+// "Archive" tab at the end of each crawl. readAllVideos scans and sorts the
+// WHOLE live sheet on every cache miss, so an ever-growing catalog is the one
+// cost that eventually times a request out against Apps Script's 6-min cap;
+// pruning keeps that scan bounded. The window is far larger than any channel's
+// ~15-entry RSS feed reaches, so an archived item is never re-fetched and
+// re-appended, and the feed head, Top-This-Week, and starred feeds all live
+// comfortably inside it. Archived rows are retained (not deleted), just no
+// longer scanned.
+const PRUNE_AFTER_DAYS = 60;
+const ARCHIVE_SHEET_NAME = 'Archive';
 
 // OAuth client ID this app's Google Sign-In tokens are minted for. Every ID
 // token MUST carry this as its `aud` claim, or it was issued to a different
@@ -158,7 +170,7 @@ function toIsoDate(dateStr) {
 function doGet(e) {
   try {
     const action = (e && e.parameter && e.parameter.action) || '';
-    
+
     switch (action) {
       case 'feed':
         return jsonResponse(handleFeed(e.parameter));
@@ -171,9 +183,14 @@ function doGet(e) {
       case 'getChannels':
         return jsonResponse(handleGetChannels());
       case 'refresh':
+        // Side-effectful: kicks off a full crawl that spends UrlFetch and
+        // YouTube Data API quota. Admin-only — the scheduled trigger and the
+        // stale-feed auto-refresh cover the routine case; this is a manual
+        // override, not an endpoint anonymous callers may spin.
+        if (!isAdmin(e.parameter.token)) {
+          return jsonResponse({ status: 'error', message: 'Unauthorized' });
+        }
         return jsonResponse(handleRefresh());
-      case 'logs':
-        return jsonResponse(handleLogs(e.parameter));
       case 'version':
         return jsonResponse({ status: 'ok' });
       default:
@@ -181,7 +198,8 @@ function doGet(e) {
     }
   } catch (error) {
     log('ERROR', 'doGet', error.message);
-    return jsonResponse({ status: 'error', message: error.message });
+    // Generic message to the client — the detail is in the log, not the wire.
+    return jsonResponse({ status: 'error', message: 'Request failed. Please try again.' });
   }
 }
 
@@ -205,13 +223,35 @@ function doPost(e) {
         return jsonResponse(handleBootstrap(data));
       case 'session':
         return jsonResponse(handleSession(data));
+      case 'logs':
+        // Admin-only, over POST so the token never lands in a URL/query log.
+        if (!isAdmin(data.token)) {
+          return jsonResponse({ status: 'error', message: 'Unauthorized' });
+        }
+        return jsonResponse(handleLogs(data));
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
   } catch (error) {
     log('ERROR', 'doPost', error.message);
-    return jsonResponse({ status: 'error', message: error.message });
+    // Generic message to the client — the detail is in the log, not the wire.
+    return jsonResponse({ status: 'error', message: 'Request failed. Please try again.' });
   }
+}
+
+/**
+ * Constant-time check that `token` matches the admin token stored in Meta.
+ * Fails CLOSED when no admin token is configured — an unset token must mean
+ * "nobody gets in", never "everybody does". Used to gate the side-effectful
+ * refresh endpoint and the log reader, both of which are operator-only.
+ *
+ * @param {string} token
+ * @returns {boolean}
+ */
+function isAdmin(token) {
+  var adminToken = getMeta('admin_token');
+  if (!adminToken || !token) return false;
+  return constantTimeEquals(String(token), String(adminToken));
 }
 
 function jsonResponse(data) {
@@ -629,9 +669,20 @@ function crawlAllFeeds() {
           // -> none: this clears expires_at once it airs, making the permanent
           // entry visible without ever creating a second row.
           if (liveStatusCol !== -1 && video.live_status !== undefined) {
-            videosSheet.getRange(existingRow, liveStatusCol + 1).setValue(video.live_status);
-            if (scheduledStartCol !== -1) videosSheet.getRange(existingRow, scheduledStartCol + 1).setValue(video.scheduled_start || '');
-            if (expiresAtCol !== -1) videosSheet.getRange(existingRow, expiresAtCol + 1).setValue(video.expires_at || '');
+            var ls = video.live_status;
+            var ss = video.scheduled_start || '';
+            var ex = video.expires_at || '';
+            // The live-state trio is self-initialized as three adjacent columns
+            // in exactly this order, so write it in one range call instead of
+            // three round-trips. Fall back to per-cell writes on any legacy
+            // sheet where the columns aren't contiguous.
+            if (scheduledStartCol === liveStatusCol + 1 && expiresAtCol === liveStatusCol + 2) {
+              videosSheet.getRange(existingRow, liveStatusCol + 1, 1, 3).setValues([[ls, ss, ex]]);
+            } else {
+              videosSheet.getRange(existingRow, liveStatusCol + 1).setValue(ls);
+              if (scheduledStartCol !== -1) videosSheet.getRange(existingRow, scheduledStartCol + 1).setValue(ss);
+              if (expiresAtCol !== -1) videosSheet.getRange(existingRow, expiresAtCol + 1).setValue(ex);
+            }
           }
         }
       }
@@ -649,13 +700,111 @@ function crawlAllFeeds() {
   // Update last_fetch timestamp
   setMeta('last_fetch', new Date().toISOString());
 
+  // Archive videos past the retention window so the every-request scan in
+  // readAllVideos stays bounded. Runs before the cache invalidations below so
+  // the head/top-week caches repopulate against the pruned totals.
+  var archived = pruneOldVideos();
+
   // The crawl appended rows and refreshed view counts / live state in place —
   // the cached head and the cached top-week window no longer reflect the sheet.
   invalidateFeedHead();
   invalidateTopWeek();
 
-  log('INFO', 'fetchAllFeeds', 'Refresh complete. New: ' + newCount + ', Errors: ' + errorCount);
-  return { new_videos: newCount, errors: errorCount };
+  log('INFO', 'fetchAllFeeds', 'Refresh complete. New: ' + newCount + ', Errors: ' + errorCount + ', Archived: ' + archived);
+  return { new_videos: newCount, errors: errorCount, archived: archived };
+}
+
+/**
+ * Moves videos older than PRUNE_AFTER_DAYS out of the live Videos sheet into an
+ * "Archive" tab, keeping readAllVideos' every-request full scan bounded as the
+ * catalog grows.
+ *
+ * Runs at the end of a crawl (crawlAllFeeds no longer holds the script lock by
+ * then), and takes the script lock itself so it can't race a concurrent
+ * vote/comment recount writing the same sheet — it reads AND rewrites the sheet
+ * under one lock, so it never clobbers a count another writer just changed.
+ *
+ * A row is KEPT when its published_at is missing/unparseable, still within the
+ * window, or it's a pending live/upcoming broadcast (or inside its expiry grace)
+ * — those are inherently recent. Doomed rows are appended to the Archive tab
+ * BEFORE removal, so a failure aborts without losing data; the archive is never
+ * scanned by the feed.
+ *
+ * @returns {number} count of archived rows
+ */
+function pruneOldVideos() {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return 0; // busy — the next crawl reattempts
+  }
+  try {
+    var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS);
+    var sheet = ss.getSheets()[0];
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return 0;
+
+    var headers = data[0];
+    var pubCol = headers.indexOf('published_at');
+    if (pubCol === -1) return 0; // can't age rows without a publish time
+    var liveCol = headers.indexOf('live_status');
+    var expCol = headers.indexOf('expires_at');
+
+    var cutoff = Date.now() - PRUNE_AFTER_DAYS * 24 * 60 * 60 * 1000;
+    var nowMs = Date.now();
+
+    var keep = [];
+    var archive = [];
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      var t = new Date(row[pubCol]).getTime();
+
+      var pendingLive = liveCol !== -1 &&
+        (row[liveCol] === 'live' || row[liveCol] === 'upcoming');
+      var expMs = expCol !== -1 && row[expCol] ? new Date(row[expCol]).getTime() : NaN;
+      var unexpired = !isNaN(expMs) && expMs >= nowMs;
+
+      if (isNaN(t) || t >= cutoff || pendingLive || unexpired) {
+        keep.push(row);
+      } else {
+        archive.push(row);
+      }
+    }
+
+    if (archive.length === 0) return 0;
+
+    // Append doomed rows to the Archive tab first (created with the live
+    // header on first use) so nothing is destroyed before it's copied.
+    var archiveSheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
+    if (!archiveSheet) {
+      archiveSheet = ss.insertSheet(ARCHIVE_SHEET_NAME);
+      archiveSheet.appendRow(headers);
+    }
+    archiveSheet
+      .getRange(archiveSheet.getLastRow() + 1, 1, archive.length, headers.length)
+      .setValues(archive);
+
+    // Rewrite the live sheet as header + survivors: overwrite the top rows with
+    // the kept data in one call, then physically remove the surplus trailing
+    // rows the survivors no longer fill (so no emptied rows linger).
+    var origDataRows = data.length - 1;
+    if (keep.length > 0) {
+      sheet.getRange(2, 1, keep.length, headers.length).setValues(keep);
+    }
+    var surplus = origDataRows - keep.length;
+    if (surplus > 0) {
+      sheet.deleteRows(keep.length + 2, surplus);
+    }
+
+    log('INFO', 'pruneOldVideos', 'Archived ' + archive.length + ' rows; ' + keep.length + ' remain');
+    return archive.length;
+  } catch (e) {
+    log('ERROR', 'pruneOldVideos', e.message);
+    return 0;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function fetchAndParseFeed(feedUrl, channelName, tier, category) {
@@ -2550,14 +2699,8 @@ function log(level, source, message) {
 }
 
 function handleLogs(params) {
-  // Require admin token from Meta sheet. Fail CLOSED when it isn't
-  // configured — logs carry user emails, and an unset token must mean
-  // "nobody gets in", not "everybody does".
-  var adminToken = getMeta('admin_token');
-  if (!adminToken || params.token !== adminToken) {
-    return { status: 'error', message: 'Unauthorized' };
-  }
-
+  // Auth is enforced by the router (isAdmin, constant-time) before we get here;
+  // logs carry user emails, so this is only ever reached for a verified admin.
   var count = parseInt(params.count) || 50;
   var sheet = getSheet('LOGS');
   var data = sheet.getDataRange().getValues();

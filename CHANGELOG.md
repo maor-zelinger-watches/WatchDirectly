@@ -21,6 +21,26 @@ that component's heading.
 
 ## Frontend
 
+### 1.16.0 — 2026-07-09
+- **Content-Security-Policy + referrer policy** on `index.html`, `terms.html`,
+  and `privacy.html` (shipped as `<meta>` since GitHub Pages can't set real HTTP
+  headers). The policy is defense-in-depth for the app's `innerHTML` rendering:
+  `script-src` carries no `'unsafe-inline'` and no wildcard host, so even if an
+  output-escape were ever missed, an injected inline or remote `<script>` won't
+  execute — which is what keeps the 30-day session token in `localStorage` out of
+  an attacker's reach. Allowed origins are exactly what the app uses: Google
+  Sign-In (`accounts.google.com`), YouTube embeds (`youtube-nocookie.com`), the
+  Apps Script backend (`script.google.com` **and** its `script.googleusercontent.com`
+  redirect target), and Google Fonts; `img-src` stays broad (`https:`) because
+  article/preview thumbnails and avatars come from arbitrary hosts and images are
+  inert. Referrer is `strict-origin-when-cross-origin`. Verified in-browser: the
+  feed, fonts, GSI client, YouTube embeds, and backend fetch all load with **zero**
+  CSP violations, and an inline-script injection probe is correctly blocked.
+- To make that strict `script-src` possible, the one inline script (the footer
+  copyright year) moved out of the three HTML pages into a shared
+  `js/footer-year.js`. Behaviour is unchanged — the year is still set from
+  `new Date().getFullYear()` at load — it just no longer needs `'unsafe-inline'`.
+
 ### 1.15.0 — 2026-07-09
 - **Invisible auth refresh.** Opening the site after the ~1-hour Google ID-token
   expiry used to flash the Google One Tap overlay and repaint the header, because
@@ -277,6 +297,40 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.9.0 — 2026-07-09
+- **Retention/archival to keep the every-request scan bounded.** `readAllVideos`
+  scans and sorts the *whole* live Videos sheet on every cache miss, so an
+  ever-growing catalog was the one cost that would eventually time a request out
+  against Apps Script's 6-minute cap. A new `pruneOldVideos` now runs at the end
+  of each crawl and moves videos older than `PRUNE_AFTER_DAYS` (60) out of the
+  live sheet into an `Archive` tab. It runs under the script lock (so it can't
+  race a vote/comment recount rewriting the same sheet), **keeps** rows with a
+  missing/unparseable `published_at`, a pending `upcoming`/`live` broadcast, or an
+  unexpired grace window, and **copies rows to the archive before deleting them**
+  (nothing is destroyed) — then rewrites the survivors and deletes the surplus
+  rows. The window is far larger than any channel's ~15-entry RSS feed reaches, so
+  an archived item is never re-fetched and re-appended. Note: Favorites and search
+  read the live catalog, so they now reach back ~60 days; archived rows are
+  retained, just no longer served.
+- **`refresh` is now admin-only.** `?action=refresh` kicks off a full crawl that
+  spends UrlFetch and YouTube Data API quota; it was reachable anonymously. It now
+  requires the admin token (new constant-time `isAdmin` helper), so it can't be
+  spun by anyone to drain quota. The scheduled trigger and the stale-feed
+  auto-refresh cover the routine case — this is a manual operator override.
+- **`logs` moved from a GET to a POST action** and is gated by the same
+  constant-time `isAdmin` check, so the admin token no longer travels in a URL/query
+  string (browser history, proxy logs, Apps Script execution logs). The old
+  in-handler string compare (`!==`, not constant-time) is gone.
+- **Generic error to the client on an unexpected exception.** `doGet`/`doPost`
+  catch blocks now return a fixed "Request failed" message instead of echoing
+  `error.message`; the real detail still goes to the log, not the wire. (Handler-
+  level validation messages — "Comment too long", rate-limit, blocked — are
+  unchanged.)
+- **Fewer Sheets round trips in the crawl.** The in-place live-state update batches
+  its three adjacent cell writes (`live_status`, `scheduled_start`, `expires_at`)
+  into a single `setValues` call, with a safe per-cell fallback for any legacy
+  sheet where the columns aren't contiguous.
 
 ### 1.8.0 — 2026-07-09
 - **App-issued session tokens**, so the frontend can re-authenticate silently

@@ -35,7 +35,18 @@ function makeSheet(rows) {
         while (r.length < col) r.push('');
         r[col - 1] = v;
       },
-      setValues() {},
+      // Faithful block write (real Sheets implements this): the crawl batches
+      // the contiguous live-state trio into a single 1x3 setValues call.
+      setValues(values) {
+        for (let i = 0; i < values.length; i++) {
+          while (grid.length < row + i) grid.push([]);
+          const r = grid[row - 1 + i];
+          for (let j = 0; j < values[i].length; j++) {
+            while (r.length < col + j) r.push('');
+            r[col - 1 + j] = values[i][j];
+          }
+        }
+      },
       setNumberFormat() {},
     }),
     appendRow: (r) => { grid.push(r.slice()); },
