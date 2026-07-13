@@ -146,3 +146,31 @@ describe('handleVideo', () => {
     expect(be.liveSheet._stats.reads).toBe(scansAfterFeed); // no extra scan
   });
 });
+
+describe('getVideos input clamping (B2)', () => {
+  const now = Date.now();
+  const liveRows = [
+    ['LIVEVIDEO01', 'Chan A', 'newest', 'https://x/1', iso(now - 1 * DAY), '0', '0', 'video', ''],
+    ['LIVEVIDEO02', 'Chan A', 'older', 'https://x/2', iso(now - 2 * DAY), '0', '0', 'video', ''],
+  ];
+
+  it('clamps a negative page/limit to a sane first-page window (no slice(-40,-20) nonsense)', () => {
+    const be = loadBackend(liveRows);
+    const res = be.getVideos(-1, -5, '');
+    expect(res.status).toBe('ok');
+    expect(res.total).toBe(2);
+    // page/limit clamp to 1 -> the single newest video, never a negative-index
+    // slice reading from the END of the list.
+    expect(res.videos).toHaveLength(1);
+    expect(res.videos[0].video_id).toBe('LIVEVIDEO01');
+    expect(res.videos.length).toBeLessThanOrEqual(res.total);
+  });
+
+  it('clamps a zero limit rather than returning an empty/garbage window', () => {
+    const be = loadBackend(liveRows);
+    const res = be.getVideos(0, 0, '');
+    expect(res.status).toBe('ok');
+    expect(res.videos).toHaveLength(1);
+    expect(res.videos[0].video_id).toBe('LIVEVIDEO01');
+  });
+});

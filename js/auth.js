@@ -11,6 +11,25 @@
  */
 
 import { api } from './api-client.js';
+import { showToast } from './toast.js';
+
+/**
+ * Decodes a base64url-encoded token payload segment (the part between the dots
+ * of a Google JWT or an app session token) into an object.
+ *
+ * JWT/session segments are base64url (`-`/`_`, no padding), which `atob()`
+ * rejects — most often triggered by non-ASCII profile names — and the decoded
+ * bytes are UTF-8, which `atob()`'s Latin-1 output mojibakes. So convert to
+ * standard base64 and decode through TextDecoder.
+ *
+ * @param {string} segment - the payload segment between the dots
+ * @returns {Object} the parsed payload
+ */
+function decodeTokenPayload(segment) {
+  const b64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
 
 /**
  * @typedef {Object} User
@@ -138,8 +157,9 @@ async function handleCredentialResponse(response) {
   const googleToken = response.credential;
 
   try {
-    // Decode the JWT payload (base64) to get user info.
-    const payload = JSON.parse(atob(googleToken.split('.')[1]));
+    // Decode the JWT payload (base64url) to get user info. Verification happens
+    // server-side; this is display-only.
+    const payload = decodeTokenPayload(googleToken.split('.')[1]);
     const identity = {
       name: payload.name || payload.email.split('@')[0],
       email: payload.email,
@@ -165,6 +185,7 @@ async function handleCredentialResponse(response) {
     notifyListeners();
   } catch (error) {
     console.error('Failed to decode credential:', error);
+    showToast('Sign-in failed. Please try again.', 'error');
   }
 }
 
@@ -218,12 +239,10 @@ function tokenExpiryMs(token) {
     if (isSessionToken(token)) {
       const start = SESSION_TOKEN_PREFIX.length;
       const body = token.slice(start, token.indexOf('.', start));
-      const b64 = body.replace(/-/g, '+').replace(/_/g, '/');
-      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-      const payload = JSON.parse(new TextDecoder().decode(bytes));
+      const payload = decodeTokenPayload(body);
       return payload.exp ? payload.exp * 1000 : null;
     }
-    const payload = JSON.parse(atob(token.split('.')[1]));
+    const payload = decodeTokenPayload(token.split('.')[1]);
     return payload.exp ? payload.exp * 1000 : null; // JWT exp is in seconds
   } catch {
     return null;

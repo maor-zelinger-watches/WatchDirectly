@@ -21,6 +21,45 @@ that component's heading.
 
 ## Frontend
 
+### 1.18.2 — 2026-07-13
+- **Fix: sign-in was silently broken for a whole class of Google accounts.**
+  `handleCredentialResponse` and `tokenExpiryMs` decoded the Google ID token
+  with plain `atob`, but JWT payloads are base64url (`-`/`_`) — most commonly
+  triggered by a non-ASCII profile name — so `atob` threw `InvalidCharacterError`,
+  the error was swallowed, and the user was left signed out with no feedback.
+  Even when it didn't throw, Latin-1 decoding mojibaked non-ASCII names
+  ("José" → "JosÃ©"). Both call sites now share one base64url + UTF-8
+  `TextDecoder` decoder (the same one the session-token path already used), and
+  a failed decode now surfaces a toast instead of failing silently.
+- **Fix: opening a shared link to a Short (or any type hidden by the content
+  chips) froze the page.** The default chips hide Shorts, and a hidden card kept
+  `display:none` even after `enterFullscreen` added `media-card--fullscreen`
+  (the hide selector out-specified it), so the deep link scroll-locked the page
+  behind an invisible overlay. The type-hide rules now exclude the fullscreen
+  card.
+- **Fix: revalidation could clobber the Top/Starred/Channels view.** A tab
+  switch (or a search) landing while the background page-1 fetch was in flight
+  let the reconciliation diff inject Latest cards into whatever view now owned
+  the container and re-sort a vote-ranked list by date. `revalidateFeed` now
+  bails to a state-only reconcile whenever the Latest feed doesn't own the
+  container — checked both before the diff and again after its fade-out await.
+- **Fix: a background revalidate reloaded every video and stopped playback.**
+  When only comment/vote counts had drifted (the common "someone commented
+  overnight" case) the diff still re-appended every card, and re-inserting an
+  iframe reloads it — killing any inline playback. Count-only drift now patches
+  in place with no reordering, and the reorder pass moves only cards that are
+  actually out of position, so untouched embeds no longer reload.
+- **Fix: the two-step initial load could drop a card.** The remainder fetch
+  used `slice(initialLimit)`, which assumes the two page-1 fetches are
+  index-aligned — they aren't once dedupe shrinks the first response or a new
+  item is prepended between them, silently dropping a card at the boundary. It
+  now filters the whole page-1 response by id instead.
+- **Fix: a failed page load spun a tight retry loop.** Going offline (or a
+  backend 500) at the bottom of the feed left the sentinel in view, and the
+  manual re-trigger fired `loadNextPage` again immediately, hammering in a loop
+  and stacking error toasts. Failed Latest/Top loads now back off exponentially
+  (capped at 30s) and toast once per failure streak.
+
 ### 1.18.1 — 2026-07-09
 - **Fix: a signed-in user opening a shared `?v=` link was treated as signed
   out** — the deep-linked card showed the "Sign in to join the discussion"
@@ -359,6 +398,57 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.13.0 — 2026-07-13
+- **Security fix: commenter email addresses are no longer exposed.** `getComments`
+  and `handleCommentsBatch` built each comment by copying *every* sheet column
+  into the JSON response — including the `user_email` stored for blocking/rate
+  limiting — over an unauthenticated GET, so anyone could harvest the Google
+  email of every commenter (and `commentsBatch` swept 20 videos at a time). Both
+  now build the response from an explicit whitelist (`comment_id`, `video_id`,
+  `parent_id`, `user_name`, `user_avatar`, `body`, `depth`, `created_at`); the
+  email can no longer leave the server, matching the privacy policy.
+- **Security fix: comments are written as plain text to block formula injection.**
+  `handleAddComment` appended the body and display name with no text format, so a
+  comment starting with `=`/`+`/`-`/`@` (e.g. `=IMPORTXML(...)`) would auto-execute
+  as a live formula when the owner opened the sheet and could exfiltrate adjacent
+  cells. The append now sets `@` (text) format on the row first, mirroring the
+  Stars writer; `depth` is coerced back to a number on read.
+- **Crawl wall-clock budget + resume index.** A worst-case crawl (dead feeds
+  burning ~30s retry ladders across many channels) could exceed Apps Script's
+  6-minute hard kill, which skips the `finally` blocks so `last_fetch` never
+  updates and the crawl re-runs every ~10 min, always dying at the same channel —
+  starving the tail forever. `crawlAllFeeds` now stops cleanly at ~4.5 min,
+  finalizes the channels already done, and records a resume index in Meta so the
+  next run continues after the last-completed channel (wrapping around); a full
+  under-budget pass resets it to 0.
+- **Votes/comments on archived videos now persist.** Shared links and search
+  serve videos that have aged into the Archive tab, but the recount functions
+  scanned only the live sheet and silently no-op'd, so the archived row's count
+  never moved. `updateVoteCount`/`updateCommentCount` now fall through to the
+  Archive tab (new `updateArchivedCount`) and invalidate the archive cache.
+- **Fix: duplicate rows when a feed flips parse paths.** A normally-XML feed that
+  hits the regex fallback once produced a different id for every item (the paths
+  hash different keys), so the id-keyed crawl dedup appended ~15 duplicates. The
+  crawl now also skips items whose normalized URL already exists, keeping the
+  original id stable without rewriting any existing ids.
+- **Fix: imageless articles were re-fetched every crawl forever.** The og:image
+  page fetch (up to 5 redirect hops) ran inside the parsers, *before* the dedup
+  check, so an article with no extractable image was re-fetched on every crawl.
+  It now runs only in the post-dedup enrichment step, for genuinely-new items.
+- **Fix: expired premieres were immortal.** `pruneOldVideos` force-kept any
+  `live`/`upcoming` row regardless of a lapsed `expires_at`, so a cancelled
+  premiere accumulated forever. The keep is now gated on the expiry.
+- **Fix: archive header drift dropped new columns.** The Archive header was
+  written once at tab creation; when the live sheet later self-added a column,
+  rows archived afterward lost those fields on read (notably `expires_at`,
+  resurfacing expired premieres). Prune now widens the archive header to match.
+- **Fix: astral-plane characters in titles decoded to garbage.** `decodeHtmlEntities`
+  used `String.fromCharCode`, which truncates code points above 0xFFFF (emoji,
+  e.g. `&#128512;`). It now uses `String.fromCodePoint`, guarding out-of-range
+  values so a malformed entity can't throw and break the parse.
+- **Fix: `getVideos` clamps `page`/`limit`.** Negative/garbage input yielded a
+  window from the end of the catalog instead of a first/empty page.
 
 ### 1.12.0 — 2026-07-09
 - **`video` action — look up a single item by id, for shared deep links.**

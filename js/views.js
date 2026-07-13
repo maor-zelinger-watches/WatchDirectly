@@ -549,6 +549,7 @@ export async function loadMoreTop() {
 
   const token = viewToken;
   state.topLoading = true;
+  let loadFailed = false;
   const sentinel = document.getElementById('load-more-container');
 
   try {
@@ -573,22 +574,34 @@ export async function loadMoreTop() {
     }
     prefetchComments(fresh);
   } catch (e) {
+    loadFailed = true;
     console.error('Failed to load more top videos:', e);
-    // Leave what's shown in place; a later scroll retries.
+    // Leave what's shown in place; retry with backoff below.
+    state.topErrorStreak++;
   } finally {
     state.topLoading = false;
+    if (!loadFailed) state.topErrorStreak = 0;
     if (token === viewToken && state.view === 'top') {
       const show = state.topHasMore && !isFilterActive();
       if (sentinel) sentinel.style.display = show ? '' : 'none';
-      // The observer only fires on intersection CHANGES. If the sentinel is
-      // still within the root margin after this append (a tall viewport, or a
-      // short page), nudge the next load manually — the same guard the feed uses.
       if (show && sentinel) {
-        requestAnimationFrame(() => {
-          if (state.view !== 'top' || !state.topHasMore || isFilterActive() || state.topLoading) return;
-          const rect = sentinel.getBoundingClientRect();
-          if (rect.top > 0 && rect.top <= window.innerHeight + 600) loadMoreTop();
-        });
+        if (loadFailed) {
+          // A failed load leaves the sentinel in view; the immediate rAF nudge
+          // would spin a tight fetch-fail loop. Back off exponentially (cap 30s).
+          const delay = Math.min(30000, 1000 * Math.pow(2, state.topErrorStreak - 1));
+          setTimeout(() => {
+            if (state.view === 'top' && state.topHasMore && !isFilterActive() && !state.topLoading) loadMoreTop();
+          }, delay);
+        } else {
+          // The observer only fires on intersection CHANGES. If the sentinel is
+          // still within the root margin after this append (a tall viewport, or a
+          // short page), nudge the next load manually — the same guard the feed uses.
+          requestAnimationFrame(() => {
+            if (state.view !== 'top' || !state.topHasMore || isFilterActive() || state.topLoading) return;
+            const rect = sentinel.getBoundingClientRect();
+            if (rect.top > 0 && rect.top <= window.innerHeight + 600) loadMoreTop();
+          });
+        }
       }
     }
   }

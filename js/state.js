@@ -19,6 +19,8 @@ export const state = {
                          // string = resume here ('' = end of catalog),
                          // undefined = backend without cursors (page math)
   loading: false,      // Prevents concurrent fetches
+  feedErrorStreak: 0,  // consecutive failed Latest page loads — drives retry backoff
+  topErrorStreak: 0,   // consecutive failed Top page loads — drives retry backoff
   hasMore: true,       // Whether more pages exist
   expandedComments: new Set(),
   commentsCache: {},   // videoId -> { comments, tree } — prefetched comment data

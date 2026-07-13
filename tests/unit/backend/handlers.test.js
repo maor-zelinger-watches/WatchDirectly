@@ -166,10 +166,17 @@ describe('handleAddComment (finding #4 — append + recount under a lock)', () =
       waitLock: () => { order.push('lock'); if (lockThrows) throw new Error('timeout'); },
       releaseLock: () => order.push('release'),
     };
-    // A comment row has exactly 9 columns; meta/rate rows have 2 — so length
-    // uniquely identifies the comment append among all appendRow traffic.
+    // The comment is written via getRange(...).setNumberFormat('@').setValues(),
+    // not appendRow (the '@' format defeats formula injection). A comment row has
+    // exactly 9 columns, so the row width uniquely identifies the comment write.
     const sheet = blankSheet({
-      appendRow: (row) => { if (Array.isArray(row) && row.length === 9) order.push('append'); },
+      getRange: () => ({
+        setValue() {},
+        setNumberFormat() { return this; },
+        setValues(rows) {
+          if (Array.isArray(rows) && rows[0] && rows[0].length === 9) order.push('append');
+        },
+      }),
     });
     const be = loadBackend({ UrlFetchApp: tokeninfo(validClaims()), LockService: { getScriptLock: () => lock }, sheet });
     return { be, order };
@@ -192,7 +199,15 @@ describe('handleAddComment (finding #4 — append + recount under a lock)', () =
 
   it('rejects a comment whose token fails audience verification', () => {
     const order = [];
-    const sheet = blankSheet({ appendRow: (row) => { if (row.length === 9) order.push('append'); } });
+    const sheet = blankSheet({
+      getRange: () => ({
+        setValue() {},
+        setNumberFormat() { return this; },
+        setValues(rows) {
+          if (Array.isArray(rows) && rows[0] && rows[0].length === 9) order.push('append');
+        },
+      }),
+    });
     const be = loadBackend({ UrlFetchApp: tokeninfo({ ...validClaims(), aud: 'attacker' }), sheet });
     const res = be.handleAddComment({ videoId: 'v1', body: 'hi', token: 't' });
     expect(res.status).toBe('error');
@@ -214,6 +229,14 @@ describe('decodeHtmlEntities (finding #9 — decode order)', () => {
   it('decodes a bare &amp;', () => {
     const { decodeHtmlEntities } = loadBackend();
     expect(decodeHtmlEntities('A &amp; B')).toBe('A & B');
+  });
+
+  it('decodes an astral-plane emoji entity without truncation (B1)', () => {
+    // 0x1F600 (128512) is above 0xFFFF; fromCharCode would truncate it to
+    // garbage, fromCodePoint yields the actual emoji.
+    const { decodeHtmlEntities } = loadBackend();
+    expect(decodeHtmlEntities('&#128512;')).toBe('\u{1F600}'); // 😀
+    expect(decodeHtmlEntities('&#x1F600;')).toBe('\u{1F600}');
   });
 });
 

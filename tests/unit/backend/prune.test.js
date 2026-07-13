@@ -41,6 +41,18 @@ function makeSheet(rows) {
           }
         }
       },
+      getValues() {
+        const nr = numRows || 1;
+        const nc = numCols || 1;
+        const out = [];
+        for (let i = 0; i < nr; i++) {
+          const r = grid[row - 1 + i] || [];
+          const rr = [];
+          for (let j = 0; j < nc; j++) rr.push(col - 1 + j < r.length ? r[col - 1 + j] : '');
+          out.push(rr);
+        }
+        return out;
+      },
       clearContent() {
         const nr = numRows || 1;
         const nc = numCols || 1;
@@ -133,6 +145,54 @@ describe('pruneOldVideos', () => {
     // readAllVideos now sees exactly the survivors (minus dedupe/expiry, n/a here).
     expect(be.readAllVideos().map((v) => v.video_id).sort())
       .toEqual(['BADDATEROW', 'OLDUNEXPIR', 'OLDUPCOMIN', 'RECENT00001'].sort());
+  });
+
+  it('archives an old pending-live row whose expires_at has already lapsed (B3)', () => {
+    const now = Date.now();
+    const rows = [
+      // Old 'upcoming' premiere that never aired: its expires_at is in the past.
+      // Without the expiry gate this row was force-kept forever; it must now age
+      // out by published_at like any other stale row.
+      ['LAPSEDLIVE', 'A', 't', 'https://x/1', iso(now - 90 * DAY), 'upcoming', '', iso(now - 2 * DAY)],
+      // Control: an old 'upcoming' row with NO expiry is still force-kept.
+      ['NOEXPUPCMN', 'A', 't', 'https://x/2', iso(now - 90 * DAY), 'upcoming', '', ''],
+    ];
+    const be = loadPrune(rows);
+
+    const archived = be.pruneOldVideos();
+    expect(archived).toBe(1);
+
+    const liveIds = be.videos._grid.slice(1).map((r) => r[0]).filter(Boolean);
+    expect(liveIds).toEqual(['NOEXPUPCMN']); // lapsed pending-live gone, no-expiry kept
+
+    const archive = be.videosSpreadsheet._tabs.Archive;
+    expect(archive._grid.slice(1).map((r) => r[0])).toEqual(['LAPSEDLIVE']);
+  });
+
+  it('widens a narrow pre-existing archive header to match the live header (B6)', () => {
+    const now = Date.now();
+    const be = loadPrune([
+      ['OLDNORMAL01', 'A', 't', 'https://x/1', iso(now - 90 * DAY), 'none', '', ''],
+    ]);
+    // Pre-seed an Archive tab whose header predates the live sheet's newer
+    // columns (only the first 5 of the 8 live columns) — the header-drift bug:
+    // rows archived after a live-sheet column addition would otherwise lose
+    // those trailing fields (notably expires_at) on read.
+    const NARROW = HEADERS.slice(0, 5);
+    be.videosSpreadsheet._tabs.Archive = makeSheet([
+      NARROW,
+      ['PRIORARCH1', 'B', 'old', 'https://x/0', iso(now - 200 * DAY)],
+    ]);
+
+    expect(be.pruneOldVideos()).toBe(1);
+
+    const archive = be.videosSpreadsheet._tabs.Archive;
+    // Header row widened to the full live schema before appending.
+    expect(archive._grid[0]).toEqual(HEADERS);
+    // The newly archived row is appended at full width (incl. the live trio).
+    const appended = archive._grid[archive._grid.length - 1];
+    expect(appended[0]).toBe('OLDNORMAL01');
+    expect(appended).toHaveLength(HEADERS.length);
   });
 
   it('is a no-op (no Archive tab) when nothing is old enough', () => {

@@ -36,10 +36,19 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.12.0';
+const VERSION = '1.13.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
+
+// Wall-clock budget for a single crawl. Apps Script hard-kills executions at
+// 6 min; on a kill the finally blocks don't run, last_fetch never updates, and
+// the crawl re-runs every ~10 min, always dying at the same slow/dead channel
+// so tail channels never ingest. We stop cleanly well short of the kill
+// (~4.5 min), finalize the channels already done, and record a resume index so
+// the NEXT crawl starts after the last-completed channel (wrapping around).
+const CRAWL_BUDGET_MS = 270000; // 4.5 minutes
+const CRAWL_RESUME_KEY = 'crawl_resume_index';
 
 // Feed-head cache: the first FEED_HEAD_COUNT sorted videos are kept in
 // CacheService so the requests that gate first paint (page 1, the page-1
@@ -145,10 +154,16 @@ function decodeHtmlEntities(text) {
   // &amp;quot;), and the numeric/named passes below can only decode the
   // inner entity once the &amp; wrapper is unwrapped. With &amp; in the
   // middle (as before), &amp;#39; came out as the literal text "&#39;".
+  // fromCodePoint (not fromCharCode): astral-plane code points above 0xFFFF —
+  // emoji in titles like &#128512; (😀) — truncate to garbage under
+  // fromCharCode, which only handles a single UTF-16 code unit. The V8 runtime
+  // supports fromCodePoint. fromCodePoint THROWS RangeError on a value outside
+  // 0..0x10FFFF, though (a malformed feed entity like &#9999999999;), so leave
+  // any out-of-range entity untouched rather than crash the whole parse.
   var decoded = text
     .replace(/&amp;/g, '&')
-    .replace(/&#(\d+);/g, function(_, n) { return String.fromCharCode(parseInt(n, 10)); })
-    .replace(/&#x([0-9a-fA-F]+);/g, function(_, h) { return String.fromCharCode(parseInt(h, 16)); })
+    .replace(/&#(\d+);/g, function(m, n) { var c = parseInt(n, 10); return c <= 0x10FFFF ? String.fromCodePoint(c) : m; })
+    .replace(/&#x([0-9a-fA-F]+);/g, function(m, h) { var c = parseInt(h, 16); return c <= 0x10FFFF ? String.fromCodePoint(c) : m; })
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
@@ -548,6 +563,9 @@ function handleGetChannels() {
 }
 
 function crawlAllFeeds() {
+  // Wall-clock deadline (production runtime timing — NOT a test stopwatch).
+  var crawlStartMs = new Date().getTime();
+
   var channelsSheet = getSheet('CHANNELS');
   var videosSheet = getSheet('VIDEOS');
 
@@ -562,6 +580,14 @@ function crawlAllFeeds() {
   // Get existing video IDs for deduplication
   var existingVideos = {};
   var existingRowById = {}; // video_id -> 1-based sheet row, for view-count refresh
+  // Existing normalized URLs, keyed exactly as dedupeByUrl keys them
+  // (trim().toLowerCase()). A feed that normally parses as XML but hits the
+  // regex fallback once produces a DIFFERENT id for every item (parseRss2 hashes
+  // guid||link; parseAtom/parseRegex hash link), so the id-keyed dedup below
+  // would append ~15 duplicate rows. Skipping items whose URL already exists
+  // keeps the original id stable across such a parse-path flip without rewriting
+  // any existing ids.
+  var existingUrls = {};
   var videoData = videosSheet.getDataRange().getValues();
   var vHeaders = videoData.length > 0 ? videoData[0] : [];
   // A blank sheet reads back as [['']] — treat that as "no headers" so the
@@ -592,11 +618,15 @@ function crawlAllFeeds() {
   if (videoData.length > 1) {
     var videoIdCol = vHeaders.indexOf('item_id');
     if (videoIdCol === -1) videoIdCol = vHeaders.indexOf('video_id');
+    var urlCol0 = vHeaders.indexOf('url');
 
     if (videoIdCol !== -1) {
       for (var i = 1; i < videoData.length; i++) {
         existingVideos[videoData[i][videoIdCol]] = true;
         existingRowById[videoData[i][videoIdCol]] = i + 1;
+        if (urlCol0 !== -1 && videoData[i][urlCol0]) {
+          existingUrls[String(videoData[i][urlCol0]).trim().toLowerCase()] = true;
+        }
       }
     }
   }
@@ -604,8 +634,34 @@ function crawlAllFeeds() {
   var newCount = 0;
   var errorCount = 0;
 
-  for (var i = 1; i < channelData.length; i++) {
-    var row = channelData[i];
+  // Resume from where the last budget-truncated crawl left off, wrapping around
+  // the channel list, so a slow/dead channel near index 0 can't perpetually
+  // starve the tail. channelCount excludes the header row.
+  var channelCount = channelData.length - 1;
+  var resumeStart = parseInt(getMeta(CRAWL_RESUME_KEY), 10);
+  if (isNaN(resumeStart) || resumeStart < 0 || channelCount === 0 || resumeStart >= channelCount) {
+    resumeStart = 0;
+  }
+  // A completed full pass resets the resume index to 0 so it doesn't drift; an
+  // early stop overwrites this with the first channel we didn't reach.
+  var nextResumeIndex = 0;
+  var stoppedEarly = false;
+
+  for (var k = 0; k < channelCount; k++) {
+    // Budget check BEFORE starting each channel (except the first, so every
+    // crawl makes at least one channel's worth of forward progress). A dead
+    // feed can burn a ~30s retry ladder, so we stop with headroom for the
+    // end-of-crawl finalization below rather than risk the 6-min hard kill.
+    if (k > 0 && (new Date().getTime() - crawlStartMs) > CRAWL_BUDGET_MS) {
+      stoppedEarly = true;
+      nextResumeIndex = (resumeStart + k) % channelCount; // first channel not reached
+      log('WARN', 'fetchAllFeeds', 'Crawl budget reached after ' + k +
+        ' channels — resuming at index ' + nextResumeIndex + ' next run');
+      break;
+    }
+
+    var chanIdx = (resumeStart + k) % channelCount; // 0-based channel index
+    var row = channelData[chanIdx + 1];
     var rawEnabled = enabledCol === -1 ? true : row[enabledCol];
     var enabled = rawEnabled === true || String(rawEnabled).toUpperCase() === 'TRUE';
     if (!enabled) {
@@ -633,7 +689,18 @@ function crawlAllFeeds() {
 
       for (var v = 0; v < videos.length; v++) {
         var video = videos[v];
-        if (!existingVideos[video.video_id]) {
+        var normUrl = video.url ? String(video.url).trim().toLowerCase() : '';
+        var urlKnown = normUrl !== '' && existingUrls[normUrl];
+        if (!existingVideos[video.video_id] && !urlKnown) {
+          // Post-dedup enrichment: resolve og:image ONLY now that the id/url
+          // dedup has confirmed this item is genuinely new. The parsers leave
+          // preview_image '' for imageless articles precisely so this page fetch
+          // (up to 5 redirect hops) doesn't re-run for the same article on every
+          // crawl — only brand-new items pay for it, once.
+          if (!video.preview_image && video.media_type === 'article' && video.url) {
+            video.preview_image = fetchOgImage(video.url);
+          }
+
           var newRow = [];
           if (vHeaders.length === 0) {
              // Fallback if sheet is totally empty (order matches the standard schema)
@@ -665,6 +732,7 @@ function crawlAllFeeds() {
 
           videosSheet.appendRow(newRow);
           existingVideos[video.video_id] = true;
+          if (normUrl !== '') existingUrls[normUrl] = true;
           newCount++;
         } else if (existingRowById[video.video_id]) {
           var existingRow = existingRowById[video.video_id];
@@ -708,6 +776,13 @@ function crawlAllFeeds() {
     Utilities.sleep(500);
   }
 
+  // Persist where the next crawl should resume: the first channel we didn't
+  // reach when the budget cut us off, or 0 after a completed full pass. This is
+  // normal end-of-crawl finalization (it runs whether we finished or stopped
+  // early — only a hard kill skips it, which is exactly the case the budget
+  // check exists to avoid).
+  setMeta(CRAWL_RESUME_KEY, String(nextResumeIndex));
+
   // Update last_fetch timestamp
   setMeta('last_fetch', new Date().toISOString());
 
@@ -721,8 +796,9 @@ function crawlAllFeeds() {
   invalidateFeedHead();
   invalidateTopWeek();
 
-  log('INFO', 'fetchAllFeeds', 'Refresh complete. New: ' + newCount + ', Errors: ' + errorCount + ', Archived: ' + archived);
-  return { new_videos: newCount, errors: errorCount, archived: archived };
+  log('INFO', 'fetchAllFeeds', 'Refresh complete. New: ' + newCount + ', Errors: ' + errorCount +
+    ', Archived: ' + archived + (stoppedEarly ? ', stopped early (resume=' + nextResumeIndex + ')' : ''));
+  return { new_videos: newCount, errors: errorCount, archived: archived, stopped_early: stoppedEarly };
 }
 
 /**
@@ -776,7 +852,13 @@ function pruneOldVideos() {
       var expMs = expCol !== -1 && row[expCol] ? new Date(row[expCol]).getTime() : NaN;
       var unexpired = !isNaN(expMs) && expMs >= nowMs;
 
-      if (isNaN(t) || t >= cutoff || pendingLive || unexpired) {
+      // A pending live/upcoming row is force-kept only while unexpired (or when
+      // it carries no expiry at all). Without the expiry gate, an 'upcoming'/
+      // 'live' row whose expires_at has already lapsed would be kept forever —
+      // it could never age out by published_at like anything else.
+      var keepPendingLive = pendingLive && (isNaN(expMs) || expMs >= nowMs);
+
+      if (isNaN(t) || t >= cutoff || keepPendingLive || unexpired) {
         keep.push(row);
       } else {
         archive.push(row);
@@ -791,6 +873,19 @@ function pruneOldVideos() {
     if (!archiveSheet) {
       archiveSheet = ss.insertSheet(ARCHIVE_SHEET_NAME);
       archiveSheet.appendRow(headers);
+    } else {
+      // Reconcile header drift: the archive header is written once at tab
+      // creation, but the live sheet self-adds columns over time (view_count,
+      // then the live_status/scheduled_start/expires_at trio). Rows archived
+      // after such an addition are sized to the wider live header; if the
+      // archive header is still narrower, those extra fields collapse onto the
+      // '' key in normalizeVideoRows on read (notably expires_at, resurfacing
+      // expired premieres permanently). Widen the archive header to match the
+      // live header before appending so the new columns are named on read.
+      var archiveHeader = archiveSheet.getRange(1, 1, 1, archiveSheet.getLastColumn()).getValues()[0];
+      if (archiveHeader.length < headers.length) {
+        archiveSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      }
     }
     archiveSheet
       .getRange(archiveSheet.getLastRow() + 1, 1, archive.length, headers.length)
@@ -1821,11 +1916,11 @@ function parseRss2(root, channelName, tier, category) {
       var contentEncoded = contentNs ? item.getChildText('encoded', contentNs) || '' : '';
       previewImage = extractImageFromHtml(contentEncoded + ' ' + desc);
     }
-    // 4. Last resort for articles: fetch the article page for og:image
-    if (!previewImage && mediaType === 'article' && link) {
-      previewImage = fetchOgImage(link);
-    }
-    
+    // NOTE: the og:image page-fetch fallback for imageless articles is NOT done
+    // here — it's deferred to a post-dedup enrichment step in crawlAllFeeds so it
+    // only ever runs for genuinely-new items, never re-fetching the same
+    // imageless article (up to 5 redirect hops) on every crawl.
+
     videos.push({
       video_id: itemId,
       media_type: mediaType,
@@ -1894,11 +1989,9 @@ function parseAtom(root, channelName, tier, category) {
       var content = entry.getChildText('content', ns) || entry.getChildText('summary', ns) || '';
       previewImage = extractImageFromHtml(content);
     }
-    // 3. Last resort for articles: fetch og:image
-    if (!previewImage && mediaType === 'article' && link) {
-      previewImage = fetchOgImage(link);
-    }
-    
+    // og:image page-fetch fallback deferred to crawlAllFeeds' post-dedup
+    // enrichment (see parseRss2) so imageless articles aren't re-fetched forever.
+
     videos.push({
       video_id: itemId,
       media_type: mediaType,
@@ -1942,11 +2035,9 @@ function parseRegex(xml, channelName, tier, category) {
     if (imgMatch) previewImage = imgMatch[1];
     // 2. Smart HTML extraction
     if (!previewImage) previewImage = extractImageFromHtml(itemXml);
-    // 3. og:image fallback for articles
-    if (!previewImage && mediaType === 'article' && link) {
-      previewImage = fetchOgImage(link);
-    }
-    
+    // og:image page-fetch fallback deferred to crawlAllFeeds' post-dedup
+    // enrichment (see parseRss2) so imageless articles aren't re-fetched forever.
+
     videos.push({
       video_id: itemId,
       media_type: mediaType,
@@ -2203,6 +2294,11 @@ function cursorFor(video) {
 }
 
 function getVideos(page, limit, cursor) {
+  // Clamp against negative/garbage input the same way handleArchive guards its
+  // offset: a negative page/limit yields slice(-40, -20) nonsense (a window from
+  // the END of the list) instead of an empty/first page.
+  page = Math.max(1, page);
+  limit = Math.max(1, limit);
   var start = (page - 1) * limit;
 
   // Fast path: serve early no-cursor pages from the cached feed head, skipping
@@ -2511,6 +2607,38 @@ function handleComments(params) {
   return getComments(videoId);
 }
 
+// Fields a comment read may expose to (unauthenticated) clients. user_email is
+// deliberately excluded: the Comments sheet stores each commenter's Google email
+// for blocking/rate-limiting, but it must never leave the server — the privacy
+// policy promises it is never shared, and the frontend only renders name/avatar.
+function publicCommentColumns(headers, videoIdCol) {
+  return {
+    comment_id: headers.indexOf('comment_id'),
+    video_id: videoIdCol,
+    parent_id: headers.indexOf('parent_id'),
+    user_name: headers.indexOf('user_name'),
+    user_avatar: headers.indexOf('user_avatar'),
+    body: headers.indexOf('body'),
+    depth: headers.indexOf('depth'),
+    created_at: headers.indexOf('created_at')
+  };
+}
+
+function toPublicComment(row, cols) {
+  return {
+    comment_id: cols.comment_id === -1 ? '' : row[cols.comment_id],
+    video_id: cols.video_id === -1 ? '' : row[cols.video_id],
+    parent_id: cols.parent_id === -1 ? '' : row[cols.parent_id],
+    user_name: cols.user_name === -1 ? '' : row[cols.user_name],
+    user_avatar: cols.user_avatar === -1 ? '' : row[cols.user_avatar],
+    body: cols.body === -1 ? '' : row[cols.body],
+    // Stored as text (the append range is '@'-formatted to defeat formula
+    // injection), so coerce back to a number for the client's strict depth checks.
+    depth: cols.depth === -1 ? 0 : (Number(row[cols.depth]) || 0),
+    created_at: cols.created_at === -1 ? '' : row[cols.created_at]
+  };
+}
+
 function getComments(videoId) {
   var sheet = getSheet('COMMENTS');
   var data = sheet.getDataRange().getValues();
@@ -2521,16 +2649,12 @@ function getComments(videoId) {
 
   var headers = data[0];
   var videoIdCol = findVideoIdCol(headers);
+  var cols = publicCommentColumns(headers, videoIdCol);
   var comments = [];
 
   for (var i = 1; i < data.length; i++) {
     if (data[i][videoIdCol] !== videoId) continue;
-
-    var comment = {};
-    for (var j = 0; j < headers.length; j++) {
-      comment[headers[j]] = data[i][j];
-    }
-    comments.push(comment);
+    comments.push(toPublicComment(data[i], cols));
   }
 
   // Sort by created_at ascending (oldest first for threading)
@@ -2566,16 +2690,12 @@ function handleCommentsBatch(params) {
   if (data.length > 1) {
     var headers = data[0];
     var videoIdCol = findVideoIdCol(headers);
+    var cols = publicCommentColumns(headers, videoIdCol);
 
     for (var i = 1; i < data.length; i++) {
       var vid = data[i][videoIdCol];
       if (!byVideo[vid]) continue;
-
-      var comment = {};
-      for (var j = 0; j < headers.length; j++) {
-        comment[headers[j]] = data[i][j];
-      }
-      byVideo[vid].push(comment);
+      byVideo[vid].push(toPublicComment(data[i], cols));
     }
 
     // Sort each video's comments by created_at ascending (oldest first for threading)
@@ -2649,11 +2769,18 @@ function handleAddComment(data) {
       return { status: 'error', message: 'Please wait before posting another comment' };
     }
 
-    // 8. Append to Comments sheet
+    // 8. Append to Comments sheet as plain text. Without the '@' number format,
+    // Sheets interprets a body or display name beginning with = + - @ as a live
+    // formula (=IMPORTXML/HYPERLINK), which would auto-execute in the owner's
+    // context when the sheet is opened and could exfiltrate adjacent cells
+    // (including other users' emails). Mirrors the Stars writer.
     var sheet = getSheet('COMMENTS');
     var now = new Date().toISOString();
 
-    sheet.appendRow([
+    var rowNum = sheet.getLastRow() + 1;
+    var range = sheet.getRange(rowNum, 1, 1, 9);
+    range.setNumberFormat('@');
+    range.setValues([[
       commentId,
       videoId,
       parentId || '',
@@ -2663,7 +2790,7 @@ function handleAddComment(data) {
       body,
       depth,
       now,
-    ]);
+    ]]);
 
     // 9. Record for rate limiting
     recordCommentTime(user.email);
@@ -2677,6 +2804,36 @@ function handleAddComment(data) {
   log('INFO', 'addComment', 'Comment added by ' + user.email + ' on video ' + videoId);
 
   return { status: 'ok', comment_id: commentId };
+}
+
+/**
+ * Fallback for vote/comment recounts on a video that has aged out of the live
+ * Videos sheet into the Archive tab. Shared links (handleVideo) and full-history
+ * search (handleArchive) still serve archived videos, so a vote/comment can land
+ * on an id the live-sheet scan misses — without this it silently no-ops and the
+ * archived row's count never moves. Finds the row in the Archive tab, writes the
+ * given count to `colName`, and drops the archive cache so the next read serves
+ * it. Returns true if a row was updated. Caller already holds the script lock.
+ * @returns {boolean}
+ */
+function updateArchivedCount(videoId, colName, count) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS);
+  var archiveSheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
+  if (!archiveSheet) return false;
+  var data = archiveSheet.getDataRange().getValues();
+  if (data.length <= 1) return false;
+  var headers = data[0];
+  var videoIdCol = findVideoIdCol(headers);
+  var countCol = headers.indexOf(colName);
+  if (videoIdCol === -1 || countCol === -1) return false;
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][videoIdCol] === videoId) {
+      archiveSheet.getRange(i + 1, countCol + 1).setValue(count);
+      invalidateArchive();
+      return true;
+    }
+  }
+  return false;
 }
 
 function updateCommentCount(videoId) {
@@ -2698,12 +2855,17 @@ function updateCommentCount(videoId) {
   var vVideoIdCol = findVideoIdCol(vHeaders);
   var commentCountCol = vHeaders.indexOf('comment_count');
 
+  var found = false;
   for (var i = 1; i < videosData.length; i++) {
     if (videosData[i][vVideoIdCol] === videoId) {
       videosSheet.getRange(i + 1, commentCountCol + 1).setValue(count);
+      found = true;
       break;
     }
   }
+  // The live scan missed — the video may have been archived. Update the row in
+  // the Archive tab so a comment on a shared-link/search result still persists.
+  if (!found) updateArchivedCount(videoId, 'comment_count', count);
 
   // comment_count is baked into both the cached feed head and the cached
   // top-week rows — drop them so the next request serves the new count.
@@ -2854,12 +3016,17 @@ function updateVoteCount(videoId) {
     videosSheet.getRange(1, voteCountCol + 1).setValue('vote_count');
   }
 
+  var found = false;
   for (var i = 1; i < videosData.length; i++) {
     if (videosData[i][videoIdCol] === videoId) {
       videosSheet.getRange(i + 1, voteCountCol + 1).setValue(count);
+      found = true;
       break;
     }
   }
+  // The live scan missed — the video may have been archived. Update the row in
+  // the Archive tab so a vote on a shared-link/search result still persists.
+  if (!found) updateArchivedCount(videoId, 'vote_count', count);
 
   // vote_count is baked into the cached feed head AND drives the top-week
   // ranking — drop both so the next request serves the new count and order.

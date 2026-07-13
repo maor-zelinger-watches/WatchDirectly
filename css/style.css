@@ -392,9 +392,9 @@ img {
    container, cards carry data-media-type — nothing re-renders.
    ============================================================ */
 
-.feed--hide-video [data-media-type="video"],
-.feed--hide-article [data-media-type="article"],
-.feed--hide-short [data-media-type="short"] {
+.feed--hide-video [data-media-type="video"]:not(.media-card--fullscreen),
+.feed--hide-article [data-media-type="article"]:not(.media-card--fullscreen),
+.feed--hide-short [data-media-type="short"]:not(.media-card--fullscreen) {
   display: none;
 }
 

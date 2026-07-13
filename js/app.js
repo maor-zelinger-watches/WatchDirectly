@@ -96,6 +96,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function loadNextPage() {
   if (state.loading || state.revalidating || !state.hasMore || isFilterActive() || state.view !== 'latest') return;
   state.loading = true;
+  let loadFailed = false;
 
   const skeleton = document.getElementById('feed-skeleton');
   const empty = document.getElementById('feed-empty');
@@ -139,11 +140,14 @@ async function loadNextPage() {
       if (initialLimit < CONFIG.PAGE_SIZE && state.videos.length < state.totalVideos) {
         const fullPageData = await api.fetchFeed(1, CONFIG.PAGE_SIZE);
         const fullVideos = fullPageData.videos || [];
-        const remainingVideos = fullVideos.slice(initialLimit);
         state.nextCursor = fullPageData.next_cursor;
 
-        // Filter out videos already in state
-        const uniqueRemaining = remainingVideos.filter(nv => !state.videos.some(sv => sv.video_id === nv.video_id));
+        // Filter the WHOLE page-1 response against what we already hold — never
+        // slice(initialLimit). The two fetches aren't index-aligned: dedupeVideos
+        // can shrink the first (N+1) response, and an item prepended between the
+        // fetches shifts everything down, so a positional slice would silently
+        // drop a genuinely-new card at the boundary.
+        const uniqueRemaining = fullVideos.filter(nv => !state.videos.some(sv => sv.video_id === nv.video_id));
 
         state.videos = state.videos.concat(uniqueRemaining);
         await appendCards(uniqueRemaining);
@@ -217,27 +221,45 @@ async function loadNextPage() {
       refillPrefetchBuffer();
     }
   } catch (error) {
+    loadFailed = true;
     console.error('Failed to load feed:', error);
-    if (state.videos.length === 0) {
+    // Toast once per failure streak (not on every retry), and only when there's
+    // nothing on screen — a mid-scroll page failure retries silently.
+    if (state.videos.length === 0 && state.feedErrorStreak === 0) {
       showToast('Failed to load feed. Please try again.', 'error');
     }
+    state.feedErrorStreak++;
   } finally {
     state.loading = false;
     skeleton.style.display = 'none';
+    if (!loadFailed) state.feedErrorStreak = 0;
 
     if (!state.hasMore || isFilterActive() || state.view !== 'latest') {
       sentinel.style.display = 'none';
     } else {
       sentinel.style.display = '';
-      // If the sentinel is still within the root margin after loading,
-      // trigger the next load manually. The IntersectionObserver won't re-fire
-      // if it never exited the threshold while state.loading was true.
-      requestAnimationFrame(() => {
-        const rect = sentinel.getBoundingClientRect();
-        if (rect.top > 0 && rect.top <= window.innerHeight + 600) {
-          loadNextPage();
-        }
-      });
+      if (loadFailed) {
+        // A failed load leaves the sentinel in view, so the immediate rAF
+        // retrigger below would spin a tight fetch-fail loop (offline / 500s).
+        // Back off exponentially instead, capped at 30s, and re-check we're
+        // still on an unfiltered Latest feed with more to load before retrying.
+        const delay = Math.min(30000, 1000 * Math.pow(2, state.feedErrorStreak - 1));
+        setTimeout(() => {
+          if (!state.loading && state.hasMore && !isFilterActive() && state.view === 'latest') {
+            loadNextPage();
+          }
+        }, delay);
+      } else {
+        // If the sentinel is still within the root margin after loading,
+        // trigger the next load manually. The IntersectionObserver won't re-fire
+        // if it never exited the threshold while state.loading was true.
+        requestAnimationFrame(() => {
+          const rect = sentinel.getBoundingClientRect();
+          if (rect.top > 0 && rect.top <= window.innerHeight + 600) {
+            loadNextPage();
+          }
+        });
+      }
     }
   }
 }
@@ -375,30 +397,72 @@ async function revalidateFeed() {
       return cached && cached.comment_count !== fv.comment_count;
     });
 
-    if (frontIds === freshIds && !countsChanged) {
-      // Front identical and no count drift — nothing to reconcile. Adopt the
-      // server's page-1 cursor only when single-page (with a tail loaded the
-      // live cursor already points past the tail; page 1's would rewind it),
-      // and only if a concurrent loadNextPage hasn't advanced past page 1.
+    if (frontIds === freshIds) {
+      // Front ORDER is unchanged — at most comment/vote counts drifted. Patch
+      // those in place and return WITHOUT the reorder/re-append pass further
+      // down: that pass detaches every card and reloads its promoted iframe
+      // (stopping inline playback) for a change that moved nothing — the common
+      // "someone commented overnight" case.
+      if (countsChanged) {
+        for (const fv of freshVideos) {
+          const existing = state.videos.find(v => v.video_id === fv.video_id);
+          if (existing) {
+            existing.comment_count = fv.comment_count;
+            existing.vote_count = fv.vote_count;
+          }
+        }
+        // Touch the DOM only when the Latest feed actually owns the container.
+        if (state.view === 'latest' && !isFilterActive()) {
+          const container = document.getElementById('feed-container');
+          if (container) {
+            for (const fv of freshVideos) {
+              const toggle = container.querySelector(`.media-card__comments-toggle[data-video-id="${fv.video_id}"]`);
+              if (toggle) toggle.textContent = `💬 ${fv.comment_count || 0} comments`;
+            }
+          }
+        }
+        // Drop prefetched comments only where the count actually changed.
+        for (const fv of freshVideos) {
+          const cached = state.commentsCache[fv.video_id];
+          if (cached && cached.comments.length !== (fv.comment_count || 0)) {
+            delete state.commentsCache[fv.video_id];
+          }
+        }
+        saveFeedCache(state.videos, state.totalVideos);
+      }
+      // Adopt the server's page-1 cursor only when single-page (with a tail the
+      // live cursor already points past it; page 1's would rewind it), and only
+      // if a concurrent loadNextPage hasn't advanced past page 1.
       if (!hasTail && state.currentPage === startCurrentPage) state.nextCursor = data.next_cursor;
       prefetchComments(state.videos);
       refillPrefetchBuffer();
       return;
     }
 
-    // A search/filter view owns the container — update state and cache
-    // only, the normal feed re-renders when the filter clears.
-    if (isFilterActive()) {
+    // State-only reconcile: adopt fresh page 1 as the new feed and re-paginate,
+    // touching no DOM. Used whenever the Latest feed does NOT own the container
+    // — a search query is active, OR the user is on a different tab. When they
+    // return to Latest it re-renders from this state.
+    const adoptFreshAsState = () => {
       state.videos = freshVideos;
       state.totalVideos = data.total || freshVideos.length;
       state.currentPage = 1;
       state.nextCursor = data.next_cursor;
       state.hasMore = serverHasMore();
       saveFeedCache(freshVideos, state.totalVideos);
-      // Page 1 was replaced — pages buffered against the old pagination
-      // no longer line up.
+      // Page 1 was replaced — pages buffered against the old pagination no
+      // longer line up.
       invalidatePrefetchBuffer();
       refillPrefetchBuffer();
+    };
+
+    // The DOM diff below writes into #feed-container. If a search/filter is
+    // active, or the user switched to Top/Starred/Channels while this fetch was
+    // in flight, that container is NOT the Latest feed — diffing into it would
+    // inject Latest cards into the wrong view (and re-sort a vote-ranked list by
+    // date). Reconcile state only.
+    if (isFilterActive() || state.view !== 'latest') {
+      adoptFreshAsState();
       return;
     }
 
@@ -471,6 +535,14 @@ async function revalidateFeed() {
       }
     }
 
+    // A tab switch or search query landed during the fade-out await — the
+    // container is no longer the Latest feed. Abandon the DOM diff and fall
+    // back to a state-only reconcile (finally still releases `revalidating`).
+    if (state.view !== 'latest' || isFilterActive()) {
+      adoptFreshAsState();
+      return;
+    }
+
     // --- 2. Update comment counts on surviving cards ---
     for (const video of freshVideos) {
       if (existingIdSet.has(video.video_id)) {
@@ -507,19 +579,24 @@ async function revalidateFeed() {
       });
     }
 
-    // --- 4. Sort ALL cards chronologically (newest first) ---
-    const allCards = [...container.querySelectorAll('.media-card')];
-    allCards.sort((a, b) => {
-      const dateA = new Date(a.dataset.publishedAt || 0);
-      const dateB = new Date(b.dataset.publishedAt || 0);
-      return dateB - dateA; // newest first
-    });
-    // Re-append in sorted order (DOM moves, no re-render). Moving an
-    // iframe reloads it, so the fullscreen card stays put — it's
-    // position:fixed, its container order is invisible while expanded.
-    for (const card of allCards) {
-      if (card.dataset.videoId === state.fullscreenVideoId) continue;
-      container.appendChild(card);
+    // --- 4. Reorder to fresh chronological order, moving ONLY cards that are
+    // actually out of place. Re-appending a card that's already positioned
+    // still detaches+reattaches it, reloading its promoted iframe (and stopping
+    // inline playback) — so walk the desired order and insertBefore only on a
+    // mismatch. After step 3's positional inserts the order usually already
+    // matches, so the common path performs zero moves. The fullscreen card is
+    // left untouched: it's position:fixed and playing; moving it would reload.
+    const sortedCards = [...container.querySelectorAll('.media-card')]
+      .filter(c => c.dataset.videoId !== state.fullscreenVideoId)
+      .sort((a, b) => new Date(b.dataset.publishedAt || 0) - new Date(a.dataset.publishedAt || 0));
+    let prevCard = null;
+    for (const card of sortedCards) {
+      const desired = prevCard ? prevCard.nextElementSibling : container.firstElementChild;
+      if (card !== desired) {
+        if (prevCard) prevCard.after(card);
+        else container.insertBefore(card, container.firstElementChild);
+      }
+      prevCard = card;
     }
 
     // --- 5. Update state and cache ---
