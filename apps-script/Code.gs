@@ -26,6 +26,7 @@ const SPREADSHEET_IDS = {
   META:         '11Zm0nouToxUzXQZZ4OQOcYcFLl0xdSsWQfPLsQs0AF4',
   BLOCKED:      '1ZNePTyTIZsM73WW4nC3AwSb27oDjVoftjJJeWTajjL0',
   LOGS:         '1C6kVxkdANBBech6sDPRye62Mo4MdeSrGCkY78ZHi_9s',
+  CLIENT_ERRORS:'1jTR_cz0F4qBgzQm0pNx3t6Gfc0zCFIFTOsa8jXo6s6E',
 };
 
 // ============================================================
@@ -36,7 +37,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.13.1';
+const VERSION = '1.14.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -249,6 +250,8 @@ function doPost(e) {
         return jsonResponse(handleBootstrap(data));
       case 'session':
         return jsonResponse(handleSession(data));
+      case 'clientError':
+        return jsonResponse(handleClientError(data));
       case 'logs':
         // Admin-only, over POST so the token never lands in a URL/query log.
         if (!isAdmin(data.token)) {
@@ -3582,4 +3585,119 @@ function handleLogs(params) {
   }
 
   return { status: 'ok', logs: logs };
+}
+
+// ============================================================
+// CLIENT ERROR REPORTING
+// ============================================================
+
+// The frontend's error reporter (js/error-reporter.js) batches uncaught
+// errors, unhandled rejections, and console.error calls into anonymous
+// POSTs handled here. The endpoint is deliberately unauthenticated —
+// errors mostly hit signed-out users — so every guard is on this side:
+// a per-request batch cap, per-field clips, and a global per-minute row
+// budget. Rejected/overflow reports are DROPPED with an ok response:
+// the reporter is fire-and-forget, and an error status would only make
+// a struggling client do more work.
+const CLIENT_ERRORS_PER_REQUEST = 10;   // rows accepted from one POST
+const CLIENT_ERRORS_PER_MINUTE = 60;    // global budget, approximate (cache
+                                      // increments are not atomic; a racing
+                                      // burst can slightly overshoot)
+const CLIENT_ERROR_FIELD_LIMITS = {
+  message: 500,
+  stack: 2000,
+  source: 300,
+  ts: 40,
+};
+
+const CLIENT_ERROR_HEADERS = [
+  'logged_at', 'client_ts', 'session_id', 'app_version',
+  'message', 'stack', 'source', 'page', 'user_agent',
+];
+
+/** Coerces to string and clips to n chars; '' for null/undefined. */
+function clip(value, n) {
+  if (value === null || value === undefined) return '';
+  var s = String(value);
+  return s.length > n ? s.substring(0, n) : s;
+}
+
+function handleClientError(data) {
+  var errors = data.errors;
+  if (!Array.isArray(errors) || errors.length === 0) {
+    return { status: 'error', message: 'errors array is required' };
+  }
+  var batch = errors.slice(0, CLIENT_ERRORS_PER_REQUEST);
+
+  // Global budget check — bucketed by wall-clock minute so the counter
+  // self-expires. Fail-open on cache trouble: losing telemetry beats
+  // erroring, and the sheet write below is the only real cost.
+  var cache = null;
+  var budgetKey = null;
+  try {
+    cache = CacheService.getScriptCache();
+    budgetKey = 'cerr_' + Math.floor(Date.now() / 60000);
+    var used = parseInt(cache.get(budgetKey), 10) || 0;
+    if (used >= CLIENT_ERRORS_PER_MINUTE) {
+      return { status: 'ok', accepted: 0, dropped: batch.length };
+    }
+    if (used + batch.length > CLIENT_ERRORS_PER_MINUTE) {
+      batch = batch.slice(0, CLIENT_ERRORS_PER_MINUTE - used);
+    }
+    cache.put(budgetKey, String(used + batch.length), 120);
+  } catch (e) {
+    // cache unavailable — accept the batch unmetered
+  }
+
+  var loggedAt = new Date().toISOString();
+  var sessionId = clip(data.sessionId, 40);
+  var appVersion = clip(data.appVersion, 20);
+  var page = clip(data.page, 300);
+  var userAgent = clip(data.userAgent, 300);
+
+  var rows = [];
+  for (var i = 0; i < batch.length; i++) {
+    var err = batch[i] || {};
+    rows.push([
+      loggedAt,
+      clip(err.ts, CLIENT_ERROR_FIELD_LIMITS.ts),
+      sessionId,
+      appVersion,
+      clip(err.message, CLIENT_ERROR_FIELD_LIMITS.message),
+      clip(err.stack, CLIENT_ERROR_FIELD_LIMITS.stack),
+      clip(err.source, CLIENT_ERROR_FIELD_LIMITS.source),
+      page,
+      userAgent,
+    ]);
+  }
+
+  // Serialize the reserve-rows-then-write, like the Comments writer: two
+  // unlocked writers would read the same getLastRow() and overwrite each
+  // other. Short wait, and a timeout DROPS the batch — telemetry must
+  // never queue behind (or add to) the load it exists to observe.
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(2000);
+  } catch (e) {
+    return { status: 'ok', accepted: 0, dropped: rows.length };
+  }
+
+  try {
+    var sheet = getSheet('CLIENT_ERRORS');
+    var lastRow = sheet.getLastRow();
+    if (lastRow === 0) {
+      sheet.appendRow(CLIENT_ERROR_HEADERS);
+      lastRow = 1;
+    }
+    // '@' (plain text) before the values land: a report body starting with
+    // = + - @ would otherwise execute as a live formula in the owner's
+    // browser when the sheet is opened. Mirrors the Comments writer.
+    var range = sheet.getRange(lastRow + 1, 1, rows.length, CLIENT_ERROR_HEADERS.length);
+    range.setNumberFormat('@');
+    range.setValues(rows);
+  } finally {
+    lock.releaseLock();
+  }
+
+  return { status: 'ok', accepted: rows.length };
 }

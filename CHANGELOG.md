@@ -21,6 +21,23 @@ that component's heading.
 
 ## Frontend
 
+### 1.21.0 — 2026-08-20
+- **Frontend errors now report home.** New `js/error-reporter.js` captures
+  uncaught exceptions (`window` error events), unhandled promise rejections,
+  and `console.error` calls — the codebase's existing convention for surfacing
+  handled failures — and ships them fire-and-forget to the backend's new
+  `clientError` action, which lands them in a dedicated errors spreadsheet.
+  Reports are deduped (3 per distinct error), capped (25 per page load),
+  batched (one POST per 3s burst window), and flushed via `sendBeacon` on
+  `pagehide` so errors right before a tab closes still ship. Known
+  Google Sign-In library noise (`GSI_LOGGER`/FedCM chatter on every signed-out
+  visit) is filtered before it costs budget. The reporter sends no identity —
+  a random per-page-load session id correlates rows, nothing else — can never
+  throw into the app, and never retries a failed send. Loaded as its own
+  module tag ahead of `app.js`, so even a boot error in the main module graph
+  is observed. Groundwork for the alpha: real users' breakage becomes visible
+  without asking them to open devtools.
+
 ### 1.20.0 — 2026-08-20
 - **Added a custom 404 page.** GitHub Pages used to serve its generic 404 for
   any bad or stale link; `404.html` now renders the site's own header, footer,
@@ -420,6 +437,21 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.14.0 — 2026-08-20
+- **New `clientError` action: frontend error intake.** Accepts the error
+  batches posted by the frontend's new reporter and appends them to a
+  dedicated CLIENT_ERRORS spreadsheet (new entry in `SPREADSHEET_IDS`),
+  self-initializing its header row. The endpoint is deliberately
+  unauthenticated — errors mostly hit signed-out users — so every guard is
+  server-side: 10 rows per request, a global budget of 60 rows/minute
+  (CacheService minute buckets; overflow is dropped with an `ok` response so
+  a struggling client isn't told to do more work), per-field clipping, and
+  the same `'@'` plain-text number format the Comments writer uses so a
+  hostile "error message" starting with `=`/`+`/`-`/`@` can't execute as a
+  formula when the sheet is opened. The reserve-rows-then-write runs under
+  the script lock with a short 2s wait; on contention the batch is dropped —
+  telemetry must never queue behind the load it exists to observe.
 
 ### 1.13.1 — 2026-08-20
 - **Rebrand ride-along: "WatchDirectly" → "How You Watch"** in the `Code.gs` /

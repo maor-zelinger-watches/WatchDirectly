@@ -138,6 +138,10 @@
   <script src="js/footer-year.js"></script>
 
   <!-- ===== SCRIPTS ===== -->
+  <!-- error-reporter first: module tags run in order, so the reporter's
+       handlers are installed before app.js's import graph evaluates —
+       a module-level boot error is already observable. -->
+  <script type="module" src="js/error-reporter.js"></script>
   <script type="module" src="js/app.js"></script>
 
 </body>
