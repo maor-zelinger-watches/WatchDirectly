@@ -10,9 +10,11 @@
   <meta name="robots" content="noindex">
 
   <!-- GitHub Pages serves this page for ANY missing path under the site,
-       including nested ones (/WatchDirectly/foo/bar), so every URL here must
-       be absolute from the domain root — relative paths would resolve against
-       the missing URL's directory and break. -->
+       including nested ones (/foo/bar), so every URL here must be absolute
+       from the domain root — relative paths would resolve against the
+       missing URL's directory and break. Rooted at "/" because the site is
+       served from the domain root on the custom domain; under the old
+       github.io/WatchDirectly subpath these must be "/". -->
 
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -20,7 +22,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <!-- Styles -->
-  <link rel="stylesheet" href="/WatchDirectly/css/style.css">
+  <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
 
@@ -29,7 +31,7 @@
     <div class="header__inner">
       <div class="header__logo">
         <span class="header__logo-icon">⌚</span>
-        <a href="/WatchDirectly/" class="header__title-link"><h1 class="header__title">How You Watch</h1></a>
+        <a href="/" class="header__title-link"><h1 class="header__title">How You Watch</h1></a>
       </div>
     </div>
   </header>
@@ -40,7 +42,7 @@
       <p class="error-page__code">404</p>
       <h2 class="error-page__title">Page not found</h2>
       <p class="error-page__text">This page doesn't exist — maybe the link is old, or maybe it never was. The feed is still ticking, though.</p>
-      <a href="/WatchDirectly/" class="btn btn--primary">Back to the feed</a>
+      <a href="/" class="btn btn--primary">Back to the feed</a>
     </article>
   </main>
 
@@ -48,15 +50,15 @@
   <footer class="footer" id="footer">
     <div class="footer__inner">
       <nav class="footer__nav" id="footer-nav">
-        <a href="/WatchDirectly/terms.html" class="footer__nav-link">Terms</a>
-        <a href="/WatchDirectly/privacy.html" class="footer__nav-link">Privacy</a>
+        <a href="/terms.html" class="footer__nav-link">Terms</a>
+        <a href="/privacy.html" class="footer__nav-link">Privacy</a>
       </nav>
       <div class="footer__meta">
         <span class="footer__copyright">© <span id="footer-year">2026</span> How You Watch</span>
       </div>
     </div>
   </footer>
-  <script src="/WatchDirectly/js/footer-year.js"></script>
+  <script src="/js/footer-year.js"></script>
 
 </body>
 </html>
