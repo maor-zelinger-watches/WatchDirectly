@@ -21,6 +21,18 @@ that component's heading.
 
 ## Frontend
 
+### 1.20.0 — 2026-08-20
+- **Added a custom 404 page.** GitHub Pages used to serve its generic 404 for
+  any bad or stale link; `404.html` now renders the site's own header, footer,
+  and styling with a "Back to the feed" CTA (new `error-page` block in
+  `style.css`). Because Pages serves this one file for *every* missing path —
+  including nested ones like `/foo/bar` — all links and assets on the page are
+  absolute-rooted at `/WatchDirectly/`, unlike the relative paths on the other
+  pages; a comment in the file guards that constraint. The page carries the
+  same CSP as the rest of the site, a unique title, a meta description, and
+  `noindex` so error pages stay out of the search index. First fix from the
+  pre-launch checklist audit.
+
 ### 1.19.0 — 2026-08-20
 - **Rebranded the site from "WatchDirectly" to "How You Watch".** Page title,
   Open Graph title, header wordmark, footer copyright, and every brand mention
