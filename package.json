@@ -1,6 +1,6 @@
 {
-  "name": "watchdirectly",
-  "version": "1.2.0",
+  "name": "howyouwatch",
+  "version": "1.2.1",
   "description": "Chronological watch content aggregator with community comments",
   "type": "module",
   "scripts": {

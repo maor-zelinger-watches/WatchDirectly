@@ -1,5 +1,5 @@
 /**
- * app.js — Feed engine and application wiring for WatchDirectly.
+ * app.js — Feed engine and application wiring for How You Watch.
  *
  * Owns the paginated Latest feed: initial load, infinite scroll,
  * stale-while-revalidate against the localStorage cache, and the
@@ -54,7 +54,7 @@ setOnTypeFilterChanged(() => {
 // ============================================================
 
 document.addEventListener('DOMContentLoaded', async () => {
-  console.info(`WatchDirectly frontend v${CONFIG.APP_VERSION}`);
+  console.info(`How You Watch frontend v${CONFIG.APP_VERSION}`);
   const versionEl = document.getElementById('app-version');
   if (versionEl) versionEl.textContent = `v${CONFIG.APP_VERSION}`;
 

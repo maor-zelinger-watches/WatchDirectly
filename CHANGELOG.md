@@ -1,6 +1,6 @@
 # Changelog
 
-Every part of WatchDirectly carries its own [semver](https://semver.org/)
+Every part of How You Watch carries its own [semver](https://semver.org/)
 version (npm scheme: MAJOR.MINOR.PATCH), so progress can be followed per
 component:
 
@@ -20,6 +20,16 @@ When you change a component, bump its version and add an entry below under
 that component's heading.
 
 ## Frontend
+
+### 1.19.0 — 2026-08-20
+- **Rebranded the site from "WatchDirectly" to "How You Watch".** Page title,
+  Open Graph title, header wordmark, footer copyright, and every brand mention
+  in the Terms of Use and Privacy Policy now read "How You Watch" (title case
+  for display text). File-header comments and the boot-time console banner
+  follow suit. The GitHub repository links in the legal pages are deliberately
+  unchanged — the repo is still named `WatchDirectly`, and renaming it (which
+  would also move the GitHub Pages URL) is a separate decision. Smoke-test
+  assertions on the title and header ride along with this entry.
 
 ### 1.18.2 — 2026-07-13
 - **Fix: sign-in was silently broken for a whole class of Google accounts.**
@@ -399,6 +409,13 @@ that component's heading.
 
 ## Backend
 
+### 1.13.1 — 2026-08-20
+- **Rebrand ride-along: "WatchDirectly" → "How You Watch"** in the `Code.gs` /
+  `Setup.gs` file headers, the operator guide (README), and the `site_name`
+  Script Property default that `setupProperties()` seeds. No runtime behavior
+  changes — nothing in the backend reads `site_name`, so already-provisioned
+  deployments aren't affected either way.
+
 ### 1.13.0 — 2026-07-13
 - **Security fix: commenter email addresses are no longer exposed.** `getComments`
   and `handleCommentsBatch` built each comment by copying *every* sheet column
@@ -680,6 +697,12 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.1 — 2026-08-20
+- Rebrand ride-along: npm package renamed `watchdirectly` → `howyouwatch`
+  (package.json + lock file), and the brand name updated in the deploy-script
+  banner and `validate-release.js` header comments. The changelog's own intro
+  prose now says "How You Watch"; historical entries are untouched.
 
 ### 1.2.0 — 2026-07-08
 - Removed the `resolve-channels` and `fetch-avatars` maintenance scripts and

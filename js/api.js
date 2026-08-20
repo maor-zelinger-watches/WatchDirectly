@@ -1,5 +1,5 @@
 /**
- * api.js — API client for WatchDirectly
+ * api.js — API client for How You Watch
  * 
  * Communicates with the Google Apps Script web app backend.
  * All API calls go through this module for centralized error handling.

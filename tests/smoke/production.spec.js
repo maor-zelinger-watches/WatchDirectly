@@ -20,12 +20,12 @@ test.describe('Production Smoke Tests', () => {
 
   test('page loads with correct title', async ({ page }) => {
     await page.goto(PROD_URL);
-    await expect(page).toHaveTitle(/WatchDirectly/);
+    await expect(page).toHaveTitle(/How You Watch/);
   });
 
   test('header renders with logo', async ({ page }) => {
     await page.goto(PROD_URL);
-    await expect(page.locator('.header__title')).toHaveText('WatchDirectly');
+    await expect(page.locator('.header__title')).toHaveText('How You Watch');
   });
 
   test('no filter tabs in the page', async ({ page }) => {

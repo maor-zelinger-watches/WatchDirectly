@@ -1,4 +1,4 @@
-# WatchDirectly — Operator Guide
+# How You Watch — Operator Guide
 
 Everything **you** (the operator) can do to run the site: add channels, tune
 settings, moderate users, and trigger refreshes. No coding required — most
@@ -141,7 +141,7 @@ Each row is a `key` in column A and its `value` in column B.
 | `youtube_api_key` | YouTube Data API key. Enables live/premiere detection and fresh view counts. Without it, the app still works from plain RSS. | `AIza…` |
 | `refresh_interval_hours` | How stale (in hours) data can get before a refresh is triggered | `4` |
 | `log_level` | How much detail to log: `DEBUG`, `INFO`, `WARN`, or `ERROR` | `ERROR` |
-| `site_name` | Display name of the site | `WatchDirectly` |
+| `site_name` | Display name of the site | `How You Watch` |
 
 > `last_fetch` and `fetch_in_progress` also appear in META — those are managed
 > automatically by the crawl. Leave them alone.

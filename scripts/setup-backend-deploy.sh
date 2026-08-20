@@ -20,7 +20,7 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 
 CLASP_DIR="apps-script"
 
-echo "═══ WatchDirectly backend deploy — one-time setup ═══"
+echo "═══ How You Watch backend deploy — one-time setup ═══"
 echo
 
 # --- 1. Apps Script API toggle -------------------------------------------

@@ -1,5 +1,5 @@
 /**
- * auth.js — Google Sign-In integration for WatchDirectly
+ * auth.js — Google Sign-In integration for How You Watch
  *
  * Uses Google Identity Services (GIS) for one-tap sign-in. On first sign-in we
  * verify the Google ID token once, then exchange it for a long-lived, app-issued

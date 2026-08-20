@@ -1,5 +1,5 @@
 /**
- * Setup.gs — One-time setup functions for WatchDirectly
+ * Setup.gs — One-time setup functions for How You Watch
  * 
  * ⚠️  ARCHIVE: This file is retained for reference only.
  *     The spreadsheet IDs here MUST match SPREADSHEET_IDS in Code.gs.
@@ -99,7 +99,7 @@ function populateMeta() {
   
   var rows = [
     ['refresh_interval_hours', '4'],
-    ['site_name', 'WatchDirectly'],
+    ['site_name', 'How You Watch'],
     ['log_level', 'ERROR'],
   ];
 

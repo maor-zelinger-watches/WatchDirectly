@@ -1,5 +1,5 @@
 /**
- * cache.js — Client-side persistence for WatchDirectly
+ * cache.js — Client-side persistence for How You Watch
  *
  * Single owner of every localStorage key the feed writes. Import from
  * here instead of touching localStorage directly, so cache behavior is

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * validate-release.js — pre-ship guard for WatchDirectly.
+ * validate-release.js — pre-ship guard for How You Watch.
  *
- * WatchDirectly ships three independently-versioned components:
+ * How You Watch ships three independently-versioned components:
  *
  *   Frontend  APP_VERSION in js/config.js        → published by `git push` (GitHub Pages)
  *   Backend   VERSION     in apps-script/Code.gs  → deployed by the post-commit clasp hook

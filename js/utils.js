@@ -1,5 +1,5 @@
 /**
- * utils.js — Utility functions for WatchDirectly
+ * utils.js — Utility functions for How You Watch
  * 
  * Pure functions with no side effects. Used across feed, comments, and API modules.
  */

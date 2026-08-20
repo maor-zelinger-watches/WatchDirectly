@@ -1,5 +1,5 @@
 /**
- * comments.js — Comment system for WatchDirectly
+ * comments.js — Comment system for How You Watch
  * 
  * Handles comment threading, depth validation, and HTML rendering.
  * Max depth: 1 (top-level + one reply level).

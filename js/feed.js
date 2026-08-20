@@ -1,5 +1,5 @@
 /**
- * feed.js — Feed rendering for WatchDirectly
+ * feed.js — Feed rendering for How You Watch
  * 
  * Handles video card creation with inline comments,
  * chronological sorting, and filtering.
