@@ -21,10 +21,7 @@ that component's heading.
 
 ## Frontend
 
-### 1.21.1 — 2026-08-20
-<!-- NOTE: ships with the custom-domain switch — update this date to the
-     actual ship date before running validate:release. See
-     docs/custom-domain-switch.md for the full runbook. -->
+### 1.21.1 — 2026-08-21
 - **404 page re-rooted for the custom domain.** The 404 page's links and
   stylesheet were absolute-rooted at `/WatchDirectly/` — correct for the
   GitHub Pages project subpath, wrong the moment the site serves from a
