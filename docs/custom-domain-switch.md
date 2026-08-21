@@ -6,30 +6,39 @@ DNS is live — the 404 page's root-absolute paths are only correct once the
 site is served from a domain root, so merging early would break the 404 page
 on the current `github.io/WatchDirectly/` subpath.
 
-Placeholder domain below: `howyouwatch.com` — replace with the real one
-everywhere.
+Domain (confirmed 2026-08-20, from the CNAME file GitHub committed):
+**`www.howyouwatch.com`**, apex `howyouwatch.com` redirecting to it.
 
-## 1. Send the partner (registrar side)
+Status 2026-08-20: the custom domain is already set in the repo's Pages
+settings, so `github.io/WatchDirectly` now 301s to www.howyouwatch.com —
+which still resolves to the registrar's (Squarespace) parking records.
+**The live site is unreachable until the partner swaps DNS.**
+
+## 1. Send the partner (registrar side — Squarespace DNS)
+
+The domain currently carries Squarespace's defaults, so these are
+REPLACEMENTS, not additions. If Squarespace shows the records as linked to
+a parked/connected site, disconnect that first.
 
 ```text
-1. CNAME record
+1. CHANGE the www CNAME record
    Host/Name:  www
-   Value:      maor-zelinger-watches.github.io.
+   Old value:  ext-sq.squarespace.com
+   New value:  maor-zelinger-watches.github.io.
 
-2. A records (four values, same host)
-   Host/Name:  @  (the bare/apex domain)
-   Values:     185.199.108.153
+2. REPLACE the four apex A records
+   Host/Name:  @  (bare howyouwatch.com)
+   Delete:     198.49.23.144 / 198.49.23.145 /
+               198.185.159.144 / 198.185.159.145  (Squarespace)
+   Add:        185.199.108.153
                185.199.109.153
                185.199.110.153
-               185.199.111.153
+               185.199.111.153  (GitHub Pages)
 
-3. TXT record — get the exact name/value from GitHub first:
+3. ADD a TXT record — get the exact name/value from GitHub first:
    github.com → account Settings → Pages → Add a verified domain.
    Name looks like: _github-pages-challenge-maor-zelinger-watches
 ```
-
-If the registrar is Cloudflare: records must be "DNS only" (grey cloud)
-until GitHub issues the HTTPS certificate.
 
 Needed back from the partner: which domain is ours (apex / www / both),
 confirmation the records are in, and when.
