@@ -184,7 +184,11 @@ img {
 }
 
 .header__logo-icon {
-  font-size: var(--fs-lg);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-bold);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .header__title {

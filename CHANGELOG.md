@@ -21,6 +21,13 @@ that component's heading.
 
 ## Frontend
 
+### 1.21.2 — 2026-08-22
+- **Header now carries an "Alpha" label instead of the watch emoji.** The
+  `⌚` logo icon on all four pages (index, terms, privacy, 404) is replaced
+  with the word "Alpha" in the volt chartreuse accent, styled to match the
+  header title (bold, uppercase, same letter-spacing) — an honest signal of
+  the product's stage right where every visitor looks first.
+
 ### 1.21.1 — 2026-08-21
 - **404 page re-rooted for the custom domain.** The 404 page's links and
   stylesheet were absolute-rooted at `/WatchDirectly/` — correct for the
