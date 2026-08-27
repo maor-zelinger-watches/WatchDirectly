@@ -2,21 +2,16 @@
  * votes.js — Upvotes: optimistic toggling and sign-in reconciliation.
  *
  * The server is the source of truth for counts; the UI flips instantly
- * and rolls back on failure. voteEpoch orders local mutations against
- * the fetchMyVotes snapshot so a slow fetch can't clobber a vote the
- * user just cast.
+ * and rolls back on failure. The 'votes' epoch orders local mutations
+ * against the fetchMyVotes snapshot so a slow fetch can't clobber a vote
+ * the user just cast.
  */
 
-import { state } from './state.js';
+import { state, patchVideoEverywhere, epoch } from './state.js';
 import { api } from './api-client.js';
 import { isSignedIn, getToken, isTokenExpired, refreshToken, ensureToken } from './auth.js';
-import { saveFeedCacheSoon } from './cache.js';
 import { showToast } from './toast.js';
 import { cssEscape } from './utils.js';
-
-// Bumped on every local vote mutation so a slow fetchMyVotes snapshot
-// can't clobber a vote the user just cast.
-let voteEpoch = 0;
 
 // Video ids with a vote request in flight. A double-click (or double-tap on
 // mobile) fires two clicks in quick succession; without this the second would
@@ -35,27 +30,6 @@ function setVoteButtons(videoId, voted, count) {
       if (countEl) countEl.textContent = String(count);
     }
   });
-}
-
-/** Keeps vote counts in cached state + localStorage in sync after a vote. */
-function updateCachedVoteCount(videoId, count) {
-  const v = state.videos.find(x => x.video_id === videoId);
-  if (v) {
-    v.vote_count = count;
-    // Coalesced + capped: a burst of votes serializes the feed once at idle
-    // time, not the whole accumulated list synchronously on every vote.
-    saveFeedCacheSoon(state.videos, state.totalVideos);
-  }
-  if (state.topVideos) {
-    const tv = state.topVideos.find(x => x.video_id === videoId);
-    if (tv) tv.vote_count = count;
-  }
-  // The search index holds its own copy of every row — without this, a
-  // search re-render paints the count as it was when the index was built.
-  if (state.searchIndex) {
-    const sv = state.searchIndex.find(x => x.video_id === videoId);
-    if (sv) sv.vote_count = count;
-  }
 }
 
 /**
@@ -79,7 +53,7 @@ export async function toggleVote(videoId) {
   const optimisticCount = Math.max(0, prevCount + (wasVoted ? -1 : 1));
 
   // Optimistic flip
-  voteEpoch++;
+  epoch.bump('votes');
   if (wasVoted) state.myVotes.delete(videoId); else state.myVotes.add(videoId);
   setVoteButtons(videoId, !wasVoted, optimisticCount);
 
@@ -88,16 +62,17 @@ export async function toggleVote(videoId) {
     const res = await api.vote(videoId, token);
 
     // Reconcile with server truth
-    voteEpoch++;
+    epoch.bump('votes');
     if (res.voted) state.myVotes.add(videoId); else state.myVotes.delete(videoId);
     setVoteButtons(videoId, res.voted, res.vote_count);
-    updateCachedVoteCount(videoId, res.vote_count);
+    // Every cached copy of the row (+ localStorage, coalesced) — FE13.
+    patchVideoEverywhere(videoId, { vote_count: res.vote_count });
   } catch (error) {
     console.error('Failed to vote:', error);
     // Rollback — unless the failure signed the user out, in which case
     // clearVoteMarkings already put the UI in the right state.
     if (isSignedIn()) {
-      voteEpoch++;
+      epoch.bump('votes');
       if (wasVoted) state.myVotes.add(videoId); else state.myVotes.delete(videoId);
       // Undo exactly our optimistic delta from whatever count is displayed
       // NOW — a concurrent update may have replaced prevCount already.
@@ -134,11 +109,11 @@ export async function loadMyVotes() {
  * @param {Promise<{video_ids?: string[]}>} fetchPromise
  */
 export async function reconcileMyVotes(fetchPromise) {
-  const epoch = voteEpoch;
+  const e = epoch.observe('votes');
   try {
     const data = await fetchPromise;
     // A vote cast while this was in flight beats the older snapshot
-    if (epoch !== voteEpoch) return;
+    if (!e.current()) return;
 
     state.myVotes = new Set(data.video_ids || []);
     document.querySelectorAll('.media-card__vote').forEach(btn => {

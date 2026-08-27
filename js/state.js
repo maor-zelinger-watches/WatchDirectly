@@ -8,8 +8,13 @@
  * views check hasMore).
  *
  * Derived helpers that are pure reads of this state live here too, so
- * modules don't need to reach into each other for them.
+ * modules don't need to reach into each other for them — as do the two
+ * cross-cutting mutation helpers: patchVideoEverywhere (one video row,
+ * every list that holds a copy) and epoch (the single owner of the app's
+ * generation counters).
  */
+
+import { saveFeedCacheSoon } from './cache.js';
 
 export const state = {
   videos: [],          // All loaded videos so far
@@ -54,7 +59,6 @@ export const state = {
   myStars: new Set(),       // channel names the signed-in user has starred
   hostsByChannel: {},       // channel_name -> host, from getChannels (search matching)
   creators: null,           // full channel list, loaded once via getChannels (Channels tab + host map)
-  renderToken: 0,           // invalidates deferred short inserts after a re-render
   fullscreenVideoId: null,      // video expanded to fullscreen, or null
   fullscreenReturnId: null,     // topmost visible card before fullscreen (scroll anchor)
   fullscreenReturnScrollY: 0,   // exact scroll offset before fullscreen
@@ -68,6 +72,79 @@ export const state = {
   // scroll, or a tab switch — pagination is never permanently disabled.
   filterZeroYieldStreak: 0,    // Latest feed (app.js loadNextPage)
   topFilterZeroYieldStreak: 0, // Top This Week feed (views.js loadMoreTop)
+};
+
+/**
+ * Registry of every state list that holds its own copy of feed rows.
+ * patchVideoEverywhere walks this, so a new row-holding list only needs an
+ * entry here — any list missing would re-render its rows with stale fields
+ * (that's exactly how search cards lost their counts).
+ */
+const VIDEO_ROW_LISTS = ['videos', 'topVideos', 'searchIndex'];
+
+/**
+ * Patches one video's row in EVERY list that holds a copy (FE13) — the feed,
+ * Top This Week, and the search index — then persists the feed once through
+ * the coalesced cache write. Replaces the four hand-rolled walk-every-list
+ * blocks (votes, comments, revalidateFeed's two) that kept drifting apart.
+ *
+ * @param {string} videoId
+ * @param {object} fields — row fields to overwrite (e.g. {vote_count: 3})
+ * @returns {boolean} whether the feed list held the row (and was persisted)
+ */
+export function patchVideoEverywhere(videoId, fields) {
+  let inFeed = false;
+  for (const key of VIDEO_ROW_LISTS) {
+    const list = state[key];
+    if (!list) continue;
+    const row = list.find(v => v.video_id === videoId);
+    if (!row) continue;
+    Object.assign(row, fields);
+    if (key === 'videos') inFeed = true;
+  }
+  // Coalesced + capped: a burst of patches serializes the feed once at idle
+  // time, not the whole accumulated list synchronously on every mutation.
+  if (inFeed) saveFeedCacheSoon(state.videos, state.totalVideos);
+  return inFeed;
+}
+
+/**
+ * epoch — single owner for the app's generation counters (FE14).
+ *
+ * Async work claims a generation up front and re-checks it after every
+ * await; any later claim (or explicit bump) retires all older handles:
+ *
+ *   const e = epoch.claim('feed');  // supersedes prior claims of 'feed'
+ *   ...await...
+ *   if (!e.current()) return;       // a newer claim/bump won — abandon
+ *
+ * Snapshot readers that must only DETECT invalidation (without superseding
+ * anything) observe the current generation instead:
+ *
+ *   const e = epoch.observe('votes');
+ *   ...await...
+ *   if (!e.current()) return;       // something bumped while we were away
+ *
+ * The remaining hand-rolled counters (filterRenderToken, viewToken,
+ * prefetchToken, starEpoch) migrate here incrementally.
+ */
+const epochs = Object.create(null);
+export const epoch = {
+  /** Claims a NEW generation of `name`, retiring every older handle. */
+  claim(name) {
+    const mine = (epochs[name] || 0) + 1;
+    epochs[name] = mine;
+    return { current: () => epochs[name] === mine };
+  },
+  /** A handle on the CURRENT generation of `name`, without claiming. */
+  observe(name) {
+    const mine = epochs[name] || 0;
+    return { current: () => (epochs[name] || 0) === mine };
+  },
+  /** Retires every outstanding handle of `name` without claiming one. */
+  bump(name) {
+    epochs[name] = (epochs[name] || 0) + 1;
+  },
 };
 
 export function isFilterActive() {

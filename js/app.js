@@ -15,10 +15,10 @@
  */
 
 import { CONFIG } from './config.js';
-import { state, isFilterActive, typeFilterActive } from './state.js';
+import { state, isFilterActive, typeFilterActive, patchVideoEverywhere, epoch } from './state.js';
 import { api } from './api-client.js';
 import { isShort, mediaType, sortVideos, typeFilterVisible } from './feed.js';
-import { loadFeedCache, saveFeedCache } from './cache.js';
+import { loadFeedCache, saveFeedCache, saveFeedCacheSoon } from './cache.js';
 import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml, cssEscape } from './utils.js';
 import { showToast } from './toast.js';
@@ -532,12 +532,13 @@ async function revalidateFeed() {
       // (stopping inline playback) for a change that moved nothing — the common
       // "someone commented overnight" case.
       if (countsChanged) {
+        // Every list holding a copy of the row, not just state.videos (FE13);
+        // the feed cache persists once via the coalesced write inside.
         for (const fv of freshVideos) {
-          const existing = state.videos.find(v => v.video_id === fv.video_id);
-          if (existing) {
-            existing.comment_count = fv.comment_count;
-            existing.vote_count = fv.vote_count;
-          }
+          patchVideoEverywhere(fv.video_id, {
+            comment_count: fv.comment_count,
+            vote_count: fv.vote_count,
+          });
         }
         // Touch the DOM only when the Latest feed actually owns the container.
         if (state.view === 'latest' && !isFilterActive()) {
@@ -556,7 +557,6 @@ async function revalidateFeed() {
             delete state.commentsCache[fv.video_id];
           }
         }
-        saveFeedCache(state.videos, state.totalVideos);
       }
       // Adopt the server's page-1 cursor only when single-page (with a tail the
       // live cursor already points past it; page 1's would rewind it), and only
@@ -607,13 +607,9 @@ async function revalidateFeed() {
     // decided fresh page 1 differs.
     invalidatePrefetchBuffer();
 
-    // Cancel any deferred inserts still pending from the cached render —
-    // they'd re-add cards this diff is about to reconcile or drop.
-    state.renderToken++;
-
     const freshIdSet = new Set(freshVideos.map(v => v.video_id));
-    // From the DOM, not state: cards whose deferred insert was just
-    // cancelled must count as missing so the diff below re-inserts them.
+    // From the DOM, not state, so the diff reconciles what's actually on
+    // screen — state.videos may already disagree with the container.
     const existingIdSet = new Set(
       [...container.querySelectorAll('.media-card')].map(c => c.dataset.videoId)
     );
@@ -730,16 +726,15 @@ async function revalidateFeed() {
     // --- 5. Update state and cache ---
     if (!fullReplace) {
       // Non-destructive merge (the "only add what's missing" reconcile): pull
-      // fresh counts onto the items we already hold, splice in any genuinely-
-      // new top items, and keep the whole scrolled tail. Pagination keeps its
-      // live cursor — it already points past the tail, which fresh page 1
-      // never touched.
+      // fresh counts onto every held copy of the items (FE13), splice in any
+      // genuinely-new top items, and keep the whole scrolled tail. Pagination
+      // keeps its live cursor — it already points past the tail, which fresh
+      // page 1 never touched.
       for (const fv of freshVideos) {
-        const existing = state.videos.find(v => v.video_id === fv.video_id);
-        if (existing) {
-          existing.comment_count = fv.comment_count;
-          existing.vote_count = fv.vote_count;
-        }
+        patchVideoEverywhere(fv.video_id, {
+          comment_count: fv.comment_count,
+          vote_count: fv.vote_count,
+        });
       }
       const newTop = freshVideos.filter(fv => !state.videos.some(v => v.video_id === fv.video_id));
       state.videos = sortVideos([...newTop, ...state.videos]);
@@ -747,12 +742,17 @@ async function revalidateFeed() {
       state.currentPage = Math.max(1, Math.ceil(state.videos.length / CONFIG.PAGE_SIZE));
       state.nextCursor = cursorAfter(state.videos);
       state.hasMore = state.videos.length < state.totalVideos;
+      // The merge REPLACED the array the patches above queued for their
+      // coalesced save — queue the final list so the one deferred write
+      // persists the merged feed, not the pre-merge snapshot.
+      saveFeedCacheSoon(state.videos, state.totalVideos);
     } else {
       state.videos = freshVideos;
       state.totalVideos = data.total || freshVideos.length;
       state.currentPage = 1;
       state.nextCursor = data.next_cursor;
       state.hasMore = serverHasMore();
+      saveFeedCache(state.videos, state.totalVideos);
     }
     // Drop prefetched comments only where the server reports a different
     // count — wiping the whole cache defeated the prefetch entirely.
@@ -768,8 +768,6 @@ async function revalidateFeed() {
 
     const sentinel = document.getElementById('load-more-container');
     if (sentinel) sentinel.style.display = state.hasMore ? '' : 'none';
-
-    saveFeedCache(state.videos, state.totalVideos);
 
     // Prefetch comments for all cards
     prefetchComments(freshVideos);
@@ -841,8 +839,6 @@ function setupInfiniteScroll() {
 // top-up stopped.
 // ============================================================
 
-let topUpToken = 0; // a newer chip click supersedes an in-flight top-up loop
-
 /** How many already-loaded items the current type selection keeps visible. */
 function selectedTypeCount() {
   const selected = new Set(state.filter.types);
@@ -850,10 +846,12 @@ function selectedTypeCount() {
 }
 
 async function topUpTypeFilter() {
-  const token = ++topUpToken;
+  // Claiming the epoch retires any in-flight loop — a newer chip click
+  // supersedes it (FE14).
+  const e = epoch.claim('typeFilterTopUp');
   let pulled = 0;
   while (
-    token === topUpToken &&
+    e.current() &&
     state.view === 'latest' &&
     !isFilterActive() &&                // a query owns rendering — no top-up
     state.filter.types.length > 0 &&    // "All" needs no help

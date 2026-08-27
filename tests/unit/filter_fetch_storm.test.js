@@ -86,7 +86,7 @@ function seedFeed(state, types) {
     loading: false, revalidating: false, initialLoadComplete: true, view: 'latest',
     filter: { query: '', types }, prefetchBuffer: [], prefetching: false,
     prefetchToken: 0, pendingFetchPage: 0, expandedComments: new Set(),
-    commentsCache: {}, renderToken: 0, nextCursor: 'cursor|seed',
+    commentsCache: {}, nextCursor: 'cursor|seed',
     filterZeroYieldStreak: 0, topFilterZeroYieldStreak: 0,
   });
 }

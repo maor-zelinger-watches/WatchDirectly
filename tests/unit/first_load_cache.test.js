@@ -70,7 +70,7 @@ function seedFreshLoad(state) {
     loading: false, revalidating: false, initialLoadComplete: false, view: 'latest',
     filter: { query: '', types: [] }, prefetchBuffer: [], prefetching: false,
     prefetchToken: 0, pendingFetchPage: 0, expandedComments: new Set(),
-    commentsCache: {}, renderToken: 0, nextCursor: undefined,
+    commentsCache: {}, nextCursor: undefined,
   });
 }
 

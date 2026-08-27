@@ -542,7 +542,6 @@ async function switchView(view) {
       const container = document.getElementById('feed-container');
       const skeleton = document.getElementById('feed-skeleton');
       const sentinel = document.getElementById('load-more-container');
-      state.renderToken++;
       container.innerHTML = '';
       state.expandedComments.clear();
       sentinel.style.display = 'none';
@@ -604,7 +603,6 @@ function renderTop() {
   let list = state.topVideos || [];
   if (filtered) list = filterVideos(list, activeFilter());
 
-  state.renderToken++;
   container.innerHTML = '';
   state.expandedComments.clear();
   renderList(container, list);
@@ -786,7 +784,6 @@ async function renderStarred() {
   sentinel.style.display = 'none';
 
   if (!isSignedIn()) {
-    state.renderToken++;
     container.innerHTML = '';
     state.expandedComments.clear();
     if (searching) searching.style.display = 'none';
@@ -808,7 +805,6 @@ async function renderStarred() {
     // catalog would otherwise paint thousands of cards in one go.
     if (isFilterActive()) list = filterVideos(list, activeFilter()).slice(0, CONFIG.SEARCH_RENDER_LIMIT);
 
-    state.renderToken++;
     // Diff by video_id (FE10): reconcile as fresh index chunks land instead of
     // wiping the container each time — surviving starred cards keep their
     // expanded comments and playing iframe. Strip any truncation note a prior
@@ -855,7 +851,6 @@ async function renderStarred() {
     showToast('Favorite feed is unavailable right now. Please try again.', 'error');
     // Keep any seeded cards on screen; only show the error when nothing painted.
     if (!(state.searchIndex && state.searchIndex.length)) {
-      state.renderToken++;
       container.innerHTML = '';
       state.expandedComments.clear();
       if (searching) searching.style.display = 'none';
@@ -886,7 +881,6 @@ async function renderChannels() {
   // Clear the prior view's cards up front so they don't linger while the
   // creator list loads on a cold open (it's usually already warm from boot).
   if (!state.creators) {
-    state.renderToken++;
     state.expandedComments.clear();
     container.innerHTML = '';
   }
@@ -897,7 +891,6 @@ async function renderChannels() {
   } catch (error) {
     console.error('Failed to load channels:', error);
     if (state.view !== 'channels') return;
-    state.renderToken++;
     container.innerHTML = '';
     empty.querySelector('p').textContent = 'Channels are unavailable right now. Please try again.';
     empty.style.display = '';
@@ -910,7 +903,6 @@ async function renderChannels() {
   const sorted = [...creators].sort((a, b) =>
     String(a.channel_name).localeCompare(String(b.channel_name)));
 
-  state.renderToken++;
   state.expandedComments.clear();
   container.innerHTML = '';
   for (const creator of sorted) {
@@ -1031,7 +1023,6 @@ async function applyFilter() {
   if (!isFilterActive()) {
     // Restore the normal infinite-scroll feed
     if (searching) searching.style.display = 'none';
-    state.renderToken++;
     container.innerHTML = '';
     state.expandedComments.clear();
     renderList(container, state.videos);
@@ -1052,7 +1043,6 @@ async function applyFilter() {
     // A broad query (a single letter matches almost everything) must not
     // paint the whole index — cap the render; results are ranked best-first.
     const shown = matches.slice(0, CONFIG.SEARCH_RENDER_LIMIT);
-    state.renderToken++;
     // Diff by video_id instead of innerHTML='' (FE10): a card that survives
     // from the previous (partial) result keeps its expanded comment thread and
     // promoted/playing iframe across every incremental index chunk, instead of
