@@ -52,6 +52,24 @@ function makeCache() {
   };
 }
 
+/**
+ * In-memory PropertiesService so the cache generation persists across calls.
+ * handleArchive now caches each page under its own key, invalidated via the
+ * generation bump (per-page keys can't be enumerated for explicit removal), so
+ * the harness must model the property store the generation lives in.
+ */
+function makeProps(seed = {}) {
+  const store = { ...seed };
+  return {
+    _store: store,
+    getScriptProperties: () => ({
+      getProperty: (k) => (k in store ? store[k] : null),
+      setProperty: (k, v) => { store[k] = String(v); },
+      deleteProperty: (k) => { delete store[k]; },
+    }),
+  };
+}
+
 /** archiveRows: array of data rows (no header). No tab at all when null. */
 function loadArchive(archiveRows) {
   const live = makeSheet([HEADERS]); // live sheet — irrelevant here
@@ -67,6 +85,7 @@ function loadArchive(archiveRows) {
   const globals = {
     SpreadsheetApp: { openById: () => videosSpreadsheet },
     CacheService: cache,
+    PropertiesService: makeProps(),
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     Logger: { log() {} },
     Utilities: {}, UrlFetchApp: {}, ScriptApp: {},
