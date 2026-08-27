@@ -173,3 +173,38 @@ test.describe('Channels tab', () => {
     await expect(page.locator('#feed-controls')).toBeVisible();
   });
 });
+
+// Leaving the Channels tab must tear the channel grid down. The Starred view
+// and the searched Latest view re-render through reconcileList, which diffs
+// only .media-card elements — so the .channel-card grid survived the switch
+// and buried the incoming feed (the "Favorites doesn't load" bug:
+// Favorites → Channels → Favorites).
+test.describe('leaving the Channels tab', () => {
+  test('opening Favorites after Channels leaves no channel cards behind', async ({ page }) => {
+    await setup(page, { signedIn: true, myStars: ['Teddy Baldassarre'] });
+    await openChannels(page);
+
+    await page.locator('.feed-tab', { hasText: 'Favorites' }).click();
+
+    // The starred feed painted (only Teddy's video)…
+    await expect(page.locator('.media-card')).toHaveCount(1);
+    await expect(page.locator('.media-card__channel')).toContainText('Teddy Baldassarre');
+    // …and nothing of the channel grid survived the switch.
+    await expect(page.locator('.channel-card')).toHaveCount(0);
+  });
+
+  test('returning to a searched Latest feed after Channels leaves no channel cards behind', async ({ page }) => {
+    await setup(page);
+
+    // Narrow the Latest feed with a search, then visit Channels and come back.
+    await page.fill('#search-input', 'Teddy');
+    await expect(page.locator('.media-card')).toHaveCount(1);
+    await openChannels(page);
+
+    await page.locator('.feed-tab', { hasText: 'Latest' }).click();
+
+    await expect(page.locator('.media-card')).toHaveCount(1);
+    await expect(page.locator('.media-card__channel')).toContainText('Teddy Baldassarre');
+    await expect(page.locator('.channel-card')).toHaveCount(0);
+  });
+});

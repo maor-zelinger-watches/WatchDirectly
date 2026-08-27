@@ -427,7 +427,16 @@ export function update() {
   // their own views — flip both here so every entry point (tab click, star
   // re-render, filter) leaves the container in the right mode.
   const container = document.getElementById('feed-container');
-  if (container) container.classList.toggle('feed--channels', isChannels);
+  if (container) {
+    container.classList.toggle('feed--channels', isChannels);
+    // Channel cards must be purged here too: the reconcile-based renders
+    // (Starred, searched Latest) diff only .media-card elements, so a grid
+    // left behind by the Channels tab is invisible to them and would survive
+    // the switch, burying the incoming feed under stale channel cards.
+    if (!isChannels) {
+      container.querySelectorAll('.channel-card').forEach(card => card.remove());
+    }
+  }
   const controls = document.getElementById('feed-controls');
   if (controls) controls.style.display = isChannels ? 'none' : '';
 

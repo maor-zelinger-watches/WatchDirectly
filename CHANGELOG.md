@@ -21,6 +21,17 @@ that component's heading.
 
 ## Frontend
 
+### 1.21.7 — 2026-08-27
+- **Fix: leaving the Channels tab no longer buries the next view under the
+  channel grid.** The Channels tab renders `.channel-card` elements into the
+  shared feed container, but the Starred view and the searched Latest view
+  re-render through `reconcileList`, which diffs only `.media-card` elements —
+  so Favorites → Channels → Favorites left the whole channel grid on screen
+  beneath the starred feed ("Favorites doesn't load"). `update()` now purges
+  channel cards whenever the active view isn't Channels, at the same spot that
+  already flips the grid class and controls. Regression-covered by unit
+  (`view_residue.test.js`) and e2e (`channels_tab.spec.js`) tests.
+
 ### 1.21.6 — 2026-08-27
 - **Accessibility, fullscreen, and feed-performance pass.** The fullscreen watch
   overlay is now a proper dialog (`role="dialog"`/`aria-modal`, background made
