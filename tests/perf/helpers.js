@@ -18,12 +18,15 @@
  * threshold they guard.
  */
 
-// Mirror of the tuning knobs in js/config.js the tests reason about.
-export const PAGE_SIZE = 10;
-export const PREFETCH_PAGES_AHEAD = 3;
-export const TYPE_FILTER_MIN_CARDS = 20;
-export const SEARCH_CHUNK_SIZE = 500;
-export const SEARCH_RENDER_LIMIT = 200;
+// The tuning knobs the tests reason about, sourced from the single source of
+// truth so tuning a knob in js/config.js can't leave perf asserting stale values.
+import { CONFIG } from '../../js/config.js';
+
+export const PAGE_SIZE = CONFIG.PAGE_SIZE;
+export const PREFETCH_PAGES_AHEAD = CONFIG.PREFETCH_PAGES_AHEAD;
+export const TYPE_FILTER_MIN_CARDS = CONFIG.TYPE_FILTER_MIN_CARDS;
+export const SEARCH_CHUNK_SIZE = CONFIG.SEARCH_CHUNK_SIZE;
+export const SEARCH_RENDER_LIMIT = CONFIG.SEARCH_RENDER_LIMIT;
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
