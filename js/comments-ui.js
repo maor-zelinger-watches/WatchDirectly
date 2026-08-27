@@ -15,7 +15,7 @@ import { buildCommentTree, createCommentThread, createCommentHtml } from './comm
 import { isSignedIn, getCurrentUser, renderSignInButton, ensureToken } from './auth.js';
 import { saveFeedCacheSoon } from './cache.js';
 import { showToast } from './toast.js';
-import { cssEscape } from './utils.js';
+import { cssEscape, sanitizeHtml } from './utils.js';
 
 export function toggleComments(videoId) {
   const body = document.querySelector(`.media-card__comments-body[data-video-id="${cssEscape(videoId)}"]`);
@@ -323,7 +323,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
       if (!parentId) {
         const actions = el.querySelector('.comment__actions');
         if (actions) {
-          actions.innerHTML = `<button class="comment__reply-btn reply-btn" data-comment-id="${response.comment_id}">↩ Reply</button>`;
+          actions.innerHTML = `<button class="comment__reply-btn reply-btn" data-comment-id="${sanitizeHtml(response.comment_id)}">↩ Reply</button>`;
           attachReplyHandlers(videoId);
         }
       }
