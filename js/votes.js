@@ -12,14 +12,22 @@ import { api } from './api-client.js';
 import { isSignedIn, getToken, isTokenExpired, refreshToken, ensureToken } from './auth.js';
 import { saveFeedCacheSoon } from './cache.js';
 import { showToast } from './toast.js';
+import { cssEscape } from './utils.js';
 
 // Bumped on every local vote mutation so a slow fetchMyVotes snapshot
 // can't clobber a vote the user just cast.
 let voteEpoch = 0;
 
+// Video ids with a vote request in flight. A double-click (or double-tap on
+// mobile) fires two clicks in quick succession; without this the second would
+// issue a second toggle POST, landing the user back where they started and
+// racing two optimistic flips. Re-entrant clicks are ignored until the first
+// request settles.
+const votesInFlight = new Set();
+
 /** Updates every vote button for a video (both views may have one rendered). */
 function setVoteButtons(videoId, voted, count) {
-  document.querySelectorAll(`.media-card__vote[data-video-id="${videoId}"]`).forEach(btn => {
+  document.querySelectorAll(`.media-card__vote[data-video-id="${cssEscape(videoId)}"]`).forEach(btn => {
     btn.classList.toggle('media-card__vote--active', voted);
     btn.setAttribute('aria-pressed', voted ? 'true' : 'false');
     if (count != null) {
@@ -60,8 +68,13 @@ export async function toggleVote(videoId) {
     return;
   }
 
+  // In-flight guard (FE19): one gesture, one toggle. Ignore a repeat click for
+  // the same video until its request settles (released in `finally` below).
+  if (votesInFlight.has(videoId)) return;
+  votesInFlight.add(videoId);
+
   const wasVoted = state.myVotes.has(videoId);
-  const sample = document.querySelector(`.media-card__vote[data-video-id="${videoId}"] .media-card__vote-count`);
+  const sample = document.querySelector(`.media-card__vote[data-video-id="${cssEscape(videoId)}"] .media-card__vote-count`);
   const prevCount = sample ? (parseInt(sample.textContent, 10) || 0) : 0;
   const optimisticCount = Math.max(0, prevCount + (wasVoted ? -1 : 1));
 
@@ -88,11 +101,14 @@ export async function toggleVote(videoId) {
       if (wasVoted) state.myVotes.add(videoId); else state.myVotes.delete(videoId);
       // Undo exactly our optimistic delta from whatever count is displayed
       // NOW — a concurrent update may have replaced prevCount already.
-      const countEl = document.querySelector(`.media-card__vote[data-video-id="${videoId}"] .media-card__vote-count`);
+      const countEl = document.querySelector(`.media-card__vote[data-video-id="${cssEscape(videoId)}"] .media-card__vote-count`);
       const shownCount = countEl ? (parseInt(countEl.textContent, 10) || 0) : optimisticCount;
       setVoteButtons(videoId, wasVoted, Math.max(0, shownCount - (wasVoted ? -1 : 1)));
     }
     showToast(error.message || 'Failed to vote. Please try again.', 'error');
+  } finally {
+    // Release the guard on every path so the next genuine click is honored.
+    votesInFlight.delete(videoId);
   }
 }
 

@@ -13,6 +13,7 @@ import { api } from './api-client.js';
 import { buildCard } from './cards.js';
 import { enterFullscreen } from './fullscreen.js';
 import { showToast } from './toast.js';
+import { cssEscape } from './utils.js';
 
 // Anything longer than this can't be a real id (YouTube ids are 11 chars,
 // article ids are base64 digests) — refuse early instead of shipping junk
@@ -71,7 +72,7 @@ export async function handleDeepLink() {
   if (!videoId || videoId.length > MAX_ID_LENGTH) return;
 
   const inFeed = document.querySelector(
-    `#feed-container .media-card[data-video-id="${CSS.escape(videoId)}"]`);
+    `#feed-container .media-card[data-video-id="${cssEscape(videoId)}"]`);
   if (inFeed) {
     enterFullscreen(inFeed);
     return;

@@ -9,6 +9,7 @@
 import { state } from './state.js';
 import { toggleComments } from './comments-ui.js';
 import { forceLoadIframe } from './lazy-iframe.js';
+import { cssEscape } from './utils.js';
 
 /** Finds the video_id of the topmost card currently visible under the header. */
 function topmostVisibleCardId() {
@@ -39,7 +40,7 @@ export function enterFullscreen(card) {
   state.fullscreenReturnId = topmostVisibleCardId();
   state.fullscreenReturnScrollY = window.scrollY;
   const anchor = state.fullscreenReturnId
-    ? document.querySelector(`#feed-container .media-card[data-video-id="${state.fullscreenReturnId}"]`)
+    ? document.querySelector(`#feed-container .media-card[data-video-id="${cssEscape(state.fullscreenReturnId)}"]`)
     : null;
   state.fullscreenReturnAnchorTop = anchor ? anchor.getBoundingClientRect().top : null;
   state.fullscreenVideoId = videoId;
@@ -52,7 +53,7 @@ export function enterFullscreen(card) {
   forceLoadIframe(card);
 
   // Fullscreen is the watch-and-discuss view — open the comments.
-  const body = card.querySelector(`.media-card__comments-body[data-video-id="${videoId}"]`);
+  const body = card.querySelector(`.media-card__comments-body[data-video-id="${cssEscape(videoId)}"]`);
   if (body && body.style.display === 'none') {
     toggleComments(videoId);
   }
@@ -107,7 +108,7 @@ export function exitFullscreen() {
   // inserted cards), nudge so the top card sits where it was before.
   window.scrollTo({ top: returnScrollY, behavior: 'auto' });
   if (returnId) {
-    const anchor = document.querySelector(`#feed-container .media-card[data-video-id="${returnId}"]`);
+    const anchor = document.querySelector(`#feed-container .media-card[data-video-id="${cssEscape(returnId)}"]`);
     if (anchor && returnAnchorTop != null) {
       const delta = anchor.getBoundingClientRect().top - returnAnchorTop;
       if (Math.abs(delta) > 1) window.scrollBy({ top: delta, behavior: 'auto' });

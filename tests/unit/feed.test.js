@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createMediaCard, sortVideos, filterVideos, isShort, mediaType, dedupeVideos, mergeTopRanking } from '../../js/feed.js';
+import { createMediaCard, sortVideos, filterVideos, isShort, mediaType, dedupeVideos, mergeTopRanking, searchFields } from '../../js/feed.js';
 
 const mockVideo = {
   video_id: 'abc12345678',
@@ -472,5 +472,36 @@ describe('createMediaCard (XSS — finding #5)', () => {
   it('leaves a normal https URL intact in the href', () => {
     const html = createMediaCard(mockVideo);
     expect(html).toContain('href="https://www.youtube.com/watch?v=abc12345678"');
+  });
+});
+
+// FE10 — the search index precomputes each row's normalized token arrays once
+// (at merge time) instead of re-tokenizing every video on every keystroke.
+describe('searchFields (FE10 token cache)', () => {
+  it('computes tokenized/normalized title + channel fields', () => {
+    const f = searchFields({ title: 'Café Racer', channel_name: 'Nico Leonard' });
+    expect(f.titleTokens).toEqual(['cafe', 'racer']); // diacritics stripped, lowercased
+    expect(f.channelTokens).toEqual(['nico', 'leonard']);
+    expect(f.titleNorm).toBe('cafe racer');
+    expect(f.channelNorm).toBe('nico leonard');
+  });
+
+  it('memoizes: the same cached object is returned on repeat calls', () => {
+    const v = { title: 'Best Budget Watches', channel_name: 'JOMW' };
+    const first = searchFields(v);
+    const second = searchFields(v);
+    expect(second).toBe(first);      // same reference — not recomputed
+    expect(v._searchFields).toBe(first);
+  });
+
+  it('does not re-tokenize once cached (filterVideos reuses the cache)', () => {
+    const v = { video_id: 'k1aaaaaaaaa', title: 'Tudor Black Bay', channel_name: 'Teddy' };
+    const cached = searchFields(v);
+    // Corrupt the raw fields; a fresh tokenize would now yield different tokens.
+    v.title = 'ZZZZZ';
+    v.channel_name = 'ZZZZZ';
+    // filterVideos still matches on the cached tokens, proving no re-tokenize.
+    expect(filterVideos([v], { query: 'tudor' }).map(x => x.video_id)).toEqual(['k1aaaaaaaaa']);
+    expect(searchFields(v)).toBe(cached);
   });
 });

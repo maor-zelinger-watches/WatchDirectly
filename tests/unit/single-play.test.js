@@ -74,6 +74,26 @@ describe('playerStateFrom', () => {
     expect(playerStateFrom(42)).toBeNull();
     expect(playerStateFrom(null)).toBeNull();
   });
+
+  // FE20 — a cheap substring guard skips JSON.parse for the flood of messages
+  // that can't carry a player state (the API fires infoDelivery several/sec).
+  it('does not JSON.parse a message that carries no player state', () => {
+    const spy = vi.spyOn(JSON, 'parse');
+    // An infoDelivery time-update — the high-frequency noise we want to skip.
+    expect(playerStateFrom('{"event":"infoDelivery","info":{"currentTime":12.3}}')).toBeNull();
+    // Arbitrary non-JSON string from some other frame.
+    expect(playerStateFrom('hello there')).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('still parses messages that DO name a player state', () => {
+    const spy = vi.spyOn(JSON, 'parse');
+    expect(playerStateFrom('{"event":"onStateChange","info":1}')).toBe(1);
+    expect(playerStateFrom('{"event":"infoDelivery","info":{"playerState":2}}')).toBe(2);
+    expect(spy).toHaveBeenCalledTimes(2);
+    spy.mockRestore();
+  });
 });
 
 describe('registerPlayer', () => {
