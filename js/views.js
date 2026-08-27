@@ -472,6 +472,12 @@ async function switchView(view) {
     t.classList.toggle('feed-tab--active', active);
     t.setAttribute('aria-selected', active ? 'true' : 'false');
   });
+  // FE9: tear down any open fullscreen overlay BEFORE resetting scroll. Exiting
+  // restores the pre-fullscreen scroll offset (and strips ?v=); doing it first
+  // lets the scroll-to-top below win, so the freshly-opened view starts at the
+  // top instead of landing mid-list at the old offset. update() further down
+  // then finds no overlay to tear down (its own exitFullscreen guard no-ops).
+  if (state.fullscreenVideoId) exitFullscreen();
   window.scrollTo({ top: 0 });
 
   // A superseded switch bails before its skeleton cleanup — clear any
