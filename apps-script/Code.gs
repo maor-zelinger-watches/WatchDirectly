@@ -440,7 +440,10 @@ function scheduleRefresh() {
     ScriptApp.newTrigger('kickoffRefresh').timeBased().after(1000).create();
     log('INFO', 'scheduleRefresh', 'Async refresh scheduled');
   } catch (e) {
-    log('ERROR', 'scheduleRefresh', e.message);
+    // Log the exception NAME too: a missing script.scriptapp OAuth scope surfaces
+    // here as a permission error, and without the name that failure is invisible —
+    // the async auto-refresh would silently never install its trigger.
+    log('ERROR', 'scheduleRefresh', (e && e.name ? e.name + ': ' : '') + (e && e.message ? e.message : e));
   } finally {
     lock.releaseLock();
   }
@@ -594,6 +597,12 @@ function handleGetChannels() {
   var enabledCol = headers.indexOf('enabled');
   var channels = [];
 
+  // BE14: publish ONLY the fields the frontend renders — the Channels-tab card
+  // (channel_name, url, avatar) plus the search host-map (host). Copying every
+  // column (the old behavior) leaked any operator-added column — notes, contact,
+  // a per-channel key — into this anonymous response the moment it was created.
+  var PUBLIC_FIELDS = ['channel_name', 'host', 'url', 'avatar'];
+
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
     var rawEnabled = enabledCol === -1 ? true : row[enabledCol];
@@ -602,7 +611,7 @@ function handleGetChannels() {
 
     var channel = {};
     for (var j = 0; j < headers.length; j++) {
-      channel[headers[j]] = row[j];
+      if (PUBLIC_FIELDS.indexOf(headers[j]) !== -1) channel[headers[j]] = row[j];
     }
 
     if (!channel.avatar && channel.url) {
@@ -646,9 +655,25 @@ function crawlAllFeeds() {
   var existingUrls = {};
   var videoData = videosSheet.getDataRange().getValues();
   var vHeaders = videoData.length > 0 ? videoData[0] : [];
-  // A blank sheet reads back as [['']] — treat that as "no headers" so the
-  // empty-sheet fallback path (below) runs instead of self-init corrupting it.
+  // A blank sheet reads back as [['']] — treat that as "no headers".
   if (vHeaders.length === 1 && vHeaders[0] === '') vHeaders = [];
+
+  // BE13: A totally empty Videos sheet has no header row at all. Write the
+  // canonical header FIRST, so the self-init column checks and the header-driven
+  // append path below operate on real column names and every row lands under the
+  // right key. The old behavior left vHeaders empty and fell through to a
+  // hardcoded 13-column append that wrote NO header (and omitted the
+  // live_status/scheduled_start/expires_at trio); normalizeVideoRows then
+  // mistook the first data row for the header and a later crawl overwrote a data
+  // cell with the literal 'view_count'.
+  if (vHeaders.length === 0) {
+    vHeaders = [
+      'video_id', 'channel_name', 'title', 'url', 'published_at', 'fetched_at',
+      'tier', 'category', 'comment_count', 'vote_count', 'media_type',
+      'preview_image', 'view_count', 'live_status', 'scheduled_start', 'expires_at'
+    ];
+    videosSheet.getRange(1, 1, 1, vHeaders.length).setValues([vHeaders]);
+  }
 
   // Self-initialize: add the view_count column if the sheet predates view tracking
   var viewCountCol = vHeaders.indexOf('view_count');
@@ -766,33 +791,29 @@ function crawlAllFeeds() {
             video.preview_image = fetchOgImage(video.url);
           }
 
+          // vHeaders is guaranteed populated by now (an empty sheet had its
+          // canonical header written above), so every row is built from the
+          // sheet's own header order.
           var newRow = [];
-          if (vHeaders.length === 0) {
-             // Fallback if sheet is totally empty (order matches the standard schema)
-             newRow = [
-               video.video_id, video.channel_name, video.title, video.url, video.published_at, new Date().toISOString(), video.tier, video.category, 0, 0, video.media_type, video.preview_image, video.view_count || 0
-             ];
-          } else {
-            for(var h = 0; h < vHeaders.length; h++) {
-              var hName = vHeaders[h];
-              if (hName === 'video_id' || hName === 'item_id') newRow.push(video.video_id);
-              else if (hName === 'channel_name') newRow.push(video.channel_name);
-              else if (hName === 'title') newRow.push(video.title);
-              else if (hName === 'url') newRow.push(video.url);
-              else if (hName === 'published_at') newRow.push(video.published_at);
-              else if (hName === 'fetched_at') newRow.push(new Date().toISOString());
-              else if (hName === 'tier') newRow.push(video.tier);
-              else if (hName === 'category') newRow.push(video.category);
-              else if (hName === 'comment_count') newRow.push(0);
-              else if (hName === 'vote_count') newRow.push(0);
-              else if (hName === 'media_type') newRow.push(video.media_type);
-              else if (hName === 'preview_image') newRow.push(video.preview_image);
-              else if (hName === 'view_count') newRow.push(video.view_count || 0);
-              else if (hName === 'live_status') newRow.push(video.live_status || 'none');
-              else if (hName === 'scheduled_start') newRow.push(video.scheduled_start || '');
-              else if (hName === 'expires_at') newRow.push(video.expires_at || '');
-              else newRow.push('');
-            }
+          for(var h = 0; h < vHeaders.length; h++) {
+            var hName = vHeaders[h];
+            if (hName === 'video_id' || hName === 'item_id') newRow.push(video.video_id);
+            else if (hName === 'channel_name') newRow.push(video.channel_name);
+            else if (hName === 'title') newRow.push(video.title);
+            else if (hName === 'url') newRow.push(video.url);
+            else if (hName === 'published_at') newRow.push(video.published_at);
+            else if (hName === 'fetched_at') newRow.push(new Date().toISOString());
+            else if (hName === 'tier') newRow.push(video.tier);
+            else if (hName === 'category') newRow.push(video.category);
+            else if (hName === 'comment_count') newRow.push(0);
+            else if (hName === 'vote_count') newRow.push(0);
+            else if (hName === 'media_type') newRow.push(video.media_type);
+            else if (hName === 'preview_image') newRow.push(video.preview_image);
+            else if (hName === 'view_count') newRow.push(video.view_count || 0);
+            else if (hName === 'live_status') newRow.push(video.live_status || 'none');
+            else if (hName === 'scheduled_start') newRow.push(video.scheduled_start || '');
+            else if (hName === 'expires_at') newRow.push(video.expires_at || '');
+            else newRow.push('');
           }
 
           // Accumulate for the single batched append after the loop (BE6). The
@@ -2202,6 +2223,14 @@ function normalizeVideoRows(data) {
   if (!data || data.length <= 1) return [];
 
   var headers = data[0];
+  // Resolve the id column once. A sheet may head its id column 'video_id' OR
+  // 'item_id' (findVideoIdCol accepts both, and the crawl prefers item_id), but
+  // everything downstream — dedupeByUrl, compareVideos, cursorFor, handleVideo —
+  // reads video.video_id directly. On an item_id-headed sheet that would be
+  // undefined: dedupe collapses url-less rows under 'id:undefined', cursors
+  // become "…|undefined", and ?v=<id> deep links resolve to nothing. Normalize
+  // the id into video.video_id here so the rest of the pipeline is unaffected.
+  var idCol = findVideoIdCol(headers);
   var videos = [];
   var nowMs = Date.now();
 
@@ -2211,6 +2240,7 @@ function normalizeVideoRows(data) {
     for (var j = 0; j < headers.length; j++) {
       video[headers[j]] = row[j];
     }
+    if (idCol !== -1) video.video_id = row[idCol];
 
     // Drop provisional premiere/live entries whose expiry has passed. A
     // scheduled premiere or running stream is surfaced while fresh; when it
