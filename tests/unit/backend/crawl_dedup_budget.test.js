@@ -18,7 +18,21 @@ function makeSheet(rows) {
   return {
     _grid: grid,
     getDataRange: () => ({ getValues: () => grid.map((r) => r.slice()) }),
-    getRange: (row, col) => ({
+    getRange: (row, col, numRows, numCols) => ({
+      // Faithful block read (real Sheets implements this): the batched crawl
+      // flush reads a column/trio block via getRange(...).getValues().
+      getValues() {
+        const nr = numRows || 1;
+        const nc = numCols || 1;
+        const out = [];
+        for (let i = 0; i < nr; i++) {
+          const r = grid[row - 1 + i] || [];
+          const outRow = [];
+          for (let j = 0; j < nc; j++) outRow.push(r[col - 1 + j] !== undefined ? r[col - 1 + j] : '');
+          out.push(outRow);
+        }
+        return out;
+      },
       setValue(v) {
         while (grid.length < row) grid.push([]);
         const r = grid[row - 1];

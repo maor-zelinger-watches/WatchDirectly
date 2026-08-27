@@ -155,6 +155,11 @@ const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 // Cache per execution
 let _cachedLogLevel = null;
 let _cachedSessionSecret = null;
+// The whole Meta sheet, read once per execution and served from memory. getMeta
+// is called repeatedly per request (last_fetch, refresh_interval_hours, and twice
+// per channel for youtube_api_key), and a full getDataRange() scan per call got
+// slower as rows accrued. setMeta keeps this in sync on write.
+let _cachedMeta = null;
 
 
 // ============================================================
@@ -347,40 +352,16 @@ function jsonResponse(data) {
 // ============================================================
 
 /**
- * Checks if a user is posting too frequently.
- * Stores last comment timestamp per email in Meta sheet.
- * 
- * @param {string} email - User's email
- * @returns {boolean} True if rate limited
- */
-function isRateLimited(email) {
-  var key = 'rate_' + email;
-  var lastComment = getMeta(key);
-  
-  if (!lastComment) return false;
-  
-  var elapsed = (Date.now() - new Date(lastComment).getTime()) / 1000;
-  return elapsed < RATE_LIMIT_SECONDS;
-}
-
-/**
- * Records a comment timestamp for rate limiting.
- * @param {string} email
- */
-function recordCommentTime(email) {
-  setMeta('rate_' + email, new Date().toISOString());
-}
-
-/**
- * CacheService-backed per-user rate limiter for the cheap-but-lockful write
- * endpoints (votes, stars). A single check-and-set: if a marker for
+ * CacheService-backed per-user rate limiter for the lockful write endpoints
+ * (comments, votes, stars). A single check-and-set: if a marker for
  * `action`+`email` is already present the caller is inside the window and is
- * blocked; otherwise it's stamped for `windowSeconds` and allowed through. Kept
- * separate from the Meta-backed comment limiter (isRateLimited/recordCommentTime)
- * so the two can evolve independently. Best-effort — a cache failure fails OPEN
- * (a legitimate action is never blocked by infra trouble).
+ * blocked; otherwise it's stamped for `windowSeconds` and allowed through. The
+ * stamp is ephemeral (self-expires with the TTL) and never touches the Meta
+ * config sheet, so no commenter PII is stored and no rate_ rows grow unbounded.
+ * Best-effort — a cache failure fails OPEN (a legitimate action is never blocked
+ * by infra trouble).
  *
- * @param {string} action - short bucket name, e.g. 'vote' | 'star'
+ * @param {string} action - short bucket name, e.g. 'comment' | 'vote' | 'star'
  * @param {string} email  - the acting user's email (the rate-limit key)
  * @param {number} windowSeconds - minimum spacing between actions
  * @returns {boolean} true when the action should be BLOCKED
@@ -709,6 +690,15 @@ function crawlAllFeeds() {
   var newCount = 0;
   var errorCount = 0;
 
+  // BE6 — batch the per-item sheet writes. New items accumulate here and are
+  // flushed in ONE setValues after the channel loop instead of an appendRow
+  // each; existing-item refreshes (view_count, the live-status trio) accumulate
+  // keyed by row and are flushed as whole-column range writes. A crawl that used
+  // to fire hundreds of write RPCs now fires a small, fixed number.
+  var pendingNewRows = [];              // rows to append in one batch
+  var pendingViewCounts = {};           // 1-based row -> fresh view_count
+  var pendingLiveState = {};            // 1-based row -> [live_status, scheduled_start, expires_at]
+
   // Resume from where the last budget-truncated crawl left off, wrapping around
   // the channel list, so a slow/dead channel near index 0 can't perpetually
   // starve the tail. channelCount excludes the header row.
@@ -805,18 +795,13 @@ function crawlAllFeeds() {
             }
           }
 
-          // Write as plain text so a hostile feed can't seed a live formula.
-          // RSS title/url land verbatim here; without the '@' format a
-          // '=HYPERLINK(...)'/'=IMPORTXML(...)' title becomes a formula that
-          // executes in the owner's context and readAllVideos would serve back
-          // its evaluated value. Numeric columns (counts, view_count) are read
-          // back via Number(...) || 0, so text-formatting the whole row is safe.
-          // (A batched-append refactor lives in fix/be-crawl-perf; this keeps
-          // the single-append path formatting its own range.)
-          var appendRowNum = videosSheet.getLastRow() + 1;
-          var appendRange = videosSheet.getRange(appendRowNum, 1, 1, newRow.length);
-          appendRange.setNumberFormat('@');
-          appendRange.setValues([newRow]);
+          // Accumulate for the single batched append after the loop (BE6). The
+          // '@' text format that defeats formula injection is applied to the
+          // whole batched range at flush time (see below) — a hostile feed's
+          // '=HYPERLINK(...)'/'=IMPORTXML(...)' title must never land as a live
+          // formula. Dedup bookkeeping happens now (not at flush) so a duplicate
+          // id/url arriving from a later channel in this same crawl is skipped.
+          pendingNewRows.push(newRow);
           existingVideos[video.video_id] = true;
           if (normUrl !== '') existingUrls[normUrl] = true;
           newCount++;
@@ -827,27 +812,17 @@ function crawlAllFeeds() {
             // videos still inside the channel's ~15-entry RSS window are fetched
             // and reach here, so a count stops updating once the video falls out
             // of the feed — older videos keep their last recorded count.
-            videosSheet.getRange(existingRow, viewCountCol + 1).setValue(video.view_count);
+            // Accumulate for a single whole-column write after the loop (BE6).
+            pendingViewCounts[existingRow] = video.view_count;
           }
           // Re-enrich live state in place. A premiere/stream keeps its video id
           // when it becomes a VOD, so the SAME row transitions upcoming -> live
           // -> none: this clears expires_at once it airs, making the permanent
-          // entry visible without ever creating a second row.
+          // entry visible without ever creating a second row. Accumulate for a
+          // single range write after the loop (BE6).
           if (liveStatusCol !== -1 && video.live_status !== undefined) {
-            var ls = video.live_status;
-            var ss = video.scheduled_start || '';
-            var ex = video.expires_at || '';
-            // The live-state trio is self-initialized as three adjacent columns
-            // in exactly this order, so write it in one range call instead of
-            // three round-trips. Fall back to per-cell writes on any legacy
-            // sheet where the columns aren't contiguous.
-            if (scheduledStartCol === liveStatusCol + 1 && expiresAtCol === liveStatusCol + 2) {
-              videosSheet.getRange(existingRow, liveStatusCol + 1, 1, 3).setValues([[ls, ss, ex]]);
-            } else {
-              videosSheet.getRange(existingRow, liveStatusCol + 1).setValue(ls);
-              if (scheduledStartCol !== -1) videosSheet.getRange(existingRow, scheduledStartCol + 1).setValue(ss);
-              if (expiresAtCol !== -1) videosSheet.getRange(existingRow, expiresAtCol + 1).setValue(ex);
-            }
+            pendingLiveState[existingRow] =
+              [video.live_status, video.scheduled_start || '', video.expires_at || ''];
           }
         }
       }
@@ -861,6 +836,67 @@ function crawlAllFeeds() {
     // Be polite
     Utilities.sleep(500);
   }
+
+  // ---- BE6 batched flush ----------------------------------------------------
+  // Everything the loop accumulated is written here in a handful of range calls
+  // instead of one RPC per item. Runs on both the full-pass and budget-stopped
+  // paths (the loop `break` above falls through to here).
+
+  // New rows: one setValues for the whole batch. Text-format the range FIRST so
+  // a hostile feed's '=...' title/url is stored literally, never as a live
+  // formula (BE9). Every row in a given execution has the same width (vHeaders
+  // is fixed for the run — or the 13-col empty-sheet fallback), so a single
+  // rectangular write is safe.
+  if (pendingNewRows.length > 0) {
+    var flushStartRow = videosSheet.getLastRow() + 1;
+    var flushWidth = pendingNewRows[0].length;
+    var newRange = videosSheet.getRange(flushStartRow, 1, pendingNewRows.length, flushWidth);
+    newRange.setNumberFormat('@');
+    newRange.setValues(pendingNewRows);
+  }
+
+  // Existing-item refreshes: read each affected column once over the original
+  // data rows, overlay the accumulated updates, write the column back once.
+  // Only the crawl writes these columns, so a read-modify-write can't clobber a
+  // concurrent writer. origDataRows counts the rows that existed BEFORE the
+  // append above, which is exactly the range existingRowById points into.
+  var origDataRows = videoData.length - 1;
+  if (origDataRows > 0) {
+    var vcRows = Object.keys(pendingViewCounts);
+    if (vcRows.length > 0 && viewCountCol !== -1) {
+      var vcRange = videosSheet.getRange(2, viewCountCol + 1, origDataRows, 1);
+      var vcVals = vcRange.getValues();
+      for (var vi = 0; vi < vcRows.length; vi++) {
+        var vcRow = parseInt(vcRows[vi], 10);
+        vcVals[vcRow - 2][0] = pendingViewCounts[vcRows[vi]];
+      }
+      vcRange.setValues(vcVals);
+    }
+
+    var lsRows = Object.keys(pendingLiveState);
+    if (lsRows.length > 0 && liveStatusCol !== -1) {
+      if (scheduledStartCol === liveStatusCol + 1 && expiresAtCol === liveStatusCol + 2) {
+        // Contiguous live/scheduled/expires trio: one 3-column block read+write.
+        var lsRange = videosSheet.getRange(2, liveStatusCol + 1, origDataRows, 3);
+        var lsVals = lsRange.getValues();
+        for (var li = 0; li < lsRows.length; li++) {
+          var lsRow = parseInt(lsRows[li], 10);
+          lsVals[lsRow - 2] = pendingLiveState[lsRows[li]];
+        }
+        lsRange.setValues(lsVals);
+      } else {
+        // Legacy sheet with non-adjacent columns: fall back to per-cell writes.
+        for (var li2 = 0; li2 < lsRows.length; li2++) {
+          var lr = parseInt(lsRows[li2], 10);
+          var trio = pendingLiveState[lsRows[li2]];
+          videosSheet.getRange(lr, liveStatusCol + 1).setValue(trio[0]);
+          if (scheduledStartCol !== -1) videosSheet.getRange(lr, scheduledStartCol + 1).setValue(trio[1]);
+          if (expiresAtCol !== -1) videosSheet.getRange(lr, expiresAtCol + 1).setValue(trio[2]);
+        }
+      }
+    }
+  }
+  // ---- end BE6 batched flush ------------------------------------------------
 
   // Persist where the next crawl should resume: the first channel we didn't
   // reach when the budget cut us off, or 0 after a completed full pass. This is
@@ -3020,8 +3056,12 @@ function handleAddComment(data) {
   }
 
   try {
-    // 7. Check rate limit (see lock comment above)
-    if (isRateLimited(user.email)) {
+    // 7. Check rate limit (see lock comment above). CacheService-backed
+    // check-and-set: stamps the commenter for RATE_LIMIT_SECONDS and blocks a
+    // repeat inside that window. Kept inside the lock so two simultaneous posts
+    // can't both slip through. No PII lands in the Meta sheet, and the stamp
+    // self-expires (no unbounded rate_ row growth).
+    if (isActionRateLimited('comment', user.email, RATE_LIMIT_SECONDS)) {
       log('WARN', 'addComment', 'Rate limited: ' + user.email);
       return { status: 'error', message: 'Please wait before posting another comment' };
     }
@@ -3049,10 +3089,8 @@ function handleAddComment(data) {
       now,
     ]]);
 
-    // 9. Record for rate limiting
-    recordCommentTime(user.email);
-
-    // 10. Update comment count on the video
+    // 9. Update comment count on the video (the rate-limit stamp was set by the
+    // check-and-set in step 7).
     updateCommentCount(videoId);
   } finally {
     lock.releaseLock();
@@ -3907,15 +3945,28 @@ function isUserBlocked(email) {
 // META (Key-Value Config)
 // ============================================================
 
-function getMeta(key) {
+// Load the whole Meta sheet into an in-memory {key: value} map, once per
+// execution (memoized in _cachedMeta). Mirrors the _cachedLogLevel /
+// _cachedSessionSecret memo pattern. First occurrence of a key wins, matching
+// the old top-down scan.
+function loadMeta() {
+  if (_cachedMeta !== null) return _cachedMeta;
+
   var sheet = getSheet('META');
   var data = sheet.getDataRange().getValues();
-
+  var map = {};
   for (var i = 1; i < data.length; i++) {
-    if (data[i][0] === key) return data[i][1];
+    var k = data[i][0];
+    if (!(k in map)) map[k] = data[i][1];
   }
 
-  return null;
+  _cachedMeta = map;
+  return _cachedMeta;
+}
+
+function getMeta(key) {
+  var meta = loadMeta();
+  return (key in meta) ? meta[key] : null;
 }
 
 // Read-modify-write with no lock of its own: callers that can race on the
@@ -3930,12 +3981,14 @@ function setMeta(key, value) {
   for (var i = 1; i < data.length; i++) {
     if (data[i][0] === key) {
       sheet.getRange(i + 1, 2).setValue(value);
+      if (_cachedMeta !== null) _cachedMeta[key] = value;
       return;
     }
   }
 
   // Key not found, add new row
   sheet.appendRow([key, value]);
+  if (_cachedMeta !== null) _cachedMeta[key] = value;
 }
 
 // ============================================================
