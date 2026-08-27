@@ -8,12 +8,11 @@
  * card instant.
  */
 
-import { state } from './state.js';
+import { state, patchVideoEverywhere } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
 import { buildCommentTree, createCommentThread, createCommentHtml } from './comments.js';
 import { isSignedIn, getCurrentUser, renderSignInButton, ensureToken } from './auth.js';
-import { saveFeedCacheSoon } from './cache.js';
 import { showToast } from './toast.js';
 import { cssEscape, sanitizeHtml } from './utils.js';
 
@@ -37,6 +36,15 @@ export function toggleComments(videoId) {
   }
 }
 
+/**
+ * Cheap order-sensitive change signature for a comment list — one
+ * `comment_id:created_at` pair per comment. An add, a removal, or a reorder
+ * all change it, without serializing whole trees on every expand (FE12).
+ */
+function commentsSignature(comments) {
+  return comments.map(c => `${c.comment_id}:${c.created_at}`).join('|');
+}
+
 async function loadInlineComments(videoId) {
   const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${cssEscape(videoId)}"]`);
   if (!listEl) return;
@@ -56,8 +64,7 @@ async function loadInlineComments(videoId) {
     const tree = buildCommentTree(comments);
 
     // Check if the fresh data is actually different from our cache
-    // A simple length check or full serialization works. For robustness, compare length or specific IDs.
-    const hasChanged = !cached || cached.comments.length !== comments.length || JSON.stringify(cached.tree) !== JSON.stringify(tree);
+    const hasChanged = !cached || commentsSignature(cached.comments) !== commentsSignature(comments);
 
     // Update cache
     state.commentsCache[videoId] = { comments, tree };
@@ -67,6 +74,11 @@ async function loadInlineComments(videoId) {
         // If it was cached, do a smooth CSS fade transition
         listEl.classList.add('is-updating');
         setTimeout(() => {
+          // The card may have collapsed or been rebuilt (revalidation diff,
+          // view switch) during the fade — rendering into a detached node
+          // would silently lose the fresh comments (FE12). The cache above
+          // already holds them; the next expand renders from it.
+          if (!listEl.isConnected) return;
           renderComments(videoId, listEl, comments, tree);
           requestAnimationFrame(() => listEl.classList.remove('is-updating'));
         }, 300); // matches CSS transition duration
@@ -209,30 +221,6 @@ function setupInlineCommentForm(videoId) {
   });
 }
 
-/**
- * Update comment_count everywhere a copy of the row lives — the feed list
- * (+ its localStorage cache), the Top This Week list, and the search index —
- * after a successful comment post. Any list missing here would re-render
- * with a stale count (that's exactly how search cards lost their counts).
- */
-function updateCachedCommentCount(videoId, newCount) {
-  const video = state.videos.find(v => v.video_id === videoId);
-  if (video) {
-    video.comment_count = newCount;
-    // Coalesced + capped write — the whole feed isn't re-serialized on every
-    // comment post; the deferred save persists only the latest capped snapshot.
-    saveFeedCacheSoon(state.videos, state.totalVideos);
-  }
-  if (state.topVideos) {
-    const tv = state.topVideos.find(v => v.video_id === videoId);
-    if (tv) tv.comment_count = newCount;
-  }
-  if (state.searchIndex) {
-    const sv = state.searchIndex.find(v => v.video_id === videoId);
-    if (sv) sv.comment_count = newCount;
-  }
-}
-
 async function submitInlineComment(videoId, parentId, textarea) {
   const body = textarea.value.trim();
   if (!body) return;
@@ -331,8 +319,8 @@ async function submitInlineComment(videoId, parentId, textarea) {
 
     if (replyForm) replyForm.remove();
 
-    // Update localStorage cache with the new comment count
-    updateCachedCommentCount(videoId, previousCount + 1);
+    // New count onto every cached copy of the row (+ localStorage) — FE13.
+    patchVideoEverywhere(videoId, { comment_count: previousCount + 1 });
   } catch (error) {
     console.error('Failed to post comment:', error);
 

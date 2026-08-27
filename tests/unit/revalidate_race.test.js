@@ -57,7 +57,7 @@ function seedCachedFeed(state, videos, total) {
     loading: false, revalidating: false, initialLoadComplete: true, view: 'latest',
     filter: { query: '', types: [] }, prefetchBuffer: [], prefetching: false,
     prefetchToken: 0, pendingFetchPage: 0, expandedComments: new Set(),
-    commentsCache: {}, renderToken: 0, nextCursor: undefined,
+    commentsCache: {}, nextCursor: undefined,
   });
 }
 
