@@ -279,7 +279,16 @@ async function loadNextPage() {
     skeleton.style.display = 'none';
     if (!loadFailed) state.feedErrorStreak = 0;
 
-    if (!state.hasMore || isFilterActive() || state.view !== 'latest') {
+    if (state.videos.length === 0 && loadFailed) {
+      // FE2: a cold-load failure with nothing on screen. state.hasMore is still
+      // its default `true`, so the branches below would keep the sentinel
+      // visible and spin a silent backoff-retry loop forever — a bare spinner,
+      // no message, no way out. Instead, hide the sentinel and show an explicit
+      // failure state with a Retry button (offline vs server error read
+      // differently; offline also auto-retries when the connection returns).
+      sentinel.style.display = 'none';
+      showFeedLoadError();
+    } else if (!state.hasMore || isFilterActive() || state.view !== 'latest') {
       sentinel.style.display = 'none';
     } else if (filterPaginationParked()) {
       // A content-type chip is hiding every fetched card, so the page added no
@@ -313,6 +322,51 @@ async function loadNextPage() {
       }
     }
   }
+}
+
+// The neutral "no videos yet" markup #feed-empty ships with, captured before
+// showFeedLoadError overwrites it — so a later empty-but-successful load can
+// restore it instead of stranding a stale error message + Retry button.
+let _defaultEmptyHtml = null;
+
+/**
+ * FE2 — Cold-load failure UI. A first-visit feed fetch failed with nothing to
+ * show, so replace the empty state with a message and a Retry button rather
+ * than leaving the sentinel spinning a silent backoff loop. Offline (the
+ * connection is the fault) and server errors read differently; while offline we
+ * also retry the instant connectivity returns, via a one-shot `online`
+ * listener that is cleared if the user clicks Retry first.
+ */
+function showFeedLoadError() {
+  const empty = document.getElementById('feed-empty');
+  if (!empty) return;
+  if (_defaultEmptyHtml === null) _defaultEmptyHtml = empty.innerHTML;
+
+  const offline = navigator.onLine === false;
+  const message = offline
+    ? "You're offline — check your connection."
+    : "Couldn't load the feed.";
+
+  empty.innerHTML = `
+    <p class="feed__empty-message">${message}</p>
+    <button type="button" class="btn btn--primary feed__retry-btn" id="feed-retry-btn">Retry</button>
+  `;
+  empty.style.display = '';
+
+  const retry = () => {
+    window.removeEventListener('online', retry);
+    // Return #feed-empty to its neutral markup and hide it before re-fetching:
+    // a fresh failure repaints cleanly, an empty-but-successful load shows the
+    // default message, and a success shows cards.
+    empty.innerHTML = _defaultEmptyHtml;
+    empty.style.display = 'none';
+    loadNextPage();
+  };
+
+  const retryBtn = document.getElementById('feed-retry-btn');
+  if (retryBtn) retryBtn.addEventListener('click', retry);
+
+  if (offline) window.addEventListener('online', retry, { once: true });
 }
 
 /**
