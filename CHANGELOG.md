@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.21.4 — 2026-08-27
+- **Failed cold loads now show a retry state instead of a blank page.** A
+  first-visit load that failed (offline, or an Apps Script cold-start error) used
+  to leave a permanently blank feed with a silently-retrying spinner. `#feed-empty`
+  now shows an error message and a Retry button, distinguishes offline from a
+  server error, and auto-retries when connectivity returns.
+- **Hardened Google sign-in against storage and refresh edge cases.** A
+  `localStorage` write that throws (private mode, quota) no longer reports a false
+  "Sign-in failed" while the user is actually signed in — persistence is guarded
+  and listeners always fire. Concurrent token refreshes now share one in-flight
+  request, GIS loads via `onGoogleLibraryLoad` instead of a silent 10s poll, and a
+  credential-decode error logs only its name so no token fragment can reach the
+  error reporter.
+
 ### 1.21.3 — 2026-08-27
 - **Bounded the content-type filter's page-fetch storm.** Selecting a chip that
   hides every card on a fetched page (e.g. "Shorts" against a mostly long-form
@@ -463,6 +477,18 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.14.2 — 2026-08-27
+- **Abuse and quota hardening on the read/write endpoints.** Google ID tokens are
+  now validated locally (aud/iss/exp) before the `tokeninfo` network call and
+  failures are negatively cached, so a flood of garbage tokens can no longer burn
+  the daily UrlFetch quota (which would take down sign-in and the crawl). Votes and
+  stars get a short per-user rate limit; the vote count is updated incrementally
+  (±1) instead of rescanning the whole Votes and Videos sheets on every toggle;
+  `page`/`limit` are clamped on every read handler (no more negative-page windows
+  or whole-catalog dumps); repeat lookups of a nonexistent video short-circuit on a
+  cached not-found marker; and the `clientError` intake gains a per-session budget
+  plus a kill-switch alongside the global cap.
 
 ### 1.14.1 — 2026-08-27
 - **Hardened write-handler input validation and closed formula-injection gaps.**
