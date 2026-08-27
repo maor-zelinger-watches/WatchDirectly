@@ -1424,6 +1424,15 @@ body.fullscreen-mode {
   color: var(--text-secondary);
 }
 
+/* Cold-load failure state (FE2): message + Retry button stacked in #feed-empty */
+.feed__empty-message {
+  margin: 0;
+}
+
+.feed__retry-btn {
+  margin-top: var(--sp-4);
+}
+
 .feed__searching {
   display: flex;
   flex-direction: column;
