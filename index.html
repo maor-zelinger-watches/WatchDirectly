@@ -56,12 +56,14 @@
     <!-- Feed View -->
     <section class="feed-view" id="feed-view">
 
+      <h2 class="sr-only">Video feed</h2>
+
       <!-- View Tabs: Latest / Top This Week / Favorites / Channels -->
       <div class="feed-tabs" id="feed-tabs" role="tablist" aria-label="Feed view">
-        <button class="feed-tab feed-tab--active" data-view="latest" role="tab" aria-selected="true">Latest</button>
-        <button class="feed-tab" data-view="top" role="tab" aria-selected="false">Top This Week</button>
-        <button class="feed-tab" data-view="starred" role="tab" aria-selected="false">Favorites</button>
-        <button class="feed-tab" data-view="channels" role="tab" aria-selected="false">Channels</button>
+        <button class="feed-tab feed-tab--active" id="tab-latest" data-view="latest" role="tab" aria-selected="true" aria-controls="feed-container" tabindex="0">Latest</button>
+        <button class="feed-tab" id="tab-top" data-view="top" role="tab" aria-selected="false" aria-controls="feed-container" tabindex="-1">Top This Week</button>
+        <button class="feed-tab" id="tab-starred" data-view="starred" role="tab" aria-selected="false" aria-controls="feed-container" tabindex="-1">Favorites</button>
+        <button class="feed-tab" id="tab-channels" data-view="channels" role="tab" aria-selected="false" aria-controls="feed-container" tabindex="-1">Channels</button>
       </div>
 
       <!-- Search & Category Filters -->
@@ -85,8 +87,9 @@
            visible, fullscreen) card. -->
       <div class="feed" id="deeplink-container"></div>
 
-      <!-- Feed Cards Container -->
-      <div class="feed" id="feed-container">
+      <!-- Feed Cards Container. Single shared tabpanel for all four tabs;
+           aria-labelledby tracks the active tab (updated in views.js). -->
+      <div class="feed" id="feed-container" role="tabpanel" aria-labelledby="tab-latest">
         <!-- Video cards with inline comments rendered here by JS -->
       </div>
 
@@ -120,7 +123,7 @@
   </main>
 
   <!-- ===== TOAST NOTIFICATIONS ===== -->
-  <div class="toast-container" id="toast-container"></div>
+  <div class="toast-container" id="toast-container" role="status" aria-live="polite" aria-atomic="true"></div>
 
   <!-- ===== FOOTER ===== -->
   <footer class="footer" id="footer">

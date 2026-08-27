@@ -133,7 +133,11 @@ describe('FE1 — a sparse content-type chip does not fetch-storm the catalog', 
     // Every call advanced a page (no premature park) and the streak stayed put.
     expect(state.currentPage).toBe(1 + DRIVE);
     expect(state.filterZeroYieldStreak).toBe(0);
-  });
+    // This is the one case here with no early park: it renders + re-serializes
+    // all DRIVE pages of real cards, so it does far more work than its siblings.
+    // Under parallel CPU load that real work can exceed the 5s default; give it
+    // headroom (the assertions above are exact, so a slower run never false-passes).
+  }, 30000);
 
   it('resumes pagination when the chip selection changes (streak reset)', async () => {
     const { state, loadNextPage } = appTest;
