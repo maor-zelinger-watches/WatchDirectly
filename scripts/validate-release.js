@@ -5,15 +5,16 @@
  * How You Watch ships three independently-versioned components:
  *
  *   Frontend  APP_VERSION in js/config.js        → published by `git push` (GitHub Pages)
- *   Backend   VERSION     in apps-script/Code.gs  → deployed by the post-commit clasp hook
+ *   Backend   VERSION     in apps-script/Code.gs  → deployed via `npm run deploy:backend` (clasp)
  *   Repo      version     in package.json         → rides along in the commit (tooling)
  *
- * Before you commit (which deploys the backend) or push (which publishes the
- * frontend), this checks — deterministically — that every component you're
- * about to ship carries a proper version bump AND a dated CHANGELOG description.
- * It compares your working tree against what's live (origin/main), so it can
- * tell "you changed this but forgot to bump it" apart from "already bumped,
- * good to go".
+ * The deploy skill runs this gate first, and only after it passes invokes
+ * `npm run deploy:backend` and `git push` explicitly. Committing never deploys
+ * anything on its own. This checks — deterministically — that every component
+ * you're about to ship carries a proper version bump AND a dated CHANGELOG
+ * description. It compares your working tree against what's live (origin/main),
+ * so it can tell "you changed this but forgot to bump it" apart from "already
+ * bumped, good to go".
  *
  * Why the components differ in strictness:
  *   - Frontend / Backend actually go live to users. Shipping them unversioned
