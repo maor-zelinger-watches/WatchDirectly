@@ -12,6 +12,22 @@
  * batching changes the transport, not the race semantics.
  */
 
+/*
+ * Clickjacking frame-buster. This JS is the ONLY working protection: the CSP
+ * in index.html ships via <meta http-equiv>, and the spec says frame-ancestors
+ * is IGNORED when delivered that way — and GitHub Pages can't send real HTTP
+ * headers (X-Frame-Options / frame-ancestors). Without this, an attacker can
+ * frame the site invisibly over decoy UI and a returning visitor's restored
+ * localStorage session makes their clicks land on vote/star/comment controls.
+ * Do not "simplify" this away. If the site ever moves behind a host that can
+ * send headers, add X-Frame-Options: DENY / frame-ancestors 'none' there and
+ * keep this as defense-in-depth.
+ */
+if (self !== top) {
+  document.documentElement.style.display = 'none';
+  try { top.location = self.location; } catch (e) {}
+}
+
 import { api } from './api-client.js';
 import { isSignedIn, getToken, isTokenExpired, refreshToken } from './auth.js';
 import { reconcileMyVotes } from './votes.js';
