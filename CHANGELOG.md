@@ -21,7 +21,30 @@ that component's heading.
 
 ## Frontend
 
-### 1.21.7 — 2026-08-27
+### 1.21.8 — 2026-08-27
+- **Clickjacking protection.** The CSP ships via `<meta http-equiv>`, where the
+  spec ignores `frame-ancestors`, and GitHub Pages can't send `X-Frame-Options` —
+  so a JS frame-buster in `js/bootstrap.js` now blanks the page and breaks out
+  when the site is framed, closing the invisible-overlay click-hijack on a
+  returning visitor's restored session (SEC6).
+- **Sanitizer consistency.** The reply button rendered after posting a comment
+  now passes `comment_id` through `sanitizeHtml` like every other API value
+  reaching `innerHTML`, and the header avatar gates its `src` on `safeUrl` like
+  the other avatar renders — neither was exploitable, but both broke the
+  invariant the rest of the codebase holds (SEC10, SEC11).
+- **One owner for "update every list holding this row".** `patchVideoEverywhere`
+  in `js/state.js` walks a registry of the row-holding lists (feed, Top This
+  Week, search index) and persists once through the coalesced cache write,
+  replacing the four hand-rolled copies (votes, comments, revalidateFeed's two)
+  that kept drifting apart — the drift that had cost search cards their live
+  counts (FE13). The dead `state.renderToken` counter (11 writes, zero reads)
+  is gone (FE11), and a single `epoch` helper now owns generation counters,
+  with `voteEpoch` and `topUpToken` migrated first (FE14, incremental).
+- **Comment refresh can't render into a detached node.** The 300ms fade timer
+  re-checks `listEl.isConnected` before painting fresh comments (the cache
+  already holds them; the next expand renders from it), and change detection
+  compares a cheap `comment_id:created_at` signature instead of
+  `JSON.stringify`-ing both whole trees on every expand (FE12).
 - **Fix: leaving the Channels tab no longer buries the next view under the
   channel grid.** The Channels tab renders `.channel-card` elements into the
   shared feed container, but the Starred view and the searched Latest view
@@ -875,7 +898,17 @@ that component's heading.
 
 ## Repo
 
-### 1.2.3 — 2026-08-27
+### 1.2.4 — 2026-08-27
+- **The release gate's header now tells the truth about deploys.** The
+  `scripts/validate-release.js` header still described the backend as "deployed
+  by the post-commit clasp hook" and warned that committing deploys — both false
+  since the hook's removal. It now states the real flow: the deploy skill runs
+  this gate first, then explicitly invokes `npm run deploy:backend` and
+  `git push`; committing never deploys anything (T14).
+- **Root `README.md`.** The repo finally orients a newcomer at the front door:
+  what the site is, the static-Pages frontend + Apps Script backend split, the
+  three independently-versioned components, and how to run, test, and ship —
+  pointing at `apps-script/README.md` for backend operations.
 - **Backend deploys are now staging-gated, health-checked, and self-rolling-back.**
   `npm run deploy:backend` deploys to the dev Apps Script project first
   (`apps-script/.clasp.staging.json`, targeted via `clasp -P`) and health-checks
