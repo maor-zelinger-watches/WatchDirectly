@@ -244,6 +244,11 @@ const TOKEN_NEG_CACHE_SECONDS = 60;
 // bearer material; SESSION_TOKEN_PREFIX lets authenticateUser tell an app token
 // from a Google JWT without decoding it.
 const SESSION_TTL_DAYS = 30;
+// Absolute ceiling on a session's total life across renewals (SEC2/BE15).
+// Each renewal carries the ORIGINAL sign-in time (iat) forward and exp is
+// capped at iat + this, so sliding the 30-day window can't extend a single
+// Google sign-in forever — past this age the client must re-auth with Google.
+const SESSION_MAX_AGE_DAYS = 90;
 const SESSION_TOKEN_PREFIX = 'wds1.';
 
 // ------------------------------------------------------------
@@ -479,6 +484,8 @@ function doPost(e) {
           return jsonResponse({ status: 'error', message: 'Wrong password' });
         }
         return jsonResponse(handleAddChannel(data));
+      case 'signOut':
+        return jsonResponse(handleSignOut(data));
       case 'logs':
         // Admin-only, over POST so the token never lands in a URL/query log.
         if (!isAdmin(data.token)) {
@@ -4829,6 +4836,12 @@ function handleBootstrap(data) {
     return { status: 'error', message: 'Invalid authentication token' };
   }
 
+  // Blocked users get nothing back — matters when a block was a manual sheet
+  // edit with no session-version bump, leaving their old token still verifying.
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+
   return {
     status: 'ok',
     video_ids: readUserVoteIds(user.email),
@@ -5550,33 +5563,65 @@ function sessionSignature(body) {
 }
 
 /**
+ * The user's current session version — the revocation lever (SEC2/BE15).
+ * Every minted token embeds it as `v`; verifySessionToken rejects any token
+ * whose `v` no longer matches, so bumping the version instantly retires every
+ * outstanding session for that user (server sign-out, blocking). Stored in
+ * Meta as `sv_<email>`; unset means 0, so existing users cost no writes.
+ */
+function getSessionVersion(email) {
+  var v = parseInt(getMeta('sv_' + email), 10);
+  return isNaN(v) ? 0 : v;
+}
+
+/** Revokes every outstanding session for `email` by bumping its version. */
+function bumpSessionVersion(email) {
+  setMeta('sv_' + email, getSessionVersion(email) + 1);
+}
+
+/**
  * Mints a session token for a verified user: `wds1.<body>.<sig>` where body is
- * base64url(JSON({e,n,p,iat,exp})) and sig is its HMAC. exp is SESSION_TTL_DAYS
- * out; the client slides it forward by re-minting before it lapses.
+ * base64url(JSON({e,n,p,iat,exp,v})) and sig is its HMAC. exp is
+ * SESSION_TTL_DAYS out; the client slides it forward by re-minting before it
+ * lapses. On a renewal the caller passes the ORIGINAL sign-in time as
+ * `originIatSec` — iat anchors the absolute-age cap, so exp never passes
+ * iat + SESSION_MAX_AGE_DAYS no matter how often the window slides. `v` is the
+ * user's current session version (see getSessionVersion).
  *
  * @param {{email:string,name:string,picture:string}} user
+ * @param {number} [originIatSec] - original sign-in time carried across renewals
  * @returns {string}
  */
-function mintSessionToken(user) {
+function mintSessionToken(user, originIatSec) {
   var nowSec = Math.floor(Date.now() / 1000);
+  var iat = originIatSec || nowSec;
   var payload = {
     e: user.email,
     n: user.name || '',
     p: user.picture || '',
-    iat: nowSec,
-    exp: nowSec + SESSION_TTL_DAYS * 24 * 60 * 60,
+    iat: iat,
+    exp: Math.min(
+      nowSec + SESSION_TTL_DAYS * 24 * 60 * 60,
+      iat + SESSION_MAX_AGE_DAYS * 24 * 60 * 60
+    ),
+    v: getSessionVersion(user.email),
   };
   var body = Utilities.base64EncodeWebSafe(JSON.stringify(payload));
   return SESSION_TOKEN_PREFIX + body + '.' + sessionSignature(body);
 }
 
 /**
- * Verifies an app session token and returns { email, name, picture } or null.
- * Recomputes the HMAC and compares it in constant time, then enforces expiry so
- * a token can never outlive its own exp even if the signature checks out.
+ * Verifies an app session token and returns { email, name, picture, iat } or
+ * null. Recomputes the HMAC and compares it in constant time, then enforces
+ * expiry so a token can never outlive its own exp even if the signature checks
+ * out, then requires the embedded session version `v` to match the user's
+ * current one — a bumped version (server sign-out, block) retires every older
+ * token on the spot (SEC2/BE15). Legacy tokens without `v` are rejected the
+ * same way, which is the one-time forced re-auth on cutover. iat is returned
+ * so handleSession can carry the original sign-in time across renewals.
  *
  * @param {string} token
- * @returns {{email:string,name:string,picture:string}|null}
+ * @returns {{email:string,name:string,picture:string,iat:number}|null}
  */
 function verifySessionToken(token) {
   try {
@@ -5593,8 +5638,14 @@ function verifySessionToken(token) {
     var payload = JSON.parse(json);
     if (!payload.exp || parseInt(payload.exp, 10) * 1000 <= Date.now()) return null;
     if (!payload.e) return null;
+    if (typeof payload.v !== 'number' || payload.v !== getSessionVersion(payload.e)) return null;
 
-    return { email: payload.e, name: payload.n || '', picture: payload.p || '' };
+    return {
+      email: payload.e,
+      name: payload.n || '',
+      picture: payload.p || '',
+      iat: parseInt(payload.iat, 10) || 0,
+    };
   } catch (error) {
     log('ERROR', 'verifySessionToken', error.message);
     return null;
@@ -5690,9 +5741,11 @@ function constantTimeEquals(a, b) {
 /**
  * Mints (or renews) an app session token. Accepts a Google ID token — the
  * first exchange right after sign-in — OR an existing, still-valid session
- * token — the silent slide a returning visitor's page does on load. Either way
- * a fresh SESSION_TTL_DAYS token is issued, so an active user never re-hits
- * Google One Tap.
+ * token — the silent slide a returning visitor's page does on load. A renewal
+ * carries the ORIGINAL sign-in time forward and is refused once the session
+ * is SESSION_MAX_AGE_DAYS old, so sliding the window can't renew a single
+ * sign-in forever — the client's error path then re-invokes Google One Tap
+ * (SEC2/BE15). Blocked users can't mint at all.
  *
  * @param {{token:string}} data
  * @returns {Object}
@@ -5703,26 +5756,71 @@ function handleSession(data) {
     return { status: 'error', message: 'token is required' };
   }
 
+  var isRenewal = String(token).indexOf(SESSION_TOKEN_PREFIX) === 0;
   var user = authenticateUser(token);
   if (!user) {
     return { status: 'error', message: 'Invalid authentication token' };
   }
 
+  if (isUserBlocked(user.email)) {
+    log('WARN', 'session', 'Blocked user attempted session mint: ' + user.email);
+    return { status: 'error', message: 'You have been blocked' };
+  }
+
+  var nowSec = Math.floor(Date.now() / 1000);
+  var originIat = (isRenewal && user.iat) ? user.iat : nowSec;
+  if (nowSec - originIat >= SESSION_MAX_AGE_DAYS * 24 * 60 * 60) {
+    return { status: 'error', message: 'Session too old. Please sign in again.' };
+  }
+
   return {
     status: 'ok',
-    sessionToken: mintSessionToken(user),
+    sessionToken: mintSessionToken(user, originIat),
     email: user.email,
     name: user.name,
     picture: user.picture,
-    exp: Math.floor(Date.now() / 1000) + SESSION_TTL_DAYS * 24 * 60 * 60,
+    // Mirrors the exp inside the minted token (TTL, capped at max age).
+    exp: Math.min(
+      nowSec + SESSION_TTL_DAYS * 24 * 60 * 60,
+      originIat + SESSION_MAX_AGE_DAYS * 24 * 60 * 60
+    ),
   };
 }
 
 /**
+ * Server-side sign-out (SEC2/BE15): bumps the caller's session version so
+ * EVERY outstanding session token for that account — this browser, the kiosk
+ * they forgot, a token lifted by an extension — stops verifying immediately.
+ * Sign-out used to be client-only (delete localStorage), which left a
+ * captured token a permanent credential. Best-effort by design: an invalid or
+ * already-expired token has nothing to revoke and still returns ok, since the
+ * client clears its local state either way.
+ *
+ * @param {{token:string}} data
+ * @returns {Object}
+ */
+function handleSignOut(data) {
+  var token = data.token;
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = authenticateUser(token);
+  if (!user) {
+    return { status: 'ok', revoked: false };
+  }
+
+  bumpSessionVersion(user.email);
+  log('INFO', 'signOut', 'All sessions revoked for ' + user.email);
+  return { status: 'ok', revoked: true };
+}
+
+/**
  * Editor-runnable sanity check for the session-token crypto. Logs PASS/FAIL for
- * the happy path, prefix routing, a tampered signature, a forged body, and an
- * expired token. Run from the Apps Script editor after any change to the
- * mint/verify functions.
+ * the happy path, prefix routing, a tampered signature, a forged body, an
+ * expired token, a stale/missing session version, max-age renewal refusal,
+ * iat carry-forward, and server sign-out revocation. Run from the Apps Script
+ * editor after any change to the mint/verify/session functions.
  */
 function runSessionSelfTest() {
   var results = [];
@@ -5756,6 +5854,48 @@ function runSessionSelfTest() {
   var expiredTok = SESSION_TOKEN_PREFIX + expiredBody + '.' + sessionSignature(expiredBody);
   results.push(['expired token rejected', verifySessionToken(expiredTok) === null]);
 
+  var curV = getSessionVersion(user.email);
+
+  // A validly-signed token whose session version is stale is rejected — the
+  // revocation lever (SEC2/BE15). Crafted with a wrong v so nothing is
+  // written to Meta.
+  var staleVBody = Utilities.base64EncodeWebSafe(JSON.stringify(
+    { e: user.email, n: user.name, p: user.picture, iat: nowSec, exp: nowSec + 3600, v: curV + 999 }));
+  var staleVTok = SESSION_TOKEN_PREFIX + staleVBody + '.' + sessionSignature(staleVBody);
+  results.push(['stale session version rejected', verifySessionToken(staleVTok) === null]);
+
+  // A legacy (pre-versioning) token without v is rejected — the one-time
+  // forced re-auth on cutover.
+  var legacyBody = Utilities.base64EncodeWebSafe(JSON.stringify(
+    { e: user.email, n: user.name, p: user.picture, iat: nowSec, exp: nowSec + 3600 }));
+  var legacyTok = SESSION_TOKEN_PREFIX + legacyBody + '.' + sessionSignature(legacyBody);
+  results.push(['legacy token without version rejected', verifySessionToken(legacyTok) === null]);
+
+  // Renewal past the absolute max age is refused (still-valid exp, correct v,
+  // but the carried original iat is too old) — forces a real Google re-auth.
+  var maxAge = SESSION_MAX_AGE_DAYS * 24 * 60 * 60;
+  var agedBody = Utilities.base64EncodeWebSafe(JSON.stringify(
+    { e: user.email, n: user.name, p: user.picture, iat: nowSec - maxAge - 60, exp: nowSec + 3600, v: curV }));
+  var agedTok = SESSION_TOKEN_PREFIX + agedBody + '.' + sessionSignature(agedBody);
+  var agedRes = handleSession({ token: agedTok });
+  results.push(['renewal past max age refused', agedRes.status === 'error']);
+
+  // Renewal carries the original iat forward and caps exp at iat + max age.
+  var renewed = handleSession({ token: tok });
+  var renewedPayload = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(
+    renewed.sessionToken.substring(SESSION_TOKEN_PREFIX.length).split('.')[0])).getDataAsString());
+  results.push(['renewal carries original iat',
+    renewed.status === 'ok' && renewedPayload.iat === JSON.parse(Utilities.newBlob(
+      Utilities.base64DecodeWebSafe(tok.substring(SESSION_TOKEN_PREFIX.length).split('.')[0])).getDataAsString()).iat
+    && renewedPayload.exp <= renewedPayload.iat + maxAge]);
+
+  // Server sign-out revokes the outstanding token. NOTE: writes one
+  // sv_test@example.com row to the real Meta sheet (updated in place on
+  // later runs) — harmless, but that's what it is.
+  var so = handleSignOut({ token: renewed.sessionToken });
+  results.push(['signOut revokes outstanding sessions',
+    so.status === 'ok' && so.revoked === true && verifySessionToken(renewed.sessionToken) === null]);
+
   var allPass = true;
   for (var i = 0; i < results.length; i++) {
     if (!results[i][1]) allPass = false;
@@ -5782,6 +5922,37 @@ function isUserBlocked(email) {
   }
 
   return false;
+}
+
+/**
+ * Blocks a user AND revokes their outstanding sessions — run from the Apps
+ * Script editor (there is deliberately no web endpoint for this). Adding the
+ * row alone only stops future comment/vote/star writes and session mints; the
+ * version bump is what kills the sessions the user already holds, so a block
+ * takes effect immediately instead of when their token happens to lapse
+ * (SEC2/BE15). If you add a row to the BLOCKED sheet by hand instead, ALSO
+ * run bumpSessionVersion('<email>') — otherwise their existing session keeps
+ * verifying until it expires.
+ *
+ * @param {string} email
+ */
+function blockUser(email) {
+  if (!email) throw new Error('blockUser: email is required');
+  if (!isUserBlocked(email)) {
+    var sheet = getSheet('BLOCKED');
+    var headers = sheet.getDataRange().getValues()[0];
+    var emailCol = headers.indexOf('email');
+    if (emailCol === -1) throw new Error('blockUser: BLOCKED sheet has no email column');
+    var row = [];
+    for (var i = 0; i < headers.length; i++) {
+      if (i === emailCol) row.push(email);
+      else if (headers[i] === 'blocked_at' || headers[i] === 'created_at') row.push(new Date().toISOString());
+      else row.push('');
+    }
+    sheet.appendRow(row);
+  }
+  bumpSessionVersion(email);
+  log('INFO', 'blockUser', 'Blocked and revoked sessions for ' + email);
 }
 
 // ============================================================

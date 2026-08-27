@@ -465,6 +465,19 @@ export function createApiClient(baseUrl, options = {}) {
     async createSession(token) {
       return post({ action: 'session', token });
     },
+
+    /**
+     * Revokes ALL of the user's outstanding session tokens server-side — on
+     * every device, not just this one. Called on sign-out so a token captured
+     * elsewhere (kiosk, extension, backup) dies with the session instead of
+     * remaining a live credential until it expires.
+     *
+     * @param {string} token - the current app session token (or Google ID token)
+     * @returns {Promise<{revoked: boolean}>}
+     */
+    async revokeSession(token) {
+      return post({ action: 'signOut', token });
+    },
   };
 }
 

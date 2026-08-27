@@ -233,15 +233,22 @@ async function handleCredentialResponse(response) {
 }
 
 /**
- * Signs out the current user.
+ * Signs out the current user. Also revokes the session server-side — which
+ * retires the user's tokens on EVERY device, not just this one — best-effort
+ * and fire-and-forget: local state clears immediately either way, and a
+ * failed revoke just leaves the token to age out as before.
  */
 export function signOut() {
+  const token = getToken();
   if (typeof google !== 'undefined' && google.accounts) {
     google.accounts.id.disableAutoSelect();
   }
   currentUser = null;
   removeStored('wd_user');
   notifyListeners();
+  if (token) {
+    api.revokeSession(token).catch(() => { /* best-effort */ });
+  }
 }
 
 /**
