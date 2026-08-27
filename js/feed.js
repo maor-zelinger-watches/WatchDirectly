@@ -134,7 +134,7 @@ export function createMediaCard(item) {
             <span class="media-card__vote-icon" aria-hidden="true">▲</span>
             <span class="media-card__vote-count">${item.vote_count || 0}</span>
           </button>
-          <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}">
+          <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}" aria-label="Comments" aria-expanded="false" aria-controls="comments-body-${escaped.videoId}">
             💬 ${item.comment_count || 0} comments
           </button>
           <button class="media-card__share" data-video-id="${escaped.videoId}" title="Share" aria-label="Share ${escaped.title}">
@@ -144,7 +144,7 @@ export function createMediaCard(item) {
             <span class="media-card__expand-icon" aria-hidden="true">⛶</span>
           </button>
         </div>
-        <div class="media-card__comments-body" data-video-id="${escaped.videoId}" style="display: none;">
+        <div class="media-card__comments-body" id="comments-body-${escaped.videoId}" data-video-id="${escaped.videoId}" style="display: none;">
           <div class="media-card__comments-list" data-video-id="${escaped.videoId}">
             <!-- Comments rendered here -->
           </div>

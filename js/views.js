@@ -443,9 +443,43 @@ export function update() {
 }
 
 export function setupTabs() {
-  document.querySelectorAll('.feed-tab').forEach(tab => {
+  const tabs = Array.from(document.querySelectorAll('.feed-tab'));
+  tabs.forEach((tab, i) => {
     tab.addEventListener('click', () => switchView(tab.dataset.view));
+
+    // ARIA tablist keyboard support: arrow keys (Home/End) move focus between
+    // tabs with a roving tabindex, and selection follows focus. switchView
+    // synchronously updates aria-selected + tabindex before it awaits, so the
+    // target is focusable by the time we call focus() below.
+    tab.addEventListener('keydown', (e) => {
+      let next = null;
+      if (e.key === 'ArrowRight') next = (i + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = tabs.length - 1;
+      else return;
+      e.preventDefault();
+      const target = tabs[next];
+      switchView(target.dataset.view);
+      target.focus();
+    });
   });
+}
+
+/**
+ * Syncs the tablist's ARIA + roving-tabindex state to the active view and
+ * points the shared tabpanel's label at the active tab. Called from every place
+ * that changes which tab is selected so the two stay in lockstep.
+ */
+function syncTabState(view) {
+  document.querySelectorAll('.feed-tab').forEach(t => {
+    const active = t.dataset.view === view;
+    t.classList.toggle('feed-tab--active', active);
+    t.setAttribute('aria-selected', active ? 'true' : 'false');
+    t.tabIndex = active ? 0 : -1;
+  });
+  const panel = document.getElementById('feed-container');
+  if (panel) panel.setAttribute('aria-labelledby', `tab-${view}`);
 }
 
 // Bumped on every tab switch so an older switch's async work (top list,
@@ -467,11 +501,7 @@ async function switchView(view) {
   state.filterZeroYieldStreak = 0;
   state.topFilterZeroYieldStreak = 0;
 
-  document.querySelectorAll('.feed-tab').forEach(t => {
-    const active = t.dataset.view === view;
-    t.classList.toggle('feed-tab--active', active);
-    t.setAttribute('aria-selected', active ? 'true' : 'false');
-  });
+  syncTabState(view);
   // FE9: tear down any open fullscreen overlay BEFORE resetting scroll. Exiting
   // restores the pre-fullscreen scroll offset (and strips ?v=); doing it first
   // lets the scroll-to-top below win, so the freshly-opened view starts at the
@@ -529,11 +559,7 @@ async function switchView(view) {
         if (token !== viewToken) return;
         showToast('Failed to load top videos. Please try again.', 'error');
         state.view = 'latest';
-        document.querySelectorAll('.feed-tab').forEach(t => {
-          const active = t.dataset.view === 'latest';
-          t.classList.toggle('feed-tab--active', active);
-          t.setAttribute('aria-selected', active ? 'true' : 'false');
-        });
+        syncTabState('latest');
         skeleton.style.display = 'none';
         applyFilter();
         return;

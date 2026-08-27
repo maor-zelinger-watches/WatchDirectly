@@ -21,13 +21,16 @@ export function toggleComments(videoId) {
   const body = document.querySelector(`.media-card__comments-body[data-video-id="${cssEscape(videoId)}"]`);
   if (!body) return;
 
+  const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${videoId}"]`);
   const isExpanded = body.style.display !== 'none';
   if (isExpanded) {
     body.style.display = 'none';
     state.expandedComments.delete(videoId);
+    if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'false');
   } else {
     body.style.display = '';
     state.expandedComments.add(videoId);
+    if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'true');
     loadInlineComments(videoId);
     updateInlineCommentFormUI(videoId);
     setupInlineCommentForm(videoId);
