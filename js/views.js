@@ -30,6 +30,30 @@ import {
 // network failure can degrade to that cache instead of failing search.
 let indexFromCache = false;
 
+// Cap on catalog/archive page fetches in flight at once during an index build.
+// Offset pages are order-independent, so they CAN all fire together — but doing
+// so hammers the backend (which caps simultaneous executions) in one burst; a
+// small pool keeps results streaming without the thundering herd.
+const SEARCH_FETCH_CONCURRENCY = 4;
+
+/**
+ * Runs `worker` over `items` with at most `limit` calls in flight at once — a
+ * bounded fan-out instead of one Promise.all burst over every page. Resolves
+ * when all items are processed. Workers are expected to swallow their own
+ * failures (a dropped chunk is best-effort), so this never rejects.
+ */
+async function runBounded(items, limit, worker) {
+  let cursor = 0;
+  const size = Math.max(1, Math.min(limit, items.length));
+  const runners = Array.from({ length: size }, async () => {
+    while (cursor < items.length) {
+      const idx = cursor++;
+      await worker(items[idx], idx);
+    }
+  });
+  await Promise.all(runners);
+}
+
 /** Fires every registered onProgress callback with the current (partial) index. */
 function notifyIndexProgress() {
   for (const cb of state.searchIndexProgress) {
@@ -98,7 +122,7 @@ async function buildSearchIndex() {
   if (firstVideos.length > 0 && total > firstVideos.length) {
     const pages = [];
     for (let p = 2; (p - 1) * chunk < total; p++) pages.push(p);
-    await Promise.all(pages.map(p =>
+    await runBounded(pages, SEARCH_FETCH_CONCURRENCY, p =>
       api.fetchFeed(p, chunk)
         .then(data => {
           state.searchIndex = mergeIndexChunk(state.searchIndex, data.videos || []);
@@ -106,7 +130,7 @@ async function buildSearchIndex() {
         })
         // A dropped chunk just means those items miss this session's index.
         .catch(() => { /* best-effort */ })
-    ));
+    );
   }
 
   // Phase 2: backfill the archive (older than the live window) into the index.
@@ -141,12 +165,20 @@ async function appendArchiveToIndex() {
   state.searchIndex = mergeIndexChunk(state.searchIndex || [], firstVideos);
   notifyIndexProgress();
 
-  const total = Math.min(firstArchive.total || firstVideos.length, cap);
-  if (total <= firstVideos.length) return;
+  // Build the page list from the REMAINING index headroom, not the full cap.
+  // The cap is the absolute index ceiling (5000); with the live catalog already
+  // near it, only a page or two of archive can actually land. Sizing the fetch
+  // to `cap - length` (ceil to whole chunks) stops us downloading — then
+  // discarding in the merge guard below — pages the ceiling has no room for.
+  const remaining = cap - (state.searchIndex ? state.searchIndex.length : 0);
+  if (remaining <= 0) return;
 
+  const archiveTotal = firstArchive.total || firstVideos.length;
+  const morePages = Math.ceil(remaining / chunk);
   const pages = [];
-  for (let p = 2; (p - 1) * chunk < total; p++) pages.push(p);
-  await Promise.all(pages.map(p =>
+  for (let p = 2; p <= 1 + morePages && (p - 1) * chunk < archiveTotal; p++) pages.push(p);
+
+  await runBounded(pages, SEARCH_FETCH_CONCURRENCY, p =>
     api.fetchArchive(p, chunk)
       .then(data => {
         // Stop merging once the combined index hits the ceiling.
@@ -155,7 +187,7 @@ async function appendArchiveToIndex() {
         notifyIndexProgress();
       })
       .catch(() => { /* best-effort — those archived items miss this session */ })
-  ));
+  );
 }
 
 /**
@@ -952,3 +984,6 @@ async function applyFilter() {
 
   renderMatches(index, true);
 }
+
+// Internal seams exposed for unit tests (bounded fan-out / archive headroom).
+export const __test__ = { buildSearchIndex, appendArchiveToIndex, runBounded };

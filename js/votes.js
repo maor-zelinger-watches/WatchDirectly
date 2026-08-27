@@ -10,7 +10,7 @@
 import { state } from './state.js';
 import { api } from './api-client.js';
 import { isSignedIn, getToken, isTokenExpired, refreshToken, ensureToken } from './auth.js';
-import { saveFeedCache } from './cache.js';
+import { saveFeedCacheSoon } from './cache.js';
 import { showToast } from './toast.js';
 
 // Bumped on every local vote mutation so a slow fetchMyVotes snapshot
@@ -34,7 +34,9 @@ function updateCachedVoteCount(videoId, count) {
   const v = state.videos.find(x => x.video_id === videoId);
   if (v) {
     v.vote_count = count;
-    saveFeedCache(state.videos, state.totalVideos);
+    // Coalesced + capped: a burst of votes serializes the feed once at idle
+    // time, not the whole accumulated list synchronously on every vote.
+    saveFeedCacheSoon(state.videos, state.totalVideos);
   }
   if (state.topVideos) {
     const tv = state.topVideos.find(x => x.video_id === videoId);

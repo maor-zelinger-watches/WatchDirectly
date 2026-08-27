@@ -22,7 +22,7 @@ import { loadFeedCache, saveFeedCache } from './cache.js';
 import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
 import { showToast } from './toast.js';
-import { buildCard, insertCardChronologically } from './cards.js';
+import { buildCard, insertCardChronologically, renderList } from './cards.js';
 import { observeLazyIframe } from './lazy-iframe.js';
 import {
   serverHasMore, cursorAfter,
@@ -464,7 +464,13 @@ async function showCachedFeed() {
   state.hasMore = state.videos.length < state.totalVideos;
   state.initialLoadComplete = true;
 
-  await appendCards(cached.videos);
+  // Cache restore is a re-render of already-loaded data, not a network arrival:
+  // render via renderList (the non-animated path) so the WHOLE cached feed —
+  // every scrolled page — paints at once. appendCards' per-card entrance stagger
+  // is for live page loads; replaying it here would delay the last cards of a
+  // multi-page cache by seconds (--enter-delay grows ~60ms per card).
+  const feedContainer = document.getElementById('feed-container');
+  renderList(feedContainer, cached.videos);
 
   // Reveal the sentinel only AFTER the cached cards are in. While the
   // container is still empty the sentinel sits at the top of the viewport,

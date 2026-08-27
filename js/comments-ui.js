@@ -13,7 +13,7 @@ import { api } from './api-client.js';
 import { CONFIG } from './config.js';
 import { buildCommentTree, createCommentThread, createCommentHtml } from './comments.js';
 import { isSignedIn, getCurrentUser, renderSignInButton, ensureToken } from './auth.js';
-import { saveFeedCache } from './cache.js';
+import { saveFeedCacheSoon } from './cache.js';
 import { showToast } from './toast.js';
 
 export function toggleComments(videoId) {
@@ -215,7 +215,9 @@ function updateCachedCommentCount(videoId, newCount) {
   const video = state.videos.find(v => v.video_id === videoId);
   if (video) {
     video.comment_count = newCount;
-    saveFeedCache(state.videos, state.totalVideos);
+    // Coalesced + capped write — the whole feed isn't re-serialized on every
+    // comment post; the deferred save persists only the latest capped snapshot.
+    saveFeedCacheSoon(state.videos, state.totalVideos);
   }
   if (state.topVideos) {
     const tv = state.topVideos.find(v => v.video_id === videoId);
