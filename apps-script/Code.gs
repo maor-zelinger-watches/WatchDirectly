@@ -41,6 +41,11 @@ const VERSION = '1.14.1';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
+// Hard ceiling on any client-supplied page size (BE11). Without it, `&limit=100000`
+// forces the read handlers to slice — and, on a cache miss, serialize — the entire
+// catalog. The feed head / top-week caches are far smaller than this, so a real
+// page never approaches the cap; it only defuses abusive requests.
+const MAX_PAGE_LIMIT = 100;
 
 // Wall-clock budget for a single crawl. Apps Script hard-kills executions at
 // 6 min; on a kill the finally blocks don't run, last_fetch never updates, and
@@ -62,6 +67,13 @@ const FEED_HEAD_COUNT = 50;
 const FEED_HEAD_CACHE_KEY = 'feed_head_v1';
 const FEED_HEAD_CACHE_SECONDS = 300;
 
+// Short-lived "no such video" marker for the single-video lookup (BE11). A shared
+// deep link to a bogus id otherwise forces handleVideo through readAllVideos() AND
+// readSortedArchive() — two full scans — on every hit; a repeated bogus id would
+// re-run both each time. Caching the miss for a few seconds lets a burst of the
+// same bad id short-circuit to not-found without touching the sheets.
+const VIDEO_MISS_CACHE_SECONDS = 30;
+
 // Top-This-Week cache: the ranked last-7-days window is kept in CacheService so
 // repeat opens of the tab skip the full Videos-sheet scan + sort — the same
 // dominant cost the feed head avoids. handleTopWeek is read-only and has no
@@ -75,6 +87,11 @@ const TOP_WEEK_CACHE_COUNT = 50;
 const TOP_WEEK_CACHE_KEY = 'top_week_v1';
 const TOP_WEEK_CACHE_SECONDS = 300;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
+// Per-user minimum spacing between vote/star toggles (SEC3/BE5). Each toggle takes
+// the global script lock through a sheet mutation, so an account toggling in a
+// tight loop serializes every other write and churns the caches. A short
+// CacheService-backed window (keyed by email) throttles that without a Meta write.
+const VOTE_STAR_RATE_LIMIT_SECONDS = 2;
 
 // Grace window applied to a premiere/live entry's expiry. A scheduled premiere
 // that never airs, or a stream that never ends, stops being surfaced once its
@@ -116,6 +133,12 @@ const CACHE_GENERATION_PROP = 'CACHE_GENERATION';
 // signature and expiry but NOT the audience. Keep in sync with GOOGLE_CLIENT_ID
 // in js/app.js.
 const GOOGLE_CLIENT_ID = '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com';
+
+// How long a token that failed LOCAL pre-validation (decoded, but wrong audience /
+// issuer / already expired) is remembered so a repeat of the same bad token is
+// refused without re-decoding or hitting tokeninfo (SEC1/BE4). Short by design —
+// this is a flood damper, not an authorization decision.
+const TOKEN_NEG_CACHE_SECONDS = 60;
 
 // App-issued session tokens. After the first Google Sign-In we verify the
 // Google ID token ONCE, then mint our own HMAC-signed token the client reuses
@@ -342,10 +365,36 @@ function isRateLimited(email) {
 
 /**
  * Records a comment timestamp for rate limiting.
- * @param {string} email 
+ * @param {string} email
  */
 function recordCommentTime(email) {
   setMeta('rate_' + email, new Date().toISOString());
+}
+
+/**
+ * CacheService-backed per-user rate limiter for the cheap-but-lockful write
+ * endpoints (votes, stars). A single check-and-set: if a marker for
+ * `action`+`email` is already present the caller is inside the window and is
+ * blocked; otherwise it's stamped for `windowSeconds` and allowed through. Kept
+ * separate from the Meta-backed comment limiter (isRateLimited/recordCommentTime)
+ * so the two can evolve independently. Best-effort — a cache failure fails OPEN
+ * (a legitimate action is never blocked by infra trouble).
+ *
+ * @param {string} action - short bucket name, e.g. 'vote' | 'star'
+ * @param {string} email  - the acting user's email (the rate-limit key)
+ * @param {number} windowSeconds - minimum spacing between actions
+ * @returns {boolean} true when the action should be BLOCKED
+ */
+function isActionRateLimited(action, email, windowSeconds) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var key = 'rl_' + action + '_' + email;
+    if (cache.get(key)) return true;
+    cache.put(key, '1', windowSeconds);
+    return false;
+  } catch (e) {
+    return false; // fail open — never block a real user on a cache hiccup
+  }
 }
 
 // ============================================================
@@ -2341,8 +2390,10 @@ function invalidateArchive() {
  * @returns {Object} { status:'ok', videos, total, page }
  */
 function handleArchive(params) {
-  var page = parseInt(params.page) || 1;
-  var limit = parseInt(params.limit) || DEFAULT_PAGE_LIMIT;
+  // Clamp page and cap limit so a negative page or a giant limit can't drive a
+  // negative-index slice or a whole-archive serialization (BE11).
+  var page = Math.max(1, parseInt(params.page) || 1);
+  var limit = Math.min(Math.max(1, parseInt(params.limit) || DEFAULT_PAGE_LIMIT), MAX_PAGE_LIMIT);
 
   var videos = readSortedArchive();
   var start = (page - 1) * limit;
@@ -2371,6 +2422,26 @@ function handleVideo(params) {
     return { status: 'error', message: 'Missing videoId' };
   }
 
+  // Not-found short-circuit (BE11): a recent lookup that resolved to nothing is
+  // remembered briefly, so a burst of the same bogus id can't repeatedly force
+  // the full readAllVideos() + readSortedArchive() scans below. Best-effort, and
+  // only for ids short enough to be a safe cache key. Keyed by id — a video that
+  // later appears is a cache miss until this marker's short TTL lapses, which is
+  // acceptable for a deep-link lookup.
+  var cache = null;
+  var missKey = null;
+  try {
+    cache = CacheService.getScriptCache();
+    if (videoId.length <= 128) {
+      missKey = 'vidmiss_' + videoId;
+      if (cache.get(missKey)) {
+        return { status: 'ok', video: null };
+      }
+    }
+  } catch (e) {
+    cache = null;
+  }
+
   function findIn(videos) {
     for (var i = 0; i < videos.length; i++) {
       if (videos[i].video_id === videoId) return videos[i];
@@ -2382,6 +2453,15 @@ function handleVideo(params) {
   var video = head ? findIn(head.videos) : null;
   if (!video) video = findIn(readAllVideos());
   if (!video) video = findIn(readSortedArchive());
+
+  // Cache the miss so the next lookup of this id skips both full scans.
+  if (!video && cache && missKey) {
+    try {
+      cache.put(missKey, '1', VIDEO_MISS_CACHE_SECONDS);
+    } catch (e) {
+      // best-effort — a failed put just means the next lookup rescans
+    }
+  }
 
   return { status: 'ok', video: video };
 }
@@ -2452,7 +2532,7 @@ function getVideos(page, limit, cursor) {
   // offset: a negative page/limit yields slice(-40, -20) nonsense (a window from
   // the END of the list) instead of an empty/first page.
   page = Math.max(1, page);
-  limit = Math.max(1, limit);
+  limit = Math.min(Math.max(1, limit), MAX_PAGE_LIMIT); // cap oversized page sizes (BE11)
   var start = (page - 1) * limit;
 
   // Fast path: serve early no-cursor pages from the cached feed head, skipping
@@ -2651,8 +2731,11 @@ function handleTopWeek(params) {
   // channel plus retry backoff) made the request slow enough to time out, and
   // unlike the feed the top-week tab has no cached fallback, so a slow crawl
   // surfaced to the user as an outright failure.
-  var limit = parseInt(params.limit) || 50;
-  var page = parseInt(params.page) || 1;
+  // Clamp both, like getVideos: `?page=-1` otherwise yields slice(-100,-50) (a
+  // window from the END of the list) and `&limit=100000` serializes the whole
+  // catalog on a cache miss (BE11).
+  var limit = Math.min(Math.max(1, parseInt(params.limit) || 50), MAX_PAGE_LIMIT);
+  var page = Math.max(1, parseInt(params.page) || 1);
   var cursor = params.cursor || '';
   var start = (page - 1) * limit;
 
@@ -3092,6 +3175,13 @@ function handleVote(data) {
     return { status: 'error', message: 'You have been blocked' };
   }
 
+  // Throttle toggles BEFORE taking the global lock: a vote is cheap but lockful,
+  // so an account looping this would serialize every other write and churn the
+  // caches. Checked pre-lock so a blocked call never even queues for the lock.
+  if (isActionRateLimited('vote', user.email, VOTE_STAR_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
   // Serialize the read-find-mutate-recount so concurrent toggles from the
   // same user can't double-insert or delete the wrong (shifted) row.
   var lock = LockService.getScriptLock();
@@ -3135,7 +3225,9 @@ function handleVote(data) {
       voted = true;
     }
 
-    var count = updateVoteCount(videoId);
+    // Move the stored count by exactly the row change we just made (+1 on insert,
+    // -1 on delete) instead of re-scanning the whole Votes sheet to recount (BE5).
+    var count = updateVoteCount(videoId, voted ? 1 : -1);
     return { status: 'ok', voted: voted, vote_count: count };
   } finally {
     lock.releaseLock();
@@ -3176,18 +3268,33 @@ function readUserVoteIds(email) {
 }
 
 /**
- * Recounts votes for a video from the Votes sheet and writes the total
- * to the video's vote_count column, creating that column if it's missing.
+ * Updates a video's stored vote_count and returns the new total.
+ *
+ * BE5: the caller (handleVote, under the script lock) already knows whether a
+ * vote row was added or removed, so it passes `delta` (+1 / -1) and we move the
+ * count on the KNOWN row — no re-read of the (unbounded, ever-growing) Votes
+ * sheet. When `delta` is omitted we fall back to the original full recount from
+ * the Votes sheet, so a reconcile/legacy caller still gets an authoritative
+ * total. The count never goes below zero.
+ *
+ * @param {string} videoId
+ * @param {number} [delta] - +1 / -1 for the incremental path; omit to recount
  * @returns {number} The new vote count
  */
-function updateVoteCount(videoId) {
-  var votesSheet = getVotesSheet();
-  var votesData = votesSheet.getDataRange().getValues();
-  var vHeaders = votesData[0];
-  var voteVideoCol = vHeaders.indexOf('video_id');
-  var count = 0;
-  for (var i = 1; i < votesData.length; i++) {
-    if (votesData[i][voteVideoCol] === videoId) count++;
+function updateVoteCount(videoId, delta) {
+  var incremental = (typeof delta === 'number' && !isNaN(delta));
+
+  var count;
+  if (!incremental) {
+    // Reconcile path: authoritative recount from the Votes sheet.
+    var votesSheet = getVotesSheet();
+    var votesData = votesSheet.getDataRange().getValues();
+    var vHeaders = votesData[0];
+    var voteVideoCol = vHeaders.indexOf('video_id');
+    count = 0;
+    for (var i = 1; i < votesData.length; i++) {
+      if (votesData[i][voteVideoCol] === videoId) count++;
+    }
   }
 
   var videosSheet = getSheet('VIDEOS');
@@ -3205,6 +3312,10 @@ function updateVoteCount(videoId) {
   var found = false;
   for (var i = 1; i < videosData.length; i++) {
     if (videosData[i][videoIdCol] === videoId) {
+      if (incremental) {
+        var current = Number(videosData[i][voteCountCol]) || 0;
+        count = Math.max(0, current + delta);
+      }
       videosSheet.getRange(i + 1, voteCountCol + 1).setValue(count);
       found = true;
       break;
@@ -3212,7 +3323,16 @@ function updateVoteCount(videoId) {
   }
   // The live scan missed — the video may have been archived. Update the row in
   // the Archive tab so a vote on a shared-link/search result still persists.
-  if (!found) updateArchivedCount(videoId, 'vote_count', count);
+  if (!found) {
+    if (incremental) {
+      // Move the archived row's count by the same delta; if the id isn't in the
+      // archive either it's brand new, so the total is the delta off an empty base.
+      var archived = bumpArchivedVoteCount(videoId, delta);
+      count = (archived === null) ? Math.max(0, delta) : archived;
+    } else {
+      updateArchivedCount(videoId, 'vote_count', count);
+    }
+  }
 
   // vote_count is baked into the cached feed head AND drives the top-week
   // ranking — drop both so the next request serves the new count and order.
@@ -3220,6 +3340,35 @@ function updateVoteCount(videoId) {
   invalidateTopWeek();
 
   return count;
+}
+
+/**
+ * Incremental sibling of updateArchivedCount for the vote path: reads the
+ * archived row's current vote_count, moves it by `delta` (floored at 0), writes
+ * it back, and drops the archive cache. Returns the new count, or null when the
+ * id isn't in the Archive tab (so the caller can treat it as a fresh video).
+ * Caller already holds the script lock.
+ * @returns {number|null}
+ */
+function bumpArchivedVoteCount(videoId, delta) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS);
+  var archiveSheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
+  if (!archiveSheet) return null;
+  var data = archiveSheet.getDataRange().getValues();
+  if (data.length <= 1) return null;
+  var headers = data[0];
+  var videoIdCol = findVideoIdCol(headers);
+  var countCol = headers.indexOf('vote_count');
+  if (videoIdCol === -1 || countCol === -1) return null;
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][videoIdCol] === videoId) {
+      var next = Math.max(0, (Number(data[i][countCol]) || 0) + delta);
+      archiveSheet.getRange(i + 1, countCol + 1).setValue(next);
+      invalidateArchive();
+      return next;
+    }
+  }
+  return null;
 }
 
 // ============================================================
@@ -3269,6 +3418,11 @@ function handleStar(data) {
 
   if (isUserBlocked(user.email)) {
     return { status: 'error', message: 'You have been blocked' };
+  }
+
+  // Same pre-lock throttle as handleVote: a star toggle is cheap but lockful.
+  if (isActionRateLimited('star', user.email, VOTE_STAR_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
   }
 
   // Serialize read-find-mutate so concurrent toggles can't double-insert
@@ -3399,9 +3553,12 @@ function verifyGoogleToken(idToken) {
   // to a live verification.
   var cache = null;
   var cacheKey = null;
+  var negKey = null;
   try {
     cache = CacheService.getScriptCache();
-    cacheKey = 'tok_' + tokenHash(idToken);
+    var th = tokenHash(idToken);
+    cacheKey = 'tok_' + th;
+    negKey = 'tokneg_' + th;
     var cached = cache.get(cacheKey);
     if (cached) {
       var claims = JSON.parse(cached);
@@ -3410,8 +3567,40 @@ function verifyGoogleToken(idToken) {
         return { email: claims.email, name: claims.name, picture: claims.picture };
       }
     }
+    // Negative cache: a token that already failed LOCAL pre-validation is refused
+    // here with no decode and no fetch, so a flood of the same bad token can't
+    // burn the ~20k/day UrlFetch cap (SEC1/BE4).
+    if (cache.get(negKey)) {
+      return null;
+    }
   } catch (e) {
     cache = null;
+  }
+
+  // Offline pre-flight: decode the JWT payload WITHOUT a network call and reject
+  // anything that can't possibly verify — wrong audience, wrong issuer, or already
+  // expired — before spending a UrlFetchApp quota unit (SEC1/BE4). A token that
+  // isn't a decodable JWT falls through to the live check below (unchanged
+  // behavior); only a well-formed-but-invalid JWT is rejected + negatively cached
+  // here. The live tokeninfo call is still required to verify the SIGNATURE, so a
+  // token that passes this pre-flight is NOT trusted yet.
+  var pre = null;
+  try {
+    pre = decodeJwtPayload(idToken);
+  } catch (e) {
+    pre = null;
+  }
+  if (pre) {
+    var audOk = pre.aud === GOOGLE_CLIENT_ID;
+    var issOk = pre.iss === 'accounts.google.com' || pre.iss === 'https://accounts.google.com';
+    var expOk = pre.exp && parseInt(pre.exp, 10) * 1000 > Date.now();
+    if (!audOk || !issOk || !expOk) {
+      log('ERROR', 'verifyGoogleToken', 'Token failed local pre-validation (no fetch)');
+      if (cache && negKey) {
+        try { cache.put(negKey, '1', TOKEN_NEG_CACHE_SECONDS); } catch (e) { /* best-effort */ }
+      }
+      return null;
+    }
   }
 
   try {
@@ -3481,6 +3670,30 @@ function verifyGoogleToken(idToken) {
 function tokenHash(idToken) {
   var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken);
   return Utilities.base64EncodeWebSafe(bytes);
+}
+
+/**
+ * Decodes the CLAIMS (middle segment) of a JWT locally, WITHOUT verifying the
+ * signature. Used only for the pre-flight audience/issuer/expiry gate in
+ * verifyGoogleToken — a cheap filter that lets an obviously-invalid token be
+ * rejected before the tokeninfo round trip. Returns the parsed payload object, or
+ * null when the input isn't a well-formed 3-segment JWT (the caller then falls
+ * through to the live verification). NEVER treat a truthy return as "verified" —
+ * the payload is attacker-controlled until tokeninfo confirms the signature.
+ * @param {string} idToken
+ * @returns {Object|null}
+ */
+function decodeJwtPayload(idToken) {
+  var parts = String(idToken).split('.');
+  if (parts.length !== 3) return null;
+  var seg = parts[1];
+  // JWT uses base64url with the padding stripped; restore it for the decoder.
+  var mod = seg.length % 4;
+  if (mod === 1) return null; // impossible length for valid base64
+  if (mod === 2) seg += '==';
+  else if (mod === 3) seg += '=';
+  var json = Utilities.newBlob(Utilities.base64DecodeWebSafe(seg)).getDataAsString();
+  return JSON.parse(json);
 }
 
 // ============================================================
@@ -3794,6 +4007,17 @@ const CLIENT_ERRORS_PER_REQUEST = 10;   // rows accepted from one POST
 const CLIENT_ERRORS_PER_MINUTE = 60;    // global budget, approximate (cache
                                       // increments are not atomic; a racing
                                       // burst can slightly overshoot)
+// Per-session slice of the global budget (SEC5). One abusive session used to be
+// able to spend the whole global minute-budget and starve every other user's
+// telemetry; capping each session well below the global keeps one reporter from
+// crowding the rest out. Sessionless reports (no sessionId) only meter globally.
+const CLIENT_ERRORS_PER_SESSION_PER_MINUTE = 20;
+// Meta kill-switch key: set this to a truthy value ('true' / '1' / 'yes') to
+// disable the clientError endpoint entirely (drops everything, still 200). The
+// read is cached briefly so a flood can't hammer the Meta sheet checking it.
+const CLIENT_ERROR_KILL_SWITCH_META_KEY = 'client_error_disabled';
+const CLIENT_ERROR_KILL_SWITCH_CACHE_KEY = 'cerr_killswitch';
+const CLIENT_ERROR_KILL_SWITCH_CACHE_SECONDS = 60;
 const CLIENT_ERROR_FIELD_LIMITS = {
   message: 500,
   stack: 2000,
@@ -3813,6 +4037,27 @@ function clip(value, n) {
   return s.length > n ? s.substring(0, n) : s;
 }
 
+/**
+ * Whether the clientError endpoint is currently disabled via its Meta kill switch
+ * (SEC5). The Meta read is cached for a short window so a flood can't turn every
+ * report into a Meta-sheet scan; the trade is that flipping the switch takes up to
+ * that window to take full effect. Fails OPEN — a check failure leaves telemetry on.
+ * @returns {boolean}
+ */
+function isClientErrorDisabled() {
+  try {
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get(CLIENT_ERROR_KILL_SWITCH_CACHE_KEY);
+    if (cached !== null) return cached === '1';
+    var raw = String(getMeta(CLIENT_ERROR_KILL_SWITCH_META_KEY) || '').trim().toLowerCase();
+    var off = (raw === 'true' || raw === '1' || raw === 'yes' || raw === 'on');
+    cache.put(CLIENT_ERROR_KILL_SWITCH_CACHE_KEY, off ? '1' : '0', CLIENT_ERROR_KILL_SWITCH_CACHE_SECONDS);
+    return off;
+  } catch (e) {
+    return false; // fail open — telemetry stays on if the check itself fails
+  }
+}
+
 function handleClientError(data) {
   var errors = data.errors;
   if (!Array.isArray(errors) || errors.length === 0) {
@@ -3820,28 +4065,46 @@ function handleClientError(data) {
   }
   var batch = errors.slice(0, CLIENT_ERRORS_PER_REQUEST);
 
-  // Global budget check — bucketed by wall-clock minute so the counter
-  // self-expires. Fail-open on cache trouble: losing telemetry beats
-  // erroring, and the sheet write below is the only real cost.
+  // Kill switch: an operator can turn the whole endpoint off from the Meta sheet
+  // (SEC5). Cheap (cached) so it's safe to check on every request.
+  if (isClientErrorDisabled()) {
+    return { status: 'ok', accepted: 0, dropped: batch.length };
+  }
+
+  var sessionId = clip(data.sessionId, 40);
+
+  // Budget check — global AND per-session, both bucketed by wall-clock minute so
+  // the counters self-expire. The per-session cap stops one abusive session from
+  // spending the whole global budget and starving everyone else (SEC5). Fail-open
+  // on cache trouble: losing telemetry beats erroring, and the sheet write below
+  // is the only real cost.
   var cache = null;
-  var budgetKey = null;
   try {
     cache = CacheService.getScriptCache();
-    budgetKey = 'cerr_' + Math.floor(Date.now() / 60000);
-    var used = parseInt(cache.get(budgetKey), 10) || 0;
-    if (used >= CLIENT_ERRORS_PER_MINUTE) {
+    var minute = Math.floor(Date.now() / 60000);
+    var globalKey = 'cerr_' + minute;
+    var sessKey = sessionId ? ('cerr_s_' + sessionId + '_' + minute) : null;
+
+    var globalUsed = parseInt(cache.get(globalKey), 10) || 0;
+    var sessUsed = sessKey ? (parseInt(cache.get(sessKey), 10) || 0) : 0;
+
+    if (globalUsed >= CLIENT_ERRORS_PER_MINUTE ||
+        (sessKey && sessUsed >= CLIENT_ERRORS_PER_SESSION_PER_MINUTE)) {
       return { status: 'ok', accepted: 0, dropped: batch.length };
     }
-    if (used + batch.length > CLIENT_ERRORS_PER_MINUTE) {
-      batch = batch.slice(0, CLIENT_ERRORS_PER_MINUTE - used);
-    }
-    cache.put(budgetKey, String(used + batch.length), 120);
+
+    // Trim the batch to whichever budget (global / per-session) is tighter.
+    var allowed = CLIENT_ERRORS_PER_MINUTE - globalUsed;
+    if (sessKey) allowed = Math.min(allowed, CLIENT_ERRORS_PER_SESSION_PER_MINUTE - sessUsed);
+    if (batch.length > allowed) batch = batch.slice(0, allowed);
+
+    cache.put(globalKey, String(globalUsed + batch.length), 120);
+    if (sessKey) cache.put(sessKey, String(sessUsed + batch.length), 120);
   } catch (e) {
     // cache unavailable — accept the batch unmetered
   }
 
   var loggedAt = new Date().toISOString();
-  var sessionId = clip(data.sessionId, 40);
   var appVersion = clip(data.appVersion, 20);
   var page = clip(data.page, 300);
   var userAgent = clip(data.userAgent, 300);
