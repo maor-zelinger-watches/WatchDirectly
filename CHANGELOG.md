@@ -504,6 +504,17 @@ that component's heading.
 
 ## Backend
 
+### 1.14.4 — 2026-08-27
+- **Hotfix: reverted the `script.scriptapp` manifest scope added in 1.14.3.**
+  Adding that OAuth scope forced the anonymous (`ANYONE_ANONYMOUS`) web-app
+  deployment into a re-authorization state, so `/exec` began returning HTTP 403
+  and the live feed went blank. Removing the scope restores anonymous access. The
+  scheduled-refresh trigger consequently stays unregistered — its
+  `ScriptApp.newTrigger` call is caught and now ERROR-logged (that logging
+  improvement is kept), unchanged runtime behavior. Properly enabling the trigger
+  needs a separately-authorized path, not a manifest scope on the anonymous web
+  app (BE12 to be re-approached). All other 1.14.3 changes are retained.
+
 ### 1.14.3 — 2026-08-27
 - **Crawl throughput, sheet-read, and archive-scalability pass.** The crawl now
   writes new items in a single batched `setValues` (still `'@'`-formatted against
