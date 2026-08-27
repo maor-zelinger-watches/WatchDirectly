@@ -60,13 +60,38 @@ function remove(key) {
   } catch (e) { /* nothing to heal */ }
 }
 
+// --- cache freshness (schema version + TTL) --------------------------
+//
+// The large stale-while-revalidate snapshots (feed, search index) carry a
+// {version, savedAt} envelope. A payload whose version doesn't match this
+// build's schema, or that's older than the TTL, is treated as absent and
+// self-heals (cleared on read) exactly like a corrupt one — so a flaky build
+// can't strand a session on a months-old catalog with no way to notice.
+
+export const CACHE_VERSION = 1;      // bump when a payload's shape changes
+const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+/** Wraps a payload with the current schema version and a save timestamp. */
+function stamp(payload) {
+  return { ...payload, version: CACHE_VERSION, savedAt: Date.now() };
+}
+
+/** True only for a payload of the current version saved within the TTL. */
+function isFresh(data) {
+  return !!data
+    && data.version === CACHE_VERSION
+    && typeof data.savedAt === 'number'
+    && (Date.now() - data.savedAt) <= CACHE_MAX_AGE_MS;
+}
+
 // --- feed cache (stale-while-revalidate snapshot) --------------------
 
 /**
  * Loads the cached page-1 feed.
- * Returns {videos, total} or null. Invalid payloads (corrupt JSON,
- * non-array videos, missing/zero total — pagination math needs it)
- * are cleared and reported as absent.
+ * Returns {videos, total} or null. Payloads that are corrupt JSON, stale
+ * (wrong version or older than the TTL), or invalid (non-array videos,
+ * missing/zero total — pagination math needs it) are cleared and reported
+ * as absent.
  */
 export function loadFeedCache() {
   const raw = read(CACHE_KEYS.FEED);
@@ -74,6 +99,10 @@ export function loadFeedCache() {
 
   try {
     const data = JSON.parse(raw);
+    if (!isFresh(data)) {
+      remove(CACHE_KEYS.FEED);
+      return null;
+    }
     const videos = Array.isArray(data.videos) ? data.videos : [];
     if (videos.length === 0 || typeof data.total !== 'number' || data.total === 0) {
       remove(CACHE_KEYS.FEED);
@@ -88,19 +117,79 @@ export function loadFeedCache() {
 
 /** Saves the page-1 feed snapshot. Best-effort — quota failures are silent. */
 export function saveFeedCache(videos, total) {
-  return write(CACHE_KEYS.FEED, JSON.stringify({ videos, total }));
+  return write(CACHE_KEYS.FEED, JSON.stringify(stamp({ videos, total })));
 }
 
 export function clearFeedCache() {
   remove(CACHE_KEYS.FEED);
+  cancelPendingFeedSnapshot();
+}
+
+// Coalesced, capped feed-cache write for the hot path (votes/comments).
+//
+// A full JSON.stringify of the accumulated feed on every vote/comment (twice
+// per vote, counting the reconcile) is wasted work: the restore only needs the
+// top pages, and back-to-back mutations each re-serialize the whole list. So
+// this defers the write to an idle callback (falling back to a trailing timer),
+// keeps only the LATEST snapshot, and caps it to the first N items.
+export const FEED_CACHE_SNAPSHOT_MAX = 60; // ~6 pages at PAGE_SIZE 10; the deep
+                                           // tail re-fetches on scroll
+
+let pendingFeedSnapshot = null;
+let feedSnapshotHandle = null;
+let feedSnapshotViaIdle = false;
+
+function flushFeedSnapshot() {
+  feedSnapshotHandle = null;
+  const snap = pendingFeedSnapshot;
+  pendingFeedSnapshot = null;
+  if (!snap) return;
+  const videos = Array.isArray(snap.videos)
+    ? snap.videos.slice(0, FEED_CACHE_SNAPSHOT_MAX)
+    : snap.videos;
+  saveFeedCache(videos, snap.total);
+}
+
+/** Drops any queued snapshot so a clear isn't overwritten by a late write. */
+function cancelPendingFeedSnapshot() {
+  if (feedSnapshotHandle === null) return;
+  if (feedSnapshotViaIdle && typeof globalThis.cancelIdleCallback === 'function') {
+    globalThis.cancelIdleCallback(feedSnapshotHandle);
+  } else if (!feedSnapshotViaIdle) {
+    clearTimeout(feedSnapshotHandle);
+  }
+  feedSnapshotHandle = null;
+  pendingFeedSnapshot = null;
+}
+
+/**
+ * Queues a capped feed-cache write, coalescing bursts into one deferred save.
+ * Never writes synchronously — the actual serialization runs at idle time (or
+ * on a short trailing timer where requestIdleCallback is unavailable).
+ */
+export function saveFeedCacheSoon(videos, total) {
+  pendingFeedSnapshot = { videos, total };
+  if (feedSnapshotHandle !== null) return; // a flush is already queued
+  const ric = typeof globalThis.requestIdleCallback === 'function'
+    ? globalThis.requestIdleCallback
+    : null;
+  if (ric) {
+    feedSnapshotViaIdle = true;
+    feedSnapshotHandle = ric(flushFeedSnapshot, { timeout: 2000 });
+  } else {
+    feedSnapshotViaIdle = false;
+    feedSnapshotHandle = setTimeout(flushFeedSnapshot, 500);
+  }
 }
 
 // --- search index (full catalog, stale-while-revalidate) -------------
 
 /**
  * Loads the cached search index (the whole catalog).
- * Returns an array of videos, or null when absent/corrupt. A non-array
- * or empty payload is cleared and reported as absent so search rebuilds.
+ * Returns an array of videos, or null when absent/corrupt/stale. A payload
+ * that's the wrong version, older than the TTL, or non-array/empty is cleared
+ * and reported as absent so search rebuilds. (A stale-version catalog would
+ * otherwise run the whole session as the search corpus — see the module doc.)
  */
 export function loadSearchIndex() {
   const raw = read(CACHE_KEYS.SEARCH_INDEX);
@@ -108,7 +197,11 @@ export function loadSearchIndex() {
 
   try {
     const data = JSON.parse(raw);
-    const videos = Array.isArray(data) ? data : (Array.isArray(data.videos) ? data.videos : null);
+    if (!isFresh(data)) {
+      remove(CACHE_KEYS.SEARCH_INDEX);
+      return null;
+    }
+    const videos = Array.isArray(data.videos) ? data.videos : null;
     if (!videos || videos.length === 0) {
       remove(CACHE_KEYS.SEARCH_INDEX);
       return null;
@@ -126,7 +219,7 @@ export function loadSearchIndex() {
  */
 export function saveSearchIndex(videos) {
   if (!Array.isArray(videos) || videos.length === 0) return false;
-  return write(CACHE_KEYS.SEARCH_INDEX, JSON.stringify({ videos }));
+  return write(CACHE_KEYS.SEARCH_INDEX, JSON.stringify(stamp({ videos })));
 }
 
 export function clearSearchIndex() {
