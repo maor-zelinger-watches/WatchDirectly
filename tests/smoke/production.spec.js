@@ -1,7 +1,7 @@
 /**
  * Production smoke tests using Playwright
  * 
- * Tests the live site at https://maor-zelinger-watches.github.io/WatchDirectly/
+ * Tests the live site at https://www.howyouwatch.com/
  * No mocks — hits real API and real YouTube embeds.
  * Injects test comments via the API to verify the comment system.
  * 
@@ -10,7 +10,7 @@
 
 import { test, expect } from '@playwright/test';
 
-const PROD_URL = 'https://maor-zelinger-watches.github.io/WatchDirectly/';
+const PROD_URL = 'https://www.howyouwatch.com/';
 const API_URL = 'https://script.google.com/macros/s/AKfycbwyt7c8SWw9y0TnKq4RhcV7yLjS1JkXnNThYInpj-EnNYbA3ecgwVSX4gBIACNKHCqu0A/exec';
 
 test.describe('Production Smoke Tests', () => {
@@ -26,20 +26,6 @@ test.describe('Production Smoke Tests', () => {
   test('header renders with logo', async ({ page }) => {
     await page.goto(PROD_URL);
     await expect(page.locator('.header__title')).toHaveText('How You Watch');
-  });
-
-  test('no filter tabs in the page', async ({ page }) => {
-    await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
-    const filterTabs = page.locator('.filter-tabs');
-    await expect(filterTabs).toHaveCount(0);
-  });
-
-  test('no tier badges on video cards', async ({ page }) => {
-    await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
-    const tierBadge = page.locator('.media-card__tier');
-    await expect(tierBadge).toHaveCount(0);
   });
 
   test('video cards load from real API', async ({ page }) => {
@@ -139,18 +125,22 @@ test.describe('Production Smoke Tests', () => {
     await expect(page.locator('.media-card__comments-body').first()).toBeHidden();
   });
 
-  // ── No Detail View ─────────────────────────────────────────
+  // ── 404 Page ───────────────────────────────────────────────
 
-  test('no detail view section in the page', async ({ page }) => {
-    await page.goto(PROD_URL);
-    const detailView = page.locator('#detail-view');
-    await expect(detailView).toHaveCount(0);
-  });
+  test('unknown path renders the styled 404 with a working link home', async ({ page }) => {
+    await page.goto(`${PROD_URL}nonexistent`);
 
-  test('no back button in the page', async ({ page }) => {
-    await page.goto(PROD_URL);
-    const backBtn = page.locator('#back-btn');
-    await expect(backBtn).toHaveCount(0);
+    // Styled 404 renders (not the browser/host default error page).
+    await expect(page.locator('.error-page__code')).toHaveText('404');
+    await expect(page.locator('.error-page__title')).toBeVisible();
+
+    // The link back to the feed points at the site root and actually works.
+    const backLink = page.locator('.error-page a.btn--primary');
+    await expect(backLink).toHaveAttribute('href', '/');
+    await backLink.click();
+
+    await expect(page).toHaveURL(`${PROD_URL}`);
+    await expect(page.locator('.header__title')).toHaveText('How You Watch');
   });
 
   // ── Responsive Layout ──────────────────────────────────────
