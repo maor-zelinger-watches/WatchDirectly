@@ -12,7 +12,11 @@
        Sign-In (accounts.google.com), YouTube embeds (youtube-nocookie), the
        Apps Script backend (script.google[usercontent].com), and Google Fonts.
        img-src stays broad (https:) because article/preview images and avatars
-       come from arbitrary hosts — images are inert. -->
+       come from arbitrary hosts — images are inert.
+       Clickjacking: frame-ancestors is spec-ignored in a <meta> CSP and Pages
+       can't send X-Frame-Options, so the JS frame-buster in js/bootstrap.js is
+       the working protection — don't add frame-ancestors here expecting it to
+       take effect, and don't remove the buster. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' https://accounts.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://accounts.google.com https://www.youtube-nocookie.com https://www.youtube.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com https://oauth2.googleapis.com">
   <meta name="referrer" content="strict-origin-when-cross-origin">
 
