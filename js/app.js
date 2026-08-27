@@ -20,7 +20,7 @@ import { api } from './api-client.js';
 import { isShort, mediaType, sortVideos, typeFilterVisible } from './feed.js';
 import { loadFeedCache, saveFeedCache } from './cache.js';
 import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
-import { sanitizeHtml, cssEscape } from './utils.js';
+import { sanitizeHtml, cssEscape, safeUrl } from './utils.js';
 import { showToast } from './toast.js';
 import { buildCard, insertCardChronologically, renderList, cardTimeMs } from './cards.js';
 import { observeLazyIframe } from './lazy-iframe.js';
@@ -917,7 +917,7 @@ function updateAuthUI(user) {
   if (user) {
     container.innerHTML = `
       <div class="header__user">
-        <img src="${sanitizeHtml(user.picture)}" alt="${sanitizeHtml(user.name)}" class="header__user-avatar" referrerpolicy="no-referrer" />
+        <img src="${sanitizeHtml(safeUrl(user.picture))}" alt="${sanitizeHtml(user.name)}" class="header__user-avatar" referrerpolicy="no-referrer" />
         <span class="header__user-name">${sanitizeHtml(user.name)}</span>
         <button class="header__signout-btn" id="signout-btn">Sign out</button>
       </div>
