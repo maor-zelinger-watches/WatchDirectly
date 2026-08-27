@@ -8,6 +8,7 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { CACHE_VERSION } from '../../js/cache.js';
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -184,12 +185,9 @@ test.describe('Anti-Duplication (expected to fail — known bugs)', () => {
       mockItem(`V${String(i + 1).padStart(2, '0')}`, (i + 1) * 10)
     );
 
-    await page.addInitScript((items) => {
-      window.localStorage.setItem('wd_feed_cache', JSON.stringify({
-        videos: items,
-        total: 20,  // hasMore = true → triggers page 2 fetch
-      }));
-    }, cachedItems);
+    await page.addInitScript((cache) => {
+      window.localStorage.setItem('wd_feed_cache', JSON.stringify(cache));
+    }, { videos: cachedItems, total: 20, version: CACHE_VERSION, savedAt: Date.now() }); // hasMore = true → triggers page 2 fetch
 
     await setupBaseMocks(page);
 
@@ -369,15 +367,17 @@ test.describe('Common Issues', () => {
       mockItem('current_02', 2),
     ];
 
-    await page.addInitScript((stale) => {
+    await page.addInitScript((arg) => {
       window.localStorage.setItem('wd_feed_cache', JSON.stringify({
-        videos: [stale, ...JSON.parse('[' +
+        videos: [arg.stale, ...JSON.parse('[' +
           '{"video_id":"current_01","media_type":"video","channel_name":"Test","title":"V1","url":"u","published_at":"2026-01-01","tier":"T1","category":"Review","comment_count":0},' +
           '{"video_id":"current_02","media_type":"video","channel_name":"Test","title":"V2","url":"u","published_at":"2026-01-01","tier":"T1","category":"Review","comment_count":0}' +
         ']')],
         total: 3,
+        version: arg.v,
+        savedAt: Date.now(),
       }));
-    }, staleItem);
+    }, { stale: staleItem, v: CACHE_VERSION });
 
     await setupBaseMocks(page);
     await setupPaginatedFeed(page, freshItems);

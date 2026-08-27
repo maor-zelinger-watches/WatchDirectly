@@ -21,6 +21,18 @@ that component's heading.
 
 ## Frontend
 
+### 1.21.5 — 2026-08-27
+- **Instant cache restore + lighter cache writes.** Restoring a multi-page cached
+  feed now paints all at once via `renderList` instead of replaying the per-card
+  entrance animation, which had left the lower cards blank for up to ~5 seconds on
+  a deep cache. Vote/comment count updates coalesce their localStorage writes
+  (trailing idle-callback) and cap the persisted snapshot, instead of
+  re-serializing the whole accumulated feed on every click. Feed and search-index
+  caches now carry a version + timestamp and self-heal when stale (wrong version or
+  older than 24h), and the search-index backfill fetches only the pages it still
+  has headroom for — with bounded concurrency — rather than firing every archive
+  page and discarding the overflow.
+
 ### 1.21.4 — 2026-08-27
 - **Failed cold loads now show a retry state instead of a blank page.** A
   first-visit load that failed (offline, or an Apps Script cold-start error) used
@@ -811,6 +823,15 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.2 — 2026-08-27
+- **CI workflow added** (`.github/workflows/ci.yml`): unit + e2e on every push and
+  PR — which activates playwright.config.js's previously-dormant CI guards
+  (`forbidOnly`, retries, single worker) — with smoke + perf on a daily schedule /
+  manual dispatch so the live backend isn't hit per-push. Test hygiene rides along:
+  the smoke suite now targets the live `www.howyouwatch.com` domain (plus a 404
+  case), dead/scratch specs were removed, and the perf helpers derive their tuning
+  constants from `js/config.js` instead of a hardcoded mirror.
 
 ### 1.2.1 — 2026-08-20
 - Rebrand ride-along: npm package renamed `watchdirectly` → `howyouwatch`

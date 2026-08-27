@@ -20,6 +20,7 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { CACHE_VERSION } from '../../js/cache.js';
 
 function mockItem(prefix, i) {
   return {
@@ -205,7 +206,7 @@ test.describe('Prefetch race regressions', () => {
     await page.addInitScript((cache) => {
       window.localStorage.clear();
       window.localStorage.setItem('wd_feed_cache', JSON.stringify(cache));
-    }, { videos: staleItems, total: 60 });
+    }, { videos: staleItems, total: 60, version: CACHE_VERSION, savedAt: Date.now() });
 
     await page.goto('/');
     await expect(page.locator('.media-card')).toHaveCount(10);
@@ -259,7 +260,7 @@ test.describe('Prefetch race regressions', () => {
     await page.addInitScript((cache) => {
       window.localStorage.clear();
       window.localStorage.setItem('wd_feed_cache', JSON.stringify(cache));
-    }, { videos: staleItems, total: 60 });
+    }, { videos: staleItems, total: 60, version: CACHE_VERSION, savedAt: Date.now() });
 
     await page.goto('/');
     await expect(page.locator('.media-card')).toHaveCount(10);
@@ -320,7 +321,7 @@ test.describe('Prefetch race regressions', () => {
     await page.addInitScript((cache) => {
       window.localStorage.clear();
       window.localStorage.setItem('wd_feed_cache', JSON.stringify(cache));
-    }, { videos: items.slice(0, 40), total: 60 });
+    }, { videos: items.slice(0, 40), total: 60, version: CACHE_VERSION, savedAt: Date.now() });
 
     await page.goto('/');
     await expect(page.locator('.media-card')).toHaveCount(40);
