@@ -80,16 +80,33 @@ document.addEventListener('DOMContentLoaded', async () => {
   const versionEl = document.getElementById('app-version');
   if (versionEl) versionEl.textContent = `v${CONFIG.APP_VERSION}`;
 
-  let authRetries = 0;
-  function tryInitAuth() {
-    if (typeof google !== 'undefined' && google.accounts) {
-      initAuth(CONFIG.GOOGLE_CLIENT_ID);
-      setupAuthUI();
-    } else if (authRetries++ < 50) {
-      setTimeout(tryInitAuth, 200);
-    }
+  // Google Identity Services signals readiness through window.onGoogleLibraryLoad
+  // (its official load hook), so we wire that instead of polling for the global.
+  // The GIS script is `async defer`, so it may evaluate before or after this
+  // module: if google.accounts is already present, init straight away; otherwise
+  // let the hook fire it. A single fallback timer surfaces a toast if the script
+  // genuinely never loads (blocked, offline) rather than leaving #auth-container
+  // empty and silent forever — the feed still works signed-out.
+  let authInited = false;
+  function startAuth() {
+    if (authInited) return;
+    authInited = true;
+    initAuth(CONFIG.GOOGLE_CLIENT_ID);
+    setupAuthUI();
   }
-  tryInitAuth();
+  if (typeof google !== 'undefined' && google.accounts) {
+    startAuth();
+  } else {
+    window.onGoogleLibraryLoad = startAuth;
+    setTimeout(() => {
+      if (authInited) return;
+      if (typeof google !== 'undefined' && google.accounts) {
+        startAuth();
+      } else {
+        showToast('Sign-in is unavailable right now. Please refresh to try again.', 'error');
+      }
+    }, 10000);
+  }
 
   setupInfiniteScroll();
   setupFeedControls();

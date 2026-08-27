@@ -131,6 +131,18 @@ describe('error reporter', () => {
     expect(consoleErrorSpy).toHaveBeenCalledTimes(2); // still reaches devtools
   });
 
+  it('redacts JWT / session-token shapes from console.error before shipping (SEC8)', () => {
+    const jwt = `aaa.${'b'.repeat(40)}.${'c'.repeat(40)}`;
+    console.error('t8 leaked token:', jwt);
+    vi.advanceTimersByTime(3000);
+
+    const body = fetchBody();
+    expect(body.errors[0].message).toContain('[redacted-token]');
+    expect(body.errors[0].message).not.toContain(jwt);
+    // Devtools still sees the original, unredacted args.
+    expect(consoleErrorSpy).toHaveBeenCalledWith('t8 leaked token:', jwt);
+  });
+
   it('swallows report-delivery failures instead of erroring', async () => {
     fetchMock.mockRejectedValueOnce(new TypeError('network down'));
     dispatchError('t7 delivery boom');
