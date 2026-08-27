@@ -110,6 +110,16 @@ const LIVE_GRACE_MS = 12 * 60 * 60 * 1000;
 const PRUNE_AFTER_DAYS = 60;
 const ARCHIVE_SHEET_NAME = 'Archive';
 
+// Hard retention age for the Archive tab itself. pruneOldVideos only ever
+// APPENDS aged-out rows here, so without a second stage the tab grows without
+// bound — eventually timing its own rewrite against the 6-minute execution cap
+// and creeping toward the 10M-cell spreadsheet limit. pruneOldArchive drops
+// Archive rows whose published_at is older than this. Kept far larger than
+// PRUNE_AFTER_DAYS so nothing the live feed, Top-This-Week, or a recent deep
+// link could reach is ever removed — only deep-history items no page still
+// pages back to.
+const ARCHIVE_MAX_AGE_DAYS = 365;
+
 // The Archive tab, sorted newest-first, is cached whole so the frontend's
 // multi-page full-history index build costs one scan+sort per cache window
 // instead of one per page. Dropped whenever a crawl adds to the archive; an
@@ -934,13 +944,20 @@ function crawlAllFeeds() {
   // the head/top-week caches repopulate against the pruned totals.
   var archived = pruneOldVideos();
 
+  // Second-stage retention: drop archived rows past the hard age cap so the
+  // Archive tab itself stays bounded (pruneOldVideos only ever appends to it).
+  // Takes its own lock, like pruneOldVideos, and invalidates the archive cache
+  // when it removes anything.
+  var retired = pruneOldArchive();
+
   // The crawl appended rows and refreshed view counts / live state in place —
   // the cached head and the cached top-week window no longer reflect the sheet.
   invalidateFeedHead();
   invalidateTopWeek();
 
   log('INFO', 'fetchAllFeeds', 'Refresh complete. New: ' + newCount + ', Errors: ' + errorCount +
-    ', Archived: ' + archived + (stoppedEarly ? ', stopped early (resume=' + nextResumeIndex + ')' : ''));
+    ', Archived: ' + archived + ', Retired: ' + retired +
+    (stoppedEarly ? ', stopped early (resume=' + nextResumeIndex + ')' : ''));
   return { new_videos: newCount, errors: errorCount, archived: archived, stopped_early: stoppedEarly };
 }
 
@@ -1054,6 +1071,84 @@ function pruneOldVideos() {
     return archive.length;
   } catch (e) {
     log('ERROR', 'pruneOldVideos', e.message);
+    return 0;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Second-stage retention for the Archive tab. pruneOldVideos only ever APPENDS
+ * to the archive, so the tab grows unbounded; this removes rows whose
+ * published_at is older than ARCHIVE_MAX_AGE_DAYS, keeping the tab (and its
+ * every-crawl rewrite) bounded.
+ *
+ * Runs after pruneOldVideos and takes the script lock itself, the same
+ * discipline pruneOldVideos uses, so it can't race a concurrent writer touching
+ * the same spreadsheet. Rewrites the Archive tab as header + survivors in one
+ * pass, then trims the surplus trailing rows — mirroring pruneOldVideos' live
+ * rewrite. A row with a missing/unparseable published_at can't be aged, so it's
+ * kept (matching pruneOldVideos). On any removal it invalidates the archive
+ * cache (which bumps the generation), so every cached page/full-list payload
+ * stamped before the removal becomes a miss rather than serving dropped rows.
+ *
+ * @returns {number} count of removed rows
+ */
+function pruneOldArchive() {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return 0; // busy — the next crawl reattempts
+  }
+  try {
+    var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS);
+    var sheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
+    if (!sheet) return 0; // never pruned yet — no archive to retire from
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return 0;
+
+    var headers = data[0];
+    var pubCol = headers.indexOf('published_at');
+    if (pubCol === -1) return 0; // can't age rows without a publish time
+
+    var cutoff = Date.now() - ARCHIVE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+    var keep = [];
+    var removed = 0;
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      var t = new Date(row[pubCol]).getTime();
+      // Undateable rows can't be aged out — keep them, mirroring pruneOldVideos.
+      if (isNaN(t) || t >= cutoff) {
+        keep.push(row);
+      } else {
+        removed++;
+      }
+    }
+
+    if (removed === 0) return 0;
+
+    // Rewrite as header + survivors: overwrite the top rows in one call, then
+    // physically remove the surplus trailing rows the survivors no longer fill.
+    var origDataRows = data.length - 1;
+    if (keep.length > 0) {
+      sheet.getRange(2, 1, keep.length, headers.length).setValues(keep);
+    }
+    var surplus = origDataRows - keep.length;
+    if (surplus > 0) {
+      sheet.deleteRows(keep.length + 2, surplus);
+    }
+
+    // Rows left the archive — bump the generation so every cached archive page
+    // (and the full-list snapshot) stamped before this read is now a miss.
+    invalidateArchive();
+
+    log('INFO', 'pruneOldArchive', 'Removed ' + removed + ' archived rows past ' +
+      ARCHIVE_MAX_AGE_DAYS + 'd; ' + keep.length + ' remain');
+    return removed;
+  } catch (e) {
+    log('ERROR', 'pruneOldArchive', e.message);
     return 0;
   } finally {
     lock.releaseLock();
@@ -2452,6 +2547,22 @@ function invalidateArchive() {
  * search-index build already consumes from the feed, so the same chunked
  * fetch-and-merge loop drives it. Read-only.
  *
+ * Each page is cached under its OWN key (page + clamped limit). A page holds at
+ * most `limit` (<= MAX_PAGE_LIMIT) items, so its cache value always fits — unlike
+ * the single whole-archive value in readSortedArchive, which silently stops
+ * caching once the ever-growing archive outgrows the cache-value limit and then
+ * re-scans+sorts per page. Once a page is warm, serving it costs no sheet read
+ * at all, and the value size is bounded by `limit` however large the tab grows.
+ *
+ * The page cache is generation-stamped through the same readCachedSortedList /
+ * putCachedSortedList cores cachedSortedList uses (the low-level cores rather
+ * than cachedSortedList itself, so the whole-archive `total` — not the page
+ * length — rides along on the payload). invalidateArchive's generation bump
+ * therefore drops every cached page at once, no per-page key enumeration needed.
+ * A cold page still shares ONE scan+sort across a multi-page burst: the miss
+ * path derives from readSortedArchive, whose full-list snapshot is itself cached
+ * for the burst.
+ *
  * @param {Object} params - { page, limit }
  * @returns {Object} { status:'ok', videos, total, page }
  */
@@ -2461,10 +2572,23 @@ function handleArchive(params) {
   var page = Math.max(1, parseInt(params.page) || 1);
   var limit = Math.min(Math.max(1, parseInt(params.limit) || DEFAULT_PAGE_LIMIT), MAX_PAGE_LIMIT);
 
+  var pageKey = ARCHIVE_CACHE_KEY + '_p' + page + '_l' + limit;
+
+  // Fresh hit: serve this page (and its archive-wide total) without any read.
+  var cached = readCachedSortedList(pageKey, { requireTotal: true });
+  if (cached) {
+    return { status: 'ok', videos: cached.videos, total: cached.total, page: page };
+  }
+
+  // Miss: capture the generation BEFORE the read so a concurrent invalidate that
+  // lands during it refuses the now-stale page below, then derive from the
+  // shared sorted list (cached, so a multi-page burst pays one scan+sort).
+  var gen = currentCacheGeneration();
   var videos = readSortedArchive();
   var start = (page - 1) * limit;
   var paged = start >= 0 ? videos.slice(start, start + limit) : [];
 
+  putCachedSortedList(pageKey, ARCHIVE_CACHE_SECONDS, { videos: paged, total: videos.length }, gen);
   return { status: 'ok', videos: paged, total: videos.length, page: page };
 }
 
