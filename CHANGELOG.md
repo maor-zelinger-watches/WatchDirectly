@@ -864,6 +864,19 @@ that component's heading.
 
 ## Repo
 
+### 1.2.3 — 2026-08-27
+- **Backend deploys are now staging-gated, health-checked, and self-rolling-back.**
+  `npm run deploy:backend` deploys to the dev Apps Script project first
+  (`apps-script/.clasp.staging.json`, targeted via `clasp -P`) and health-checks
+  its `/exec`, then promotes to prod and health-checks that — curling
+  `/exec?action=feed` for HTTP 200 + JSON + a matching `version`, retrying for
+  propagation — and on prod failure re-pushes the origin/main backend snapshot
+  and redeploys (a version-pointer redeploy can't clear a scope-re-auth state).
+  A manifest OAuth-scope change is **hard-blocked** (it 403s the anonymous web app
+  until re-auth, and staging can't reliably catch it because the dev project's
+  auth state differs); override with `ALLOW_SCOPE_CHANGE=1` after authorizing the
+  scope by hand. Motivated by the 2026-08-27 `script.scriptapp` outage.
+
 ### 1.2.2 — 2026-08-27
 - **CI workflow added** (`.github/workflows/ci.yml`): unit + e2e on every push and
   PR — which activates playwright.config.js's previously-dormant CI guards

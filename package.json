@@ -1,6 +1,6 @@
 {
   "name": "howyouwatch",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Chronological watch content aggregator with community comments",
   "type": "module",
   "scripts": {
