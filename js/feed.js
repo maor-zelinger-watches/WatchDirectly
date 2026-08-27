@@ -275,6 +275,33 @@ const TIER_SUBSTR = 30;   // query token appears inside the field
 const TIER_FUZZY = 12;    // within one typo of a field token
 const FUZZY_MIN_LEN = 4;  // don't fuzzy-match very short tokens
 
+/**
+ * Computes and caches the per-video fields scoring reads: the tokenized and
+ * diacritic-normalized title and channel. These are intrinsic to the row, so
+ * they're memoized once on the object (`_searchFields`) — recomputing them for
+ * every video on every keystroke was the search hot path (FE10). Called at
+ * index merge time so the cache is warm before the first query; scoreVideo
+ * also lazily fills it for any row that skipped that path.
+ *
+ * The channel's HOST is deliberately NOT cached here: the channel→host map
+ * loads asynchronously (and can change), so it's resolved per query instead.
+ *
+ * @param {Object} v - a media item
+ * @returns {{titleTokens: string[], channelTokens: string[], titleNorm: string, channelNorm: string}}
+ */
+export function searchFields(v) {
+  let f = v._searchFields;
+  if (!f) {
+    f = v._searchFields = {
+      titleTokens: tokenize(v.title),
+      channelTokens: tokenize(v.channel_name),
+      titleNorm: normalizeText(v.title),
+      channelNorm: normalizeText(v.channel_name),
+    };
+  }
+  return f;
+}
+
 /** Best tier score for one query token against one field's tokens + raw text. */
 function scoreToken(qt, fieldTokens, fieldNorm) {
   let best = 0;
@@ -303,10 +330,7 @@ const FIELD_WEIGHT_HOST = 2;
  * more words narrows the result). 0 means "no match".
  */
 function scoreVideo(v, queryTokens, hostsByChannel) {
-  const titleTokens = tokenize(v.title);
-  const channelTokens = tokenize(v.channel_name);
-  const titleNorm = normalizeText(v.title);
-  const channelNorm = normalizeText(v.channel_name);
+  const { titleTokens, channelTokens, titleNorm, channelNorm } = searchFields(v);
   const hostName = hostsByChannel ? hostsByChannel[v.channel_name] || '' : '';
   const hostTokens = hostName ? tokenize(hostName) : [];
   const hostNorm = hostName ? normalizeText(hostName) : '';

@@ -20,9 +20,9 @@ import { api } from './api-client.js';
 import { isShort, mediaType, sortVideos, typeFilterVisible } from './feed.js';
 import { loadFeedCache, saveFeedCache } from './cache.js';
 import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
-import { sanitizeHtml } from './utils.js';
+import { sanitizeHtml, cssEscape } from './utils.js';
 import { showToast } from './toast.js';
-import { buildCard, insertCardChronologically, renderList } from './cards.js';
+import { buildCard, insertCardChronologically, renderList, cardTimeMs } from './cards.js';
 import { observeLazyIframe } from './lazy-iframe.js';
 import {
   serverHasMore, cursorAfter,
@@ -412,7 +412,7 @@ async function appendCards(videos) {
   // Deduplicate: skip items already rendered in the DOM
   const deduped = videos.filter(video => {
     const id = video.video_id;
-    return id && !feedContainer.querySelector(`[data-video-id="${id}"]`);
+    return id && !feedContainer.querySelector(`[data-video-id="${cssEscape(id)}"]`);
   });
   if (deduped.length === 0) return;
 
@@ -544,7 +544,7 @@ async function revalidateFeed() {
           const container = document.getElementById('feed-container');
           if (container) {
             for (const fv of freshVideos) {
-              const toggle = container.querySelector(`.media-card__comments-toggle[data-video-id="${fv.video_id}"]`);
+              const toggle = container.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(fv.video_id)}"]`);
               if (toggle) toggle.textContent = `💬 ${fv.comment_count || 0} comments`;
             }
           }
@@ -674,7 +674,7 @@ async function revalidateFeed() {
     // --- 2. Update comment counts on surviving cards ---
     for (const video of freshVideos) {
       if (existingIdSet.has(video.video_id)) {
-        const toggle = document.querySelector(`.media-card__comments-toggle[data-video-id="${video.video_id}"]`);
+        const toggle = document.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(video.video_id)}"]`);
         if (toggle) {
           const freshCount = video.comment_count || 0;
           toggle.textContent = `💬 ${freshCount} comments`;
@@ -716,7 +716,7 @@ async function revalidateFeed() {
     // left untouched: it's position:fixed and playing; moving it would reload.
     const sortedCards = [...container.querySelectorAll('.media-card')]
       .filter(c => c.dataset.videoId !== state.fullscreenVideoId)
-      .sort((a, b) => new Date(b.dataset.publishedAt || 0) - new Date(a.dataset.publishedAt || 0));
+      .sort((a, b) => cardTimeMs(b) - cardTimeMs(a));
     let prevCard = null;
     for (const card of sortedCards) {
       const desired = prevCard ? prevCard.nextElementSibling : container.firstElementChild;

@@ -12,8 +12,8 @@
 import { state, isFilterActive, activeFilter, typeFilterActive } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
-import { filterVideos, sortVideos, dedupeVideos, mergeTopRanking, typeFilterVisible } from './feed.js';
-import { renderList, buildChannelCard } from './cards.js';
+import { filterVideos, sortVideos, dedupeVideos, mergeTopRanking, typeFilterVisible, searchFields } from './feed.js';
+import { renderList, reconcileList, buildChannelCard } from './cards.js';
 import { prefetchComments } from './comments-ui.js';
 import { exitFullscreen } from './fullscreen.js';
 import { isSignedIn } from './auth.js';
@@ -91,8 +91,59 @@ function indexKey(v) {
  */
 function mergeIndexChunk(index, chunkVideos) {
   const fresh = dedupeVideos(chunkVideos); // collapse intra-fetch doubles
+  // Warm each row's normalized search tokens once, here at merge time, so the
+  // per-keystroke filter pass reads a cache instead of re-tokenizing the whole
+  // index on every progress render (FE10).
+  for (const v of fresh) searchFields(v);
   const freshKeys = new Set(fresh.map(indexKey));
   return sortVideos(index.filter(v => !freshKeys.has(indexKey(v))).concat(fresh));
+}
+
+// Frame scheduler with a timer fallback for environments without rAF.
+const scheduleFrame = typeof requestAnimationFrame === 'function'
+  ? (cb) => requestAnimationFrame(cb)
+  : (cb) => setTimeout(cb, 250);
+
+/**
+ * Coalesces a burst of progress renders into ~1 per animation frame (FE10).
+ * A search session merges a dozen-plus index chunks; without throttling each
+ * merge re-ran the full match-and-paint. Leading-edge: the first call renders
+ * synchronously (so the seeded first paint stays instant) and any further calls
+ * within that frame collapse into a single trailing render on the next frame.
+ * `.cancel()` drops a pending trailing render before the authoritative final one.
+ */
+function throttleToFrame(fn) {
+  let scheduled = false;
+  let trailing = false;
+  let lastArgs = [];
+  const flush = () => {
+    scheduled = false;
+    if (trailing) { trailing = false; fn(...lastArgs); }
+  };
+  const wrapper = (...args) => {
+    lastArgs = args;
+    if (scheduled) { trailing = true; return; }
+    scheduled = true;
+    fn(...args);
+    scheduleFrame(flush);
+  };
+  wrapper.cancel = () => { scheduled = false; trailing = false; };
+  return wrapper;
+}
+
+/**
+ * Keeps state.expandedComments consistent with a diffed list: an entry for a
+ * card the diff dropped no longer tracks a live thread. The fullscreen overlay
+ * is always retained (it stays mounted even when filtered out of the list).
+ * Replaces the blanket `expandedComments.clear()` that the old innerHTML=''
+ * renders needed — the diff preserves surviving cards, so their entries stay.
+ */
+function syncExpandedComments(keepIds) {
+  for (const id of [...state.expandedComments]) {
+    if (!keepIds.has(id) && id !== state.fullscreenVideoId) {
+      state.expandedComments.delete(id);
+    }
+  }
 }
 
 /**
@@ -717,9 +768,14 @@ async function renderStarred() {
     if (isFilterActive()) list = filterVideos(list, activeFilter()).slice(0, CONFIG.SEARCH_RENDER_LIMIT);
 
     state.renderToken++;
-    container.innerHTML = '';
-    state.expandedComments.clear();
-    renderList(container, list);
+    // Diff by video_id (FE10): reconcile as fresh index chunks land instead of
+    // wiping the container each time — surviving starred cards keep their
+    // expanded comments and playing iframe. Strip any truncation note a prior
+    // Latest-search render may have left in this shared container.
+    const prevNote = container.querySelector('.feed-truncation-note');
+    if (prevNote) prevNote.remove();
+    reconcileList(container, list);
+    syncExpandedComments(new Set(list.map(v => String(v.video_id))));
     painted = true;
 
     empty.querySelector('p').textContent = state.myStars.size === 0
@@ -737,9 +793,13 @@ async function renderStarred() {
     if (final) prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
   };
 
+  // Throttle the per-chunk progress renders to ~1/frame (FE10); the seed fires
+  // synchronously on the leading edge so the first paint stays instant.
+  const throttledRender = throttleToFrame((idx) => renderFrom(idx, false));
+
   // Kicks off the index (seeds synchronously from cache/memory, fires onProgress
   // for any seed and again per chunk); resolves with the authoritative index.
-  const indexPromise = ensureSearchIndex(partial => renderFrom(partial, false));
+  const indexPromise = ensureSearchIndex(partial => throttledRender(partial));
   // Guarantee a first paint even when the seed was empty (cold, no cache): clear
   // the previous view and show the searching state rather than leaving it blank.
   if (!painted) renderFrom(state.searchIndex || [], false);
@@ -748,6 +808,7 @@ async function renderStarred() {
   try {
     index = await indexPromise;
   } catch (error) {
+    throttledRender.cancel();
     if (token !== state.filterRenderToken || state.view !== 'starred') return;
     console.error('Failed to load starred feed:', error);
     showToast('Favorite feed is unavailable right now. Please try again.', 'error');
@@ -763,6 +824,7 @@ async function renderStarred() {
     return;
   }
 
+  throttledRender.cancel(); // drop any pending partial render before the final one
   renderFrom(index, true);
 }
 
@@ -950,9 +1012,14 @@ async function applyFilter() {
     // paint the whole index — cap the render; results are ranked best-first.
     const shown = matches.slice(0, CONFIG.SEARCH_RENDER_LIMIT);
     state.renderToken++;
-    container.innerHTML = '';
-    state.expandedComments.clear();
-    renderList(container, shown);
+    // Diff by video_id instead of innerHTML='' (FE10): a card that survives
+    // from the previous (partial) result keeps its expanded comment thread and
+    // promoted/playing iframe across every incremental index chunk, instead of
+    // being wiped and rebuilt ~15× per search session.
+    const prevNote = container.querySelector('.feed-truncation-note');
+    if (prevNote) prevNote.remove();
+    reconcileList(container, shown);
+    syncExpandedComments(new Set(shown.map(v => String(v.video_id))));
     if (matches.length > shown.length) {
       const note = document.createElement('p');
       note.className = 'feed-truncation-note';
@@ -971,19 +1038,26 @@ async function applyFilter() {
     if (final) prefetchComments(shown.slice(0, CONFIG.PAGE_SIZE));
   };
 
+  // Throttle the per-chunk progress renders to ~1/frame (FE10); the final
+  // render below is authoritative and runs unthrottled.
+  const throttledRender = throttleToFrame(renderMatches);
+
   let index;
   try {
     // Render each chunk as it lands; the promise resolves with the full index.
-    index = await ensureSearchIndex(partial => renderMatches(partial, false));
+    index = await ensureSearchIndex(partial => throttledRender(partial, false));
   } catch (error) {
+    throttledRender.cancel();
     if (token !== state.filterRenderToken || state.view !== 'latest') return;
     console.error('Failed to load search index:', error);
     showToast('Search is unavailable right now. Please try again.', 'error');
     return;
   }
 
+  throttledRender.cancel(); // drop any pending partial render before the final one
   renderMatches(index, true);
 }
 
-// Internal seams exposed for unit tests (bounded fan-out / archive headroom).
-export const __test__ = { buildSearchIndex, appendArchiveToIndex, runBounded };
+// Internal seams exposed for unit tests (bounded fan-out / archive headroom /
+// progress-render throttle).
+export const __test__ = { buildSearchIndex, appendArchiveToIndex, runBounded, throttleToFrame };
