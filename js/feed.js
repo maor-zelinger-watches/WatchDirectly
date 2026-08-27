@@ -43,9 +43,25 @@ export function mediaType(item) {
 }
 
 /**
+ * True when `video` is left visible by the content-type chip selection.
+ * An empty selection means "All" — everything shows. Otherwise a video is
+ * visible only when its mediaType() is one of the selected types. Mirrors the
+ * CSS `feed--hide-<type>` rules applyTypeVisibility writes, so pagination can
+ * count "newly visible" cards without measuring rendered layout.
+ *
+ * @param {Object} video - Media item from the API
+ * @param {string[]} types - the selected content types (state.filter.types)
+ * @returns {boolean}
+ */
+export function typeFilterVisible(video, types) {
+  if (!Array.isArray(types) || types.length === 0) return true;
+  return types.includes(mediaType(video));
+}
+
+/**
  * Creates an HTML string for a media card (video or article) in the feed.
  * Uses CSS Grid: thumbnail left, info right, comments below.
- * 
+ *
  * @param {Object} item - Media item data from the API
  * @returns {string} HTML string for the card
  */

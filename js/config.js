@@ -35,4 +35,13 @@ export const CONFIG = {
                               // pulls — a near-empty type must not fetch the
                               // whole catalog in one burst; scrolling (or the
                               // next chip click) continues from where it left off
+  FILTER_ZERO_YIELD_MAX_PAGES: 5, // consecutive fetched pages that add NO card
+                              // the active content-type chip leaves visible
+                              // before the sentinel-retrigger parks. The chips
+                              // hide cards via CSS, so a fully-hidden page adds
+                              // zero height and the sentinel never leaves view —
+                              // without this cap the rAF nudge would walk the
+                              // whole catalog 10 items/page (FE1). Pagination
+                              // resumes on the next chip change or a deliberate
+                              // scroll; it is never permanently disabled.
 };

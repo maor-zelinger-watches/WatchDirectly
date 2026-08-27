@@ -15,9 +15,9 @@
  */
 
 import { CONFIG } from './config.js';
-import { state, isFilterActive } from './state.js';
+import { state, isFilterActive, typeFilterActive } from './state.js';
 import { api } from './api-client.js';
-import { isShort, mediaType, sortVideos } from './feed.js';
+import { isShort, mediaType, sortVideos, typeFilterVisible } from './feed.js';
 import { loadFeedCache, saveFeedCache } from './cache.js';
 import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
 import { sanitizeHtml } from './utils.js';
@@ -46,8 +46,30 @@ setOnStarsChanged(() => {
 // A content-type chip change may leave the filtered Latest feed too shallow —
 // registered here (not in views.js) because pagination lives in this module.
 setOnTypeFilterChanged(() => {
+  // A chip change is explicit intent: clear any parked pagination on BOTH feeds
+  // (see FILTER_ZERO_YIELD_MAX_PAGES) and re-reveal the sentinel for whichever
+  // one is active, so the new selection can fill and scroll again (FE1 resume).
+  state.filterZeroYieldStreak = 0;
+  state.topFilterZeroYieldStreak = 0;
+  const sentinel = document.getElementById('load-more-container');
+  if (sentinel && !isFilterActive()) {
+    if (state.view === 'latest' && state.hasMore) sentinel.style.display = '';
+    else if (state.view === 'top' && state.topHasMore) sentinel.style.display = '';
+  }
   topUpTypeFilter();
 });
+
+/**
+ * Whether the Latest feed's sentinel-retrigger is parked: a content-type chip
+ * is active AND the last FILTER_ZERO_YIELD_MAX_PAGES fetched pages each added
+ * no visible card. Parking stops the rAF nudge from walking the whole catalog
+ * behind an all-hidden filter (FE1). Cleared by setOnTypeFilterChanged (chip
+ * change) or the infinite-scroll observer (a genuine scroll into view).
+ */
+function filterPaginationParked() {
+  return typeFilterActive() &&
+    state.filterZeroYieldStreak >= CONFIG.FILTER_ZERO_YIELD_MAX_PAGES;
+}
 
 // ============================================================
 // INITIALIZATION
@@ -95,6 +117,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 async function loadNextPage() {
   if (state.loading || state.revalidating || !state.hasMore || isFilterActive() || state.view !== 'latest') return;
+  // A content-type chip is hiding every fetched page — pagination is parked
+  // until the selection changes or the user scrolls with intent. Refuse here so
+  // NO caller (the rAF nudge, the top-up loop, a revalidation nudge) can restart
+  // the fetch storm while parked (FE1). Keep the sentinel hidden to match.
+  if (filterPaginationParked()) {
+    const parkedSentinel = document.getElementById('load-more-container');
+    if (parkedSentinel) parkedSentinel.style.display = 'none';
+    return;
+  }
   state.loading = true;
   let loadFailed = false;
 
@@ -163,6 +194,9 @@ async function loadNextPage() {
       // Start filling the read-ahead buffer so the first scroll is instant
       refillPrefetchBuffer();
 
+      // Page 1 is the baseline for the zero-yield guard — never park on it.
+      state.filterZeroYieldStreak = 0;
+
       if (state.videos.length === 0) {
         empty.style.display = '';
       }
@@ -209,6 +243,17 @@ async function loadNextPage() {
 
       await appendCards(uniqueNewVideos);
 
+      // Track pages that add nothing the active type chip leaves visible. When
+      // a chip filter hides every card the page adds zero height, so the rAF
+      // retrigger below would fetch forever; a run of these parks it (FE1).
+      if (typeFilterActive()) {
+        const visibleAdded = uniqueNewVideos.reduce(
+          (n, v) => n + (typeFilterVisible(v, state.filter.types) ? 1 : 0), 0);
+        state.filterZeroYieldStreak = visibleAdded > 0 ? 0 : state.filterZeroYieldStreak + 1;
+      } else {
+        state.filterZeroYieldStreak = 0;
+      }
+
       // Persist the grown feed so a refresh restores every page the user
       // scrolled through — not just page 1. showCachedFeed repaints the whole
       // cached list; revalidateFeed then reconciles only its front (see there).
@@ -235,6 +280,12 @@ async function loadNextPage() {
     if (!loadFailed) state.feedErrorStreak = 0;
 
     if (!state.hasMore || isFilterActive() || state.view !== 'latest') {
+      sentinel.style.display = 'none';
+    } else if (filterPaginationParked()) {
+      // A content-type chip is hiding every fetched card, so the page added no
+      // height and the sentinel never left view — the rAF nudge below would
+      // recurse through the whole catalog. Park: hide the sentinel and stop
+      // nudging until the chip selection changes or the user scrolls (FE1).
       sentinel.style.display = 'none';
     } else {
       sentinel.style.display = '';
@@ -682,11 +733,17 @@ function setupInfiniteScroll() {
   const scrollObserver = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
       if (!entry.isIntersecting) return;
+      // A genuine scroll bringing the sentinel into view is user intent — clear
+      // the zero-yield park so a sparse type filter can pull a fresh bounded
+      // burst instead of staying stuck (FE1 resume path). The rAF self-nudge
+      // does NOT come through here, so only real scrolls reset the streak.
       // Route to the active feed's loader. Each self-guards (loading / hasMore /
       // view / filter), so a stray fire on the wrong tab is a harmless no-op.
       if (state.view === 'top') {
+        state.topFilterZeroYieldStreak = 0;
         loadMoreTop();
       } else if (!state.loading && state.hasMore) {
+        state.filterZeroYieldStreak = 0;
         loadNextPage();
       }
     });

@@ -9,10 +9,10 @@
  * are already in memory.
  */
 
-import { state, isFilterActive, activeFilter } from './state.js';
+import { state, isFilterActive, activeFilter, typeFilterActive } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
-import { filterVideos, sortVideos, dedupeVideos, mergeTopRanking } from './feed.js';
+import { filterVideos, sortVideos, dedupeVideos, mergeTopRanking, typeFilterVisible } from './feed.js';
 import { renderList, buildChannelCard } from './cards.js';
 import { prefetchComments } from './comments-ui.js';
 import { exitFullscreen } from './fullscreen.js';
@@ -379,6 +379,11 @@ async function switchView(view) {
   const token = ++viewToken;
   state.view = view;
 
+  // A tab switch is explicit intent — clear any parked zero-yield pagination so
+  // the newly-entered feed can fill and scroll again from a clean slate (FE1).
+  state.filterZeroYieldStreak = 0;
+  state.topFilterZeroYieldStreak = 0;
+
   document.querySelectorAll('.feed-tab').forEach(t => {
     const active = t.dataset.view === view;
     t.classList.toggle('feed-tab--active', active);
@@ -535,6 +540,19 @@ async function revalidateTop() {
 }
 
 /**
+ * Whether the Top feed's sentinel-retrigger is parked: a content-type chip is
+ * active AND the last FILTER_ZERO_YIELD_MAX_PAGES appended pages each added no
+ * visible card. Mirrors app.js's Latest-feed guard — the chips hide cards via
+ * CSS, so an all-hidden page adds zero height and the rAF nudge would walk the
+ * whole ranking (FE1). Cleared on a chip change, a genuine scroll, or a tab
+ * switch.
+ */
+function topFilterPaginationParked() {
+  return typeFilterActive() &&
+    state.topFilterZeroYieldStreak >= CONFIG.FILTER_ZERO_YIELD_MAX_PAGES;
+}
+
+/**
  * Loads and appends the next page of the Top This Week ranking. The list is
  * cursor-paginated and vote-ranked server-side; new cards append in rank order
  * (no re-render of what's already shown). An active search query pauses this —
@@ -545,6 +563,14 @@ async function revalidateTop() {
  */
 export async function loadMoreTop() {
   if (state.view !== 'top' || state.topLoading || !state.topHasMore || isFilterActive()) return;
+  // A content-type chip is hiding every appended page — pagination is parked
+  // until the selection changes or the user scrolls with intent. Refuse here so
+  // neither the rAF nudge nor the observer can restart the storm while parked.
+  if (topFilterPaginationParked()) {
+    const parkedSentinel = document.getElementById('load-more-container');
+    if (parkedSentinel) parkedSentinel.style.display = 'none';
+    return;
+  }
   if (!state.topCursor) { state.topHasMore = false; return; }
 
   const token = viewToken;
@@ -572,6 +598,18 @@ export async function loadMoreTop() {
       const container = document.getElementById('feed-container');
       if (container) renderList(container, fresh);
     }
+
+    // Track pages that add nothing the active type chip leaves visible — a run
+    // of them parks the retrigger below so a sparse type can't walk the whole
+    // ranking behind an all-hidden filter (FE1).
+    if (typeFilterActive()) {
+      const visibleAdded = fresh.reduce(
+        (n, v) => n + (typeFilterVisible(v, state.filter.types) ? 1 : 0), 0);
+      state.topFilterZeroYieldStreak = visibleAdded > 0 ? 0 : state.topFilterZeroYieldStreak + 1;
+    } else {
+      state.topFilterZeroYieldStreak = 0;
+    }
+
     prefetchComments(fresh);
   } catch (e) {
     loadFailed = true;
@@ -582,7 +620,9 @@ export async function loadMoreTop() {
     state.topLoading = false;
     if (!loadFailed) state.topErrorStreak = 0;
     if (token === viewToken && state.view === 'top') {
-      const show = state.topHasMore && !isFilterActive();
+      // Parked (all fetched cards hidden by the type chip): hide the sentinel
+      // and skip the rAF nudge, exactly like app.js's Latest guard (FE1).
+      const show = state.topHasMore && !isFilterActive() && !topFilterPaginationParked();
       if (sentinel) sentinel.style.display = show ? '' : 'none';
       if (show && sentinel) {
         if (loadFailed) {
