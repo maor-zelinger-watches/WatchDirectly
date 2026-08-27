@@ -21,6 +21,16 @@ that component's heading.
 
 ## Frontend
 
+### 1.21.3 — 2026-08-27
+- **Bounded the content-type filter's page-fetch storm.** Selecting a chip that
+  hides every card on a fetched page (e.g. "Shorts" against a mostly long-form
+  catalog) used to walk the entire catalog: hidden cards add zero height, so the
+  load-more sentinel never left view and the `requestAnimationFrame` retrigger
+  re-fired immediately, each pass also refilling the prefetch buffer and
+  re-serializing the whole feed cache. A zero-visible-yield streak now parks
+  pagination after `FILTER_ZERO_YIELD_MAX_PAGES`, resuming on a chip change, tab
+  switch, or genuine scroll; the unfiltered feed still auto-fills as before.
+
 ### 1.21.2 — 2026-08-22
 - **Header now carries an "Alpha" label instead of the watch emoji.** The
   `⌚` logo icon on all four pages (index, terms, privacy, 404) is replaced
@@ -453,6 +463,24 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.14.1 — 2026-08-27
+- **Hardened write-handler input validation and closed formula-injection gaps.**
+  Every write path now validates ids (`isValidId`, `[A-Za-z0-9_-]{1,64}`). The
+  Votes writer reserves and `'@'`-formats its row like the Comments/Stars writers,
+  so a `videoId` of `=IMPORTXML(…)` can no longer execute against the user-email
+  column, and the crawl's new-row append gets the same plain-text format so a
+  hostile RSS title/url can't seed a live formula. `commentsBatch` builds its
+  accumulator with `Object.create(null)` so a `video_id` of `constructor`/
+  `toString` can't crash the whole feed's comment-count hydration, and a reply's
+  `parentId` is verified to exist on the same video before it is threaded.
+- **Cache-generation guard against the repopulation-vs-invalidation race.** The
+  three copy-pasted feed/top-week/archive cache triads are unified behind
+  `cachedSortedList`, and a monotonic `CACHE_GENERATION` (Script Property) is
+  captured before each sheet scan and stamped into the cached payload. A read
+  that began before a concurrent vote/comment/crawl invalidation can no longer
+  reinstall its stale snapshot for the full TTL — the late write is refused, and
+  any stale-stamped entry is treated as a miss on the next read.
 
 ### 1.14.0 — 2026-08-20
 - **New `clientError` action: frontend error intake.** Accepts the error
