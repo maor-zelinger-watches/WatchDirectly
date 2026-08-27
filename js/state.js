@@ -59,6 +59,15 @@ export const state = {
   fullscreenReturnId: null,     // topmost visible card before fullscreen (scroll anchor)
   fullscreenReturnScrollY: 0,   // exact scroll offset before fullscreen
   fullscreenReturnAnchorTop: null, // the anchor card's viewport offset before fullscreen
+
+  // Consecutive fetched pages that added no card the active content-type chip
+  // leaves visible. The chips hide cards via CSS, so a fully-hidden page adds
+  // zero height and the sentinel never leaves view; once either streak reaches
+  // CONFIG.FILTER_ZERO_YIELD_MAX_PAGES the sentinel-retrigger parks so a sparse
+  // type can't walk the whole catalog (FE1). Reset on a chip change, a genuine
+  // scroll, or a tab switch — pagination is never permanently disabled.
+  filterZeroYieldStreak: 0,    // Latest feed (app.js loadNextPage)
+  topFilterZeroYieldStreak: 0, // Top This Week feed (views.js loadMoreTop)
 };
 
 export function isFilterActive() {
@@ -66,6 +75,15 @@ export function isFilterActive() {
   // The type chips (filter.types) are a pure CSS visibility filter and must
   // NOT pause pagination — the feed keeps loading beneath them.
   return !!state.filter.query.trim();
+}
+
+/**
+ * Whether a content-type chip selection is currently narrowing the feed.
+ * Empty === "All" (nothing hidden). Unlike isFilterActive(), this DOES reflect
+ * the type chips — it gates the zero-yield pagination guard, not rendering.
+ */
+export function typeFilterActive() {
+  return state.filter.types.length > 0;
 }
 
 /** The current filter plus the channel→host map used for query matching. */
