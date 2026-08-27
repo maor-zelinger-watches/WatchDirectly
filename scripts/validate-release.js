@@ -70,6 +70,9 @@ const COMPONENTS = {
 // Which component owns a changed path? 'RideAlong' = supporting files that never
 // require a bump of their own; null = ignored entirely.
 function classify(path) {
+  // clasp deploy config (.clasp.json / .clasp.staging.json) is deploy tooling,
+  // not backend runtime — the deploy hash only covers Code.gs + appsscript.json.
+  if (/(^|\/)\.clasp[^/]*\.json$/.test(path)) return 'Repo';
   if (path.startsWith('apps-script/')) return 'Backend';
   if (path.endsWith('.html')
       || path.startsWith('css/') || path.startsWith('js/')) return 'Frontend';
