@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.21.6 — 2026-08-27
+- **Accessibility, fullscreen, and feed-performance pass.** The fullscreen watch
+  overlay is now a proper dialog (`role="dialog"`/`aria-modal`, background made
+  `inert`, focus trapped and returned to the expand control on exit), and
+  switching tabs from fullscreen lands at the top of the new view instead of
+  mid-list. Tabs gained full keyboard support (arrow keys, Home/End, roving
+  tabindex, panel association); every control now shows a visible `:focus-visible`
+  ring; placeholder text meets AA contrast; toasts announce through a live region;
+  and the comments toggle exposes `aria-expanded`. Search re-renders incrementally
+  — diffed by video id, with tokens memoized and progress throttled to one render
+  per frame — instead of rebuilding the whole list on every index chunk, so open
+  comment threads and playing iframes survive; votes ignore double-clicks; the
+  YouTube postMessage flood skips JSON parsing; and concurrent toasts are capped.
+
 ### 1.21.5 — 2026-08-27
 - **Instant cache restore + lighter cache writes.** Restoring a multi-page cached
   feed now paints all at once via `renderList` instead of replaying the per-card
