@@ -100,6 +100,16 @@ const ARCHIVE_SHEET_NAME = 'Archive';
 const ARCHIVE_CACHE_KEY = 'archive_sorted_v1';
 const ARCHIVE_CACHE_SECONDS = 600;
 
+// Monotonic cache generation. Every cached sorted-list payload (feed head,
+// Top-This-Week, archive) is stamped with the generation current when its source
+// sheet was read; a read serves a payload only while its stamp still matches, and
+// a populate refuses to install a payload whose captured stamp is already behind.
+// Bumped by every writer's invalidate*, this closes the repopulation-vs-
+// invalidation race: a read that started before a concurrent write can no longer
+// re-install its pre-write snapshot for the full TTL. Stored as a Script Property
+// (survives across executions/isolates, where the race actually lives).
+const CACHE_GENERATION_PROP = 'CACHE_GENERATION';
+
 // OAuth client ID this app's Google Sign-In tokens are minted for. Every ID
 // token MUST carry this as its `aud` claim, or it was issued to a different
 // site and must be rejected — Google's tokeninfo endpoint validates the token
@@ -2160,47 +2170,164 @@ function readArchiveVideos() {
   return normalizeVideoRows(sheet.getDataRange().getValues());
 }
 
+/** The generation an invalidate has advanced to; 0 before any writer has run. */
+function currentCacheGeneration() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(CACHE_GENERATION_PROP);
+    var n = parseInt(raw, 10);
+    return isNaN(n) ? 0 : n;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Advances the generation so every cached sorted-list payload stamped with an
+ * earlier value is now stale. Called by every invalidate*. Best-effort: if the
+ * property store hiccups the caches simply keep their key-level remove() as the
+ * fallback. The read-modify-write isn't locked — two concurrent bumps that both
+ * see N and write N+1 only under-count by one, and the invariant we need (the
+ * generation is strictly greater than any value captured before the bump) still
+ * holds, so no snapshot read before the bump can match again.
+ */
+function bumpCacheGeneration() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var next = currentCacheGeneration() + 1;
+    props.setProperty(CACHE_GENERATION_PROP, String(next));
+    return next;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * The one gen-validated read behind readFeedHead, readTopWeek, and
+ * cachedSortedList. Returns the cached payload ({ videos, [total], gen }) only
+ * when it is well-formed AND its stamp still matches the live generation; any
+ * miss, parse error, shape mismatch, stale stamp, or (when checkExpiry) a
+ * lapsed provisional entry yields null so the caller re-derives from the sheet.
+ *
+ * @param {string} key
+ * @param {{requireTotal?:boolean, checkExpiry?:boolean}} [options]
+ * @returns {Object|null}
+ */
+function readCachedSortedList(key, options) {
+  options = options || {};
+  try {
+    var raw = CacheService.getScriptCache().get(key);
+    if (!raw) return null;
+    var payload = JSON.parse(raw);
+    if (!payload || !Array.isArray(payload.videos)) return null;
+    // Stale-snapshot guard: a payload stamped under an earlier generation was
+    // read before a writer's invalidate bumped the counter — treat it as a miss
+    // rather than serve pre-write data for the rest of the TTL.
+    if (typeof payload.gen !== 'number' || payload.gen !== currentCacheGeneration()) return null;
+    if (options.requireTotal && typeof payload.total !== 'number') return null;
+    if (options.checkExpiry) {
+      var nowMs = Date.now();
+      for (var i = 0; i < payload.videos.length; i++) {
+        var exp = payload.videos[i].expires_at;
+        if (exp) {
+          var expMs = new Date(exp).getTime();
+          if (!isNaN(expMs) && expMs < nowMs) return null;
+        }
+      }
+    }
+    return payload;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * The one gen-guarded populate behind every cached sorted list. `capturedGen`
+ * is the generation read BEFORE the source sheet was scanned; if the generation
+ * has advanced since (a concurrent writer invalidated mid-scan) the payload is
+ * already stale, so it is refused rather than installed for the full TTL — this
+ * is the write half that closes the repopulation race. Best-effort otherwise:
+ * an oversized value or cache hiccup just means the next request re-scans.
+ *
+ * @returns {boolean} true iff the payload was stamped and stored.
+ */
+function putCachedSortedList(key, ttlSeconds, payload, capturedGen) {
+  try {
+    if (capturedGen !== currentCacheGeneration()) return false;
+    payload.gen = capturedGen;
+    CacheService.getScriptCache().put(key, JSON.stringify(payload), ttlSeconds);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Self-populating gen-validated cache over a sorted list: serve the stamped
+ * payload on a fresh hit, else capture the generation, run `producer` (which
+ * returns the full sorted list), stamp+store it, and return it. Folds the
+ * read/populate/invalidate triad into one path; the archive uses it directly,
+ * and the feed-head / top-week fast+full split shares its read and put cores.
+ *
+ * @param {string} key
+ * @param {number} ttlSeconds
+ * @param {function():Object[]} producer - returns the full sorted list
+ * @param {{total?:boolean, checkExpiry?:boolean, cap?:number}} [options]
+ *   total: also store/validate a `total` count; checkExpiry: drop on a lapsed
+ *   provisional entry; cap: store only the first N items (0/absent = store all).
+ * @returns {Object} the cached-or-freshly-produced payload
+ */
+function cachedSortedList(key, ttlSeconds, producer, options) {
+  options = options || {};
+  var cached = readCachedSortedList(key, {
+    requireTotal: !!options.total,
+    checkExpiry: !!options.checkExpiry,
+  });
+  if (cached) return cached;
+
+  // Capture the generation BEFORE reading the sheet: an invalidate that lands
+  // during the scan advances it past this value, and putCachedSortedList then
+  // refuses the now-stale snapshot.
+  var gen = currentCacheGeneration();
+  var videos = producer();
+  var cap = options.cap || 0;
+  var payload = { videos: cap > 0 ? videos.slice(0, cap) : videos, gen: gen };
+  if (options.total) payload.total = videos.length;
+  putCachedSortedList(key, ttlSeconds, payload, gen);
+  return payload;
+}
+
 /**
  * The full archive, sorted newest-first, read through a short-lived cache.
  *
  * The archive request is cold (only a full-history search/favorites build hits
  * it) but the frontend pulls it in several offset pages back-to-back; caching
  * the sorted list means the whole burst costs ONE sheet scan+sort instead of
- * one per page. Best-effort: an archive too large for the 100KB cache value
- * silently falls through to a live scan per request (the try/catch), and the
- * cache is dropped whenever a crawl adds to the archive (invalidateArchive).
+ * one per page. Best-effort via cachedSortedList: an archive too large for the
+ * 100KB cache value silently falls through to a live scan per request, and any
+ * writer's invalidate (generation bump) drops it. No `total` and no expiry scan,
+ * matching the historic archive contract — it serves the plain `{videos}` list.
  *
  * @returns {Object[]} archived videos, sorted by compareVideos
  */
 function readSortedArchive() {
-  try {
-    var raw = CacheService.getScriptCache().get(ARCHIVE_CACHE_KEY);
-    if (raw) {
-      var cached = JSON.parse(raw);
-      if (cached && Array.isArray(cached.videos)) return cached.videos;
-    }
-  } catch (e) {
-    /* fall through to a live scan */
-  }
-
-  var videos = readArchiveVideos();
-  videos.sort(compareVideos);
-
-  try {
-    CacheService.getScriptCache().put(
-      ARCHIVE_CACHE_KEY, JSON.stringify({ videos: videos }), ARCHIVE_CACHE_SECONDS);
-  } catch (e) {
-    /* oversized archive or cache hiccup — next request re-scans */
-  }
-  return videos;
+  return cachedSortedList(ARCHIVE_CACHE_KEY, ARCHIVE_CACHE_SECONDS, function() {
+    var videos = readArchiveVideos();
+    videos.sort(compareVideos);
+    return videos;
+  }, { total: false, checkExpiry: false }).videos;
 }
 
-/** Drops the cached sorted archive. Called when a crawl adds rows to it. */
+/**
+ * Invalidates the cached sorted archive. Bumps the generation (which alone
+ * defeats a late populate stamped with the pre-bump value) and drops the key.
+ * Called when a crawl archives rows or an archived count changes.
+ */
 function invalidateArchive() {
+  bumpCacheGeneration();
   try {
     CacheService.getScriptCache().remove(ARCHIVE_CACHE_KEY);
   } catch (e) {
-    /* best-effort */
+    /* best-effort — the generation bump already invalidated it */
   }
 }
 
@@ -2349,6 +2476,10 @@ function getVideos(page, limit, cursor) {
     }
   }
 
+  // Capture the generation BEFORE the sheet read so a vote/comment/crawl that
+  // invalidates mid-scan advances it past this value; putCachedSortedList then
+  // refuses to install this now-stale head for the full TTL (the BE2 race).
+  var gen = currentCacheGeneration();
   var videos = readAllVideos();
 
   if (videos.length === 0) {
@@ -2359,16 +2490,12 @@ function getVideos(page, limit, cursor) {
   videos.sort(compareVideos);
 
   // Read-through populate: any full-path request refreshes the head for the
-  // next caller. Best-effort — an oversized value or cache hiccup just means
-  // the next request scans the sheet again.
-  try {
-    CacheService.getScriptCache().put(FEED_HEAD_CACHE_KEY, JSON.stringify({
-      videos: videos.slice(0, FEED_HEAD_COUNT),
-      total: videos.length,
-    }), FEED_HEAD_CACHE_SECONDS);
-  } catch (e) {
-    /* cache write is optional */
-  }
+  // next caller, stamped with the generation captured above so a snapshot read
+  // before a concurrent invalidate can't be re-installed. Best-effort.
+  putCachedSortedList(FEED_HEAD_CACHE_KEY, FEED_HEAD_CACHE_SECONDS, {
+    videos: videos.slice(0, FEED_HEAD_COUNT),
+    total: videos.length,
+  }, gen);
 
   // Cursor pagination: resume strictly after the (published_at, video_id)
   // position the client last saw. Unlike the page offset above, items
@@ -2403,83 +2530,57 @@ function getVideos(page, limit, cursor) {
 }
 
 /**
- * Reads the cached feed head, or null on any miss/problem. A head containing
- * a provisional premiere/live entry whose expiry has passed is treated as a
- * miss rather than re-filtered — dropping rows here would shift the slice
- * offsets and total; the live path re-derives everything consistently.
+ * Reads the cached feed head, or null on any miss/problem. Delegates to the
+ * shared gen-validated reader: a stale-stamped head (read before a writer's
+ * invalidate) is a miss, and a head containing a provisional premiere/live
+ * entry whose expiry has passed is treated as a miss rather than re-filtered —
+ * dropping rows here would shift the slice offsets and total; the live path
+ * re-derives everything consistently.
  */
 function readFeedHead() {
-  try {
-    var raw = CacheService.getScriptCache().get(FEED_HEAD_CACHE_KEY);
-    if (!raw) return null;
-    var head = JSON.parse(raw);
-    if (!head || !Array.isArray(head.videos) || typeof head.total !== 'number') return null;
-    var nowMs = Date.now();
-    for (var i = 0; i < head.videos.length; i++) {
-      var exp = head.videos[i].expires_at;
-      if (exp) {
-        var expMs = new Date(exp).getTime();
-        if (!isNaN(expMs) && expMs < nowMs) return null;
-      }
-    }
-    return head;
-  } catch (e) {
-    return null;
-  }
+  return readCachedSortedList(FEED_HEAD_CACHE_KEY, { requireTotal: true, checkExpiry: true });
 }
 
 /**
- * Drops the cached feed head. Call from ANY writer that changes what the head
- * would contain — crawl completions (new rows, refreshed view counts / live
- * state) and vote/comment recounts (counts are baked into the cached rows).
- * Cheap enough to call unconditionally; the next feed request repopulates.
+ * Invalidates the cached feed head. Call from ANY writer that changes what the
+ * head would contain — crawl completions (new rows, refreshed view counts /
+ * live state) and vote/comment recounts (counts are baked into the cached
+ * rows). Bumps the generation (which alone defeats a late populate stamped with
+ * the pre-bump value) and drops the key. Cheap enough to call unconditionally.
  */
 function invalidateFeedHead() {
+  bumpCacheGeneration();
   try {
     CacheService.getScriptCache().remove(FEED_HEAD_CACHE_KEY);
   } catch (e) {
-    /* best-effort */
+    /* best-effort — the generation bump already invalidated it */
   }
 }
 
 /**
  * Reads the cached Top-This-Week payload, or null on any miss/problem. Mirrors
- * readFeedHead: a cached entry holding a provisional premiere/live item whose
- * expiry has passed is treated as a miss rather than served — the live path
- * re-derives the ranked window cleanly from readAllVideos (which drops expired
- * rows), so dropping one here would just desync the count.
+ * readFeedHead via the shared gen-validated reader: a stale-stamped payload is a
+ * miss, and one holding a provisional premiere/live item whose expiry has passed
+ * is treated as a miss rather than served — the live path re-derives the ranked
+ * window cleanly from readAllVideos (which drops expired rows).
  */
 function readTopWeek() {
-  try {
-    var raw = CacheService.getScriptCache().get(TOP_WEEK_CACHE_KEY);
-    if (!raw) return null;
-    var payload = JSON.parse(raw);
-    if (!payload || !Array.isArray(payload.videos) || typeof payload.total !== 'number') return null;
-    var nowMs = Date.now();
-    for (var i = 0; i < payload.videos.length; i++) {
-      var exp = payload.videos[i].expires_at;
-      if (exp) {
-        var expMs = new Date(exp).getTime();
-        if (!isNaN(expMs) && expMs < nowMs) return null;
-      }
-    }
-    return payload;
-  } catch (e) {
-    return null;
-  }
+  return readCachedSortedList(TOP_WEEK_CACHE_KEY, { requireTotal: true, checkExpiry: true });
 }
 
 /**
- * Drops the cached Top-This-Week payload. Called from the same writers that
- * invalidate the feed head: crawl completions add rows to the window, and
+ * Invalidates the cached Top-This-Week payload. Called from the same writers
+ * that invalidate the feed head: crawl completions add rows to the window, and
  * vote/comment recounts change counts baked into the cached rows (votes also
- * reorder the ranking). Cheap enough to call unconditionally.
+ * reorder the ranking). Bumps the generation (which alone defeats a late
+ * populate stamped with the pre-bump value) and drops the key.
  */
 function invalidateTopWeek() {
+  bumpCacheGeneration();
   try {
     CacheService.getScriptCache().remove(TOP_WEEK_CACHE_KEY);
   } catch (e) {
-    /* best-effort */
+    /* best-effort — the generation bump already invalidated it */
   }
 }
 
@@ -2579,6 +2680,10 @@ function handleTopWeek(params) {
 
   var cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
+  // Capture the generation BEFORE the sheet read so a vote/comment/crawl that
+  // invalidates mid-scan advances it past this value; putCachedSortedList then
+  // refuses to install this now-stale window for the full TTL (the BE2 race).
+  var gen = currentCacheGeneration();
   var recent = readAllVideos().filter(function(v) {
     var t = new Date(v.published_at).getTime();
     return !isNaN(t) && t >= cutoff;
@@ -2586,16 +2691,13 @@ function handleTopWeek(params) {
 
   recent.sort(compareTopWeek);
 
-  // Read-through populate for the next caller. Best-effort — an oversized value
-  // or cache hiccup just means the next request scans the sheet again.
-  try {
-    CacheService.getScriptCache().put(TOP_WEEK_CACHE_KEY, JSON.stringify({
-      videos: recent.slice(0, TOP_WEEK_CACHE_COUNT),
-      total: recent.length,
-    }), TOP_WEEK_CACHE_SECONDS);
-  } catch (e) {
-    /* cache write is optional */
-  }
+  // Read-through populate for the next caller, stamped with the generation
+  // captured above so a snapshot read before a concurrent invalidate can't be
+  // re-installed. Best-effort.
+  putCachedSortedList(TOP_WEEK_CACHE_KEY, TOP_WEEK_CACHE_SECONDS, {
+    videos: recent.slice(0, TOP_WEEK_CACHE_COUNT),
+    total: recent.length,
+  }, gen);
 
   // Cursor pagination: resume strictly after the (vote_count, published_at,
   // video_id) position the client last saw. Unlike a page offset, a vote that
