@@ -504,6 +504,21 @@ that component's heading.
 
 ## Backend
 
+### 1.14.3 — 2026-08-27
+- **Crawl throughput, sheet-read, and archive-scalability pass.** The crawl now
+  writes new items in a single batched `setValues` (still `'@'`-formatted against
+  formula injection) and flushes existing-item updates as range writes instead of
+  hundreds of per-row RPCs; the Meta config sheet is read once per execution rather
+  than on every `getMeta`; and comment rate-limiting moved from permanent
+  `rate_<email>` Meta rows to CacheService, removing that PII store and its
+  unbounded scan growth. The Archive tab is now cached by page (so an oversize value
+  can't silently disable caching) and bounded by an age-based retention pass.
+  Sheets headed `item_id` rather than `video_id` are normalized so dedupe, cursors,
+  and `?v=` deep links work; an empty Videos sheet is bootstrapped with a proper
+  header row instead of a headerless one; the public channels response is restricted
+  to a whitelist of rendered fields; and the manifest gains the `script.scriptapp`
+  scope the scheduled-refresh trigger needs (with its failure now logged at ERROR).
+
 ### 1.14.2 — 2026-08-27
 - **Abuse and quota hardening on the read/write endpoints.** Google ID tokens are
   now validated locally (aud/iss/exp) before the `tokeninfo` network call and
