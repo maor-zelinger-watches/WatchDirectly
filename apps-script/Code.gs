@@ -37,7 +37,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.14.4';
+const VERSION = '1.15.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -1823,6 +1823,16 @@ function extractYouTubeChannelId(html) {
  */
 function resolveSiteFeed(url) {
   var html = fetchHtmlSafely(url);
+
+  // The pasted URL may already BE the feed (e.g. …/articles/rss.xml). Recognize
+  // that directly: scraping a feed body for a rel=alternate <link> tag finds
+  // nothing, and the origin-path probe below can 404 its way to a false
+  // "no feed found" even though the answer was in our hands the whole time.
+  if (html && bodyLooksLikeFeed(html)) {
+    return { ok: true, media_type: 'article', channel_id: '', avatar: '',
+      feed_url: url, channel_name: cleanChannelTitle(extractFeedTitle(html)) };
+  }
+
   var name = '';
   var feedUrl = '';
   if (html) {
@@ -1902,14 +1912,18 @@ function looksLikeFeed(url) {
       headers: { 'User-Agent': CHANNEL_FETCH_UA }
     });
     if (resp.getResponseCode() !== 200) return false;
-    var body = String(resp.getContentText()).slice(0, 1000).toLowerCase();
-    if (body.indexOf('<rss') !== -1 || body.indexOf('<feed') !== -1) return true;
-    if (body.indexOf('<?xml') !== -1 &&
-        (body.indexOf('<channel') !== -1 || body.indexOf('atom') !== -1)) return true;
-    return false;
+    return bodyLooksLikeFeed(resp.getContentText());
   } catch (e) {
     return false;
   }
+}
+
+/** True when the first bytes of a body read as RSS/Atom XML rather than HTML. */
+function bodyLooksLikeFeed(text) {
+  var body = String(text).slice(0, 1000).toLowerCase();
+  if (body.indexOf('<rss') !== -1 || body.indexOf('<feed') !== -1) return true;
+  return body.indexOf('<?xml') !== -1 &&
+    (body.indexOf('<channel') !== -1 || body.indexOf('atom') !== -1);
 }
 
 /**
@@ -1980,6 +1994,20 @@ function cleanChannelTitle(name) {
   if (!name) return '';
   var s = String(name).replace(/\s+/g, ' ').trim();
   return s.replace(/\s*[-|–—]\s*YouTube\s*$/i, '').trim();
+}
+
+/**
+ * Reads the channel-/feed-level <title> from RSS2 or Atom XML, tolerating
+ * CDATA. Item titles can't match first: RSS2 nests items inside <channel> after
+ * its own <title>, and an Atom feed's first <title> is the feed's. Names a
+ * source pasted as a bare feed URL, where there's no HTML page to scrape.
+ */
+function extractFeedTitle(xml) {
+  if (!xml) return '';
+  var m = String(xml).match(/<(?:channel|feed)[\s>][\s\S]*?<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!m) return '';
+  var t = m[1].replace(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/, '$1');
+  return decodeHtmlEntities(t).replace(/\s+/g, ' ').trim();
 }
 
 /**

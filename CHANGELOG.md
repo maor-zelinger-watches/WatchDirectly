@@ -538,6 +538,19 @@ that component's heading.
 
 ## Backend
 
+### 1.15.0 — 2026-08-28
+- **Pasting a feed URL into CHANNELS now works for article sites.**
+  `resolveSiteFeed` treated every pasted URL as a homepage: it scraped the body
+  for a `rel="alternate"` feed `<link>` tag (a feed document has none — it *is*
+  the feed) and then probed conventional origin paths (`/feed`, `/rss.xml`, …),
+  so a directly-pasted feed like `hodinkee.com/articles/rss.xml` failed with
+  "No RSS/Atom feed found" even though the answer was in hand — YouTube feed
+  URLs already worked, which made the gap easy to hit. The fetched body is now
+  sniffed first (new `bodyLooksLikeFeed`, shared with `looksLikeFeed`'s probe)
+  and a feed-shaped response is used as-is, named from the feed's own
+  channel-level `<title>` (new `extractFeedTitle`, RSS2/Atom/CDATA-tolerant).
+  Both helpers covered by pure-logic tests in `Test_Code.gs`.
+
 ### 1.14.4 — 2026-08-27
 - **Hotfix: reverted the `script.scriptapp` manifest scope added in 1.14.3.**
   Adding that OAuth scope forced the anonymous (`ANYONE_ANONYMOUS`) web-app

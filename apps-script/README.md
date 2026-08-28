@@ -33,7 +33,9 @@ Each "sheet" is a **separate Google Spreadsheet**. There are six:
 2. Paste the channel link into the **`url`** column. Leave `channel_name`,
    `channel_id`, `feed_url`, and `avatar` blank.
    - Works with a **YouTube** link (`youtube.com/@handle`, `/channel/UC…`, `/c/…`,
-     `/user/…`, or the RSS feed URL), or any **news / blog** site link.
+     `/user/…`, or the RSS feed URL), or any **news / blog** site link — either
+     the site's homepage or its RSS/Atom **feed URL pasted directly** (e.g.
+     `hodinkee.com/articles/rss.xml`); the feed's own title becomes the name.
    - Optionally set `tier` and `category` yourself — those are editorial and
      can't be guessed from the link.
 3. Run the **`enrichChannels`** function (see [Editor functions](#things-you-do-in-the-apps-script-editor) below).
