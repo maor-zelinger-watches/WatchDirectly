@@ -37,7 +37,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.15.0';
+const VERSION = '1.15.1';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -102,11 +102,14 @@ const LIVE_GRACE_MS = 12 * 60 * 60 * 1000;
 // "Archive" tab at the end of each crawl. readAllVideos scans and sorts the
 // WHOLE live sheet on every cache miss, so an ever-growing catalog is the one
 // cost that eventually times a request out against Apps Script's 6-min cap;
-// pruning keeps that scan bounded. The window is far larger than any channel's
-// ~15-entry RSS feed reaches, so an archived item is never re-fetched and
-// re-appended, and the feed head, Top-This-Week, and starred feeds all live
-// comfortably inside it. Archived rows are retained (not deleted), just no
-// longer scanned.
+// pruning keeps that scan bounded. A slow channel's ~15-entry RSS window CAN
+// reach past this cutoff (an article site posting monthly serves year-old
+// items forever), so the crawl seeds its dedup sets from the Archive tab as
+// well as the live sheet — otherwise every crawl re-ingests those items and
+// end-of-crawl pruning re-archives them, minting one duplicate Archive row per
+// item per crawl. The feed head, Top-This-Week, and starred feeds all live
+// comfortably inside the window. Archived rows are retained (not deleted),
+// just no longer scanned.
 const PRUNE_AFTER_DAYS = 60;
 const ARCHIVE_SHEET_NAME = 'Archive';
 
@@ -722,6 +725,41 @@ function crawlAllFeeds() {
     }
   }
 
+  // Seed the dedup sets from the Archive tab too. A slow channel's RSS window
+  // reaches past PRUNE_AFTER_DAYS, so its older items live in the archive, not
+  // the live sheet — with live-only dedup every crawl re-ingested them (paying
+  // the og:image fetch again for articles) and end-of-crawl pruning re-archived
+  // them, one duplicate Archive row per item per crawl. Only the id + url
+  // columns are read (two bounded column reads, never the whole tab). Archived
+  // ids are deliberately NOT added to existingRowById: they have no live row
+  // for the view-count/live-state refresh to write to — skipping them entirely
+  // is the point. Best-effort: a failed read falls back to live-only dedup for
+  // this crawl (the duplicate collapse in pruneOldArchive then mops up).
+  try {
+    var archiveTab = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS)
+      .getSheetByName(ARCHIVE_SHEET_NAME);
+    if (archiveTab && archiveTab.getLastRow() > 1) {
+      var aHeaders = archiveTab.getRange(1, 1, 1, archiveTab.getLastColumn()).getValues()[0];
+      var aIdCol = findVideoIdCol(aHeaders);
+      var aUrlCol = aHeaders.indexOf('url');
+      var aRows = archiveTab.getLastRow() - 1;
+      if (aIdCol !== -1) {
+        var aIds = archiveTab.getRange(2, aIdCol + 1, aRows, 1).getValues();
+        for (var ai = 0; ai < aIds.length; ai++) {
+          if (aIds[ai][0] !== '') existingVideos[aIds[ai][0]] = true;
+        }
+      }
+      if (aUrlCol !== -1) {
+        var aUrls = archiveTab.getRange(2, aUrlCol + 1, aRows, 1).getValues();
+        for (var au = 0; au < aUrls.length; au++) {
+          if (aUrls[au][0]) existingUrls[String(aUrls[au][0]).trim().toLowerCase()] = true;
+        }
+      }
+    }
+  } catch (archiveSeedErr) {
+    log('WARN', 'fetchAllFeeds', 'Archive dedup seed failed: ' + archiveSeedErr.message);
+  }
+
   var newCount = 0;
   var errorCount = 0;
 
@@ -1047,9 +1085,14 @@ function pruneOldVideos() {
         archiveSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
       }
     }
-    archiveSheet
-      .getRange(archiveSheet.getLastRow() + 1, 1, archive.length, headers.length)
-      .setValues(archive);
+    var archiveAppendRange = archiveSheet
+      .getRange(archiveSheet.getLastRow() + 1, 1, archive.length, headers.length);
+    // '@' first, like the crawl's new-row flush: the live sheet stored a
+    // hostile '=...' title/url as literal text, getValues() returned it as that
+    // string, and appending it into default-format archive cells would arm it
+    // as a live formula.
+    archiveAppendRange.setNumberFormat('@');
+    archiveAppendRange.setValues(archive);
 
     // Rewrite the live sheet as header + survivors: overwrite the top rows with
     // the kept data in one call, then physically remove the surplus trailing
@@ -1083,6 +1126,16 @@ function pruneOldVideos() {
  * published_at is older than ARCHIVE_MAX_AGE_DAYS, keeping the tab (and its
  * every-crawl rewrite) bounded.
  *
+ * It ALSO collapses duplicate rows for the same item down to one. Before the
+ * crawl seeded its dedup sets from the archive, every crawl re-ingested the
+ * items a slow channel's >60-day RSS window kept serving and re-archived them —
+ * ~9x row duplication in production. The collapse keys rows exactly the way
+ * dedupeByUrl keys served items (url, falling back to id) and keeps the
+ * most-engaged copy (votes, then comments — the same copy the read path already
+ * serves), so shrinking the tab never changes what the API returns. Folding
+ * this into the retention pass makes the tab self-healing: the read+rewrite it
+ * costs is the read+rewrite this function already does every crawl.
+ *
  * Runs after pruneOldVideos and takes the script lock itself, the same
  * discipline pruneOldVideos uses, so it can't race a concurrent writer touching
  * the same spreadsheet. Rewrites the Archive tab as header + survivors in one
@@ -1092,7 +1145,7 @@ function pruneOldVideos() {
  * cache (which bumps the generation), so every cached page/full-list payload
  * stamped before the removal becomes a miss rather than serving dropped rows.
  *
- * @returns {number} count of removed rows
+ * @returns {number} count of removed rows (retired by age + collapsed duplicates)
  */
 function pruneOldArchive() {
   var lock = LockService.getScriptLock();
@@ -1111,29 +1164,64 @@ function pruneOldArchive() {
     var headers = data[0];
     var pubCol = headers.indexOf('published_at');
     if (pubCol === -1) return 0; // can't age rows without a publish time
+    var idCol = findVideoIdCol(headers);
+    var urlCol = headers.indexOf('url');
+    var voteCol = headers.indexOf('vote_count');
+    var commentCol = headers.indexOf('comment_count');
 
     var cutoff = Date.now() - ARCHIVE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
 
+    // row[-1] is undefined and videoEngagement coerces it to 0, so absent
+    // vote/comment columns simply score every copy equal (first one kept).
+    var engagementOf = function(row) {
+      return videoEngagement({ vote_count: row[voteCol], comment_count: row[commentCol] });
+    };
+
     var keep = [];
-    var removed = 0;
+    var retired = 0;
+    var collapsed = 0;
+    // key -> index in keep[], so a later, more-engaged copy replaces in place
+    // (keeping first-seen order, like dedupeByUrl). Null prototype: a url/id of
+    // '__proto__' or 'constructor' must be a plain key, never an inherited
+    // member or a prototype mutation (same hazard handleCommentsBatch guards).
+    var keptIndex = Object.create(null);
     for (var i = 1; i < data.length; i++) {
       var row = data[i];
       var t = new Date(row[pubCol]).getTime();
       // Undateable rows can't be aged out — keep them, mirroring pruneOldVideos.
-      if (isNaN(t) || t >= cutoff) {
+      if (!isNaN(t) && t < cutoff) { retired++; continue; }
+
+      var rawUrl = urlCol === -1 ? '' : row[urlCol];
+      var rawId = idCol === -1 ? '' : row[idCol];
+      var key = rawUrl ? String(rawUrl).trim().toLowerCase() : (rawId ? 'id:' + rawId : null);
+      // A row with neither url nor id can't be safely keyed — keep it rather
+      // than merge unrelated rows under one bucket.
+      if (key === null) { keep.push(row); continue; }
+
+      if (keptIndex[key] === undefined) {
+        keptIndex[key] = keep.length;
         keep.push(row);
       } else {
-        removed++;
+        collapsed++;
+        if (engagementOf(row) > engagementOf(keep[keptIndex[key]])) {
+          keep[keptIndex[key]] = row;
+        }
       }
     }
 
+    var removed = retired + collapsed;
     if (removed === 0) return 0;
 
     // Rewrite as header + survivors: overwrite the top rows in one call, then
     // physically remove the surplus trailing rows the survivors no longer fill.
     var origDataRows = data.length - 1;
     if (keep.length > 0) {
-      sheet.getRange(2, 1, keep.length, headers.length).setValues(keep);
+      var keepRange = sheet.getRange(2, 1, keep.length, headers.length);
+      // '@' before the values land: getValues() hands back a formula-shaped
+      // title/url as a literal string, and rewriting it into a default-format
+      // cell would install it as a LIVE formula (same guard as the crawl flush).
+      keepRange.setNumberFormat('@');
+      keepRange.setValues(keep);
     }
     var surplus = origDataRows - keep.length;
     if (surplus > 0) {
@@ -1144,8 +1232,9 @@ function pruneOldArchive() {
     // (and the full-list snapshot) stamped before this read is now a miss.
     invalidateArchive();
 
-    log('INFO', 'pruneOldArchive', 'Removed ' + removed + ' archived rows past ' +
-      ARCHIVE_MAX_AGE_DAYS + 'd; ' + keep.length + ' remain');
+    log('INFO', 'pruneOldArchive', 'Removed ' + removed + ' archived rows (' +
+      retired + ' past ' + ARCHIVE_MAX_AGE_DAYS + 'd, ' + collapsed +
+      ' duplicates); ' + keep.length + ' remain');
     return removed;
   } catch (e) {
     log('ERROR', 'pruneOldArchive', e.message);

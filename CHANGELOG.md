@@ -538,6 +538,25 @@ that component's heading.
 
 ## Backend
 
+### 1.15.1 — 2026-08-30
+- **Fixed the archive duplication loop (~16K rows for ~1.7K unique items).**
+  `crawlAllFeeds` deduped incoming feed items against the LIVE Videos sheet
+  only, but a slow channel's ~15-entry RSS window reaches past the 60-day prune
+  cutoff — those items live in the Archive tab, so every crawl re-ingested them
+  as "new" (re-paying the article og:image fetch) and end-of-crawl pruning
+  re-archived them: one duplicate Archive row per item per crawl. The crawl now
+  seeds its id/url dedup sets from the Archive tab too (two bounded column
+  reads, best-effort with live-only fallback), and `pruneOldArchive`
+  additionally collapses duplicate rows — keyed like `dedupeByUrl` (url,
+  falling back to id) and keeping the most-engaged copy, the same copy the
+  read path already serves — so the existing production duplicates self-heal
+  on the first post-deploy crawl with no operator action. Also closed in
+  passing: rows written into the Archive tab (the `pruneOldVideos` append and
+  the `pruneOldArchive` survivor rewrite) are now `'@'`-text-formatted first,
+  so a formula-shaped title/url stored safely as text in the live sheet can't
+  re-arm as a live formula in default-format archive cells. Covered end-to-end
+  by `tests/unit/backend/archive_dedup.test.js` against the shipped source.
+
 ### 1.15.0 — 2026-08-28
 - **Pasting a feed URL into CHANNELS now works for article sites.**
   `resolveSiteFeed` treated every pasted URL as a homepage: it scraped the body
