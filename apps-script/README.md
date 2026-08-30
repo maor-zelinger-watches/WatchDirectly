@@ -128,8 +128,10 @@ Returns recent log entries. (Sent as POST so the token never lands in a URL.)
 - **On demand:** if a visitor loads the site and the data is stale, a refresh is
   kicked off in the background — the visitor still sees cached content instantly.
 - **Retention:** videos older than 60 days are moved to an Archive tab so the
-  live catalog stays fast. Nothing is deleted; archived items still power search
-  and history.
+  live catalog stays fast; archived items still power search and history.
+  Archive rows older than a year are dropped, and duplicate archive rows for
+  the same item are collapsed automatically (keeping the copy with the
+  votes/comments), so the tab stays bounded with no manual cleanup.
 
 ---
 
