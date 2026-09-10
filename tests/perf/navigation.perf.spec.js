@@ -46,6 +46,12 @@ test.describe('PERF · navigation', () => {
 
     const target = page.locator('.media-card').nth(3);
     await target.evaluate((el) => el.scrollIntoView({ block: 'start' }));
+    // Let the entrance stagger finish before measuring. On a cold CI runner
+    // the click below can land mid-animation, and Playwright then re-scrolls
+    // the not-yet-settled button into view AFTER topBefore is recorded — the
+    // exit re-anchors to that moved position and the assertion compares
+    // against a stale baseline (~300px off).
+    await target.evaluate((el) => Promise.allSettled(el.getAnimations().map((a) => a.finished)));
     const topBefore = await target.evaluate((el) => el.getBoundingClientRect().top);
 
     // Enter fullscreen within budget (timeout IS the budget).
