@@ -402,6 +402,28 @@ function showFeedLoadError() {
  * Re-renders of already-loaded data must use renderList — replaying the
  * animation on every tab switch reads as flicker.
  */
+/**
+ * Drop a card's entrance classes once the arrival animation has settled.
+ * The classes exist only to play the one-time entrance; if they linger, any
+ * later rule that overrides `animation` and is then removed (fullscreen's
+ * fullscreenIn) re-applies the entrance as a brand-new animation — the card
+ * flashes back to opacity 0, and the fullscreen exit re-anchor measures the
+ * anchor mid-replay, offset by the from-state's translateY.
+ * animationcancel covers an entrance pre-empted before finishing (e.g. the
+ * card expanded to fullscreen mid-stagger) — the replay hazard is the same.
+ */
+function clearEntranceWhenSettled(card) {
+  const clear = (e) => {
+    if (e.target !== card) return; // animation events bubble up from children
+    card.classList.remove('media-card--enter', 'media-card--enter-short');
+    card.style.removeProperty('--enter-delay');
+    card.removeEventListener('animationend', clear);
+    card.removeEventListener('animationcancel', clear);
+  };
+  card.addEventListener('animationend', clear);
+  card.addEventListener('animationcancel', clear);
+}
+
 async function appendCards(videos) {
   // Paginated cards belong only to the unfiltered Latest feed — a filter
   // render or another view owns the container otherwise.
@@ -441,7 +463,10 @@ async function appendCards(videos) {
     inserted.push(card);
   });
 
-  for (const card of inserted) observeLazyIframe(card);
+  for (const card of inserted) {
+    clearEntranceWhenSettled(card);
+    observeLazyIframe(card);
+  }
 }
 
 /**
