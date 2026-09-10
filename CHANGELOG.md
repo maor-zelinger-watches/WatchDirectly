@@ -21,6 +21,17 @@ that component's heading.
 
 ## Frontend
 
+### 1.21.9 — 2026-09-10
+- **No more re-fade when leaving fullscreen.** `.media-card--fullscreen`
+  overrides `animation`, so exiting fullscreen re-applied a card's still-present
+  `.media-card--enter` rule as a brand-new animation: the card flashed back to
+  opacity 0 and faded in again, and the exit re-anchor measured the card
+  mid-replay — permanently offsetting the restored scroll by the from-state's
+  ~12px translateY (confirmed via instrumented CI runs on the T11 flake hunt).
+  Entrance classes and the inline `--enter-delay` are now dropped once the
+  arrival animation settles (`animationend`, or `animationcancel` for a card
+  expanded mid-stagger), so later class churn has nothing to replay.
+
 ### 1.21.8 — 2026-08-27
 - **Clickjacking protection.** The CSP ships via `<meta http-equiv>`, where the
   spec ignores `frame-ancestors`, and GitHub Pages can't send `X-Frame-Options` —
