@@ -115,10 +115,10 @@ describe('createChannelCard', () => {
     expect(html).toContain('aria-label="Hodinkee website"');
   });
 
-  it('omits the badge when the platform is unknown', () => {
+  it('defaults a channel with no links to the article mark — nothing ships unmarked', () => {
     const html = createChannelCard({ channel_name: 'Mystery' });
-    expect(html).not.toContain('data-platform');
-    expect(html).not.toContain('channel-card__platform');
+    expect(html).toContain('data-platform="article"');
+    expect(html).toContain('channel-card__platform--article');
   });
 });
 
@@ -152,8 +152,8 @@ describe('channelPlatform', () => {
     expect(channelPlatform({ avatar: 'https://www.google.com/s2/favicons?domain=x.com' })).toBe('article');
   });
 
-  it('returns empty when there is nothing to classify', () => {
-    expect(channelPlatform({})).toBe('');
-    expect(channelPlatform(undefined)).toBe('');
+  it('defaults to article when there is nothing to classify (no YouTube link = article)', () => {
+    expect(channelPlatform({})).toBe('article');
+    expect(channelPlatform(undefined)).toBe('article');
   });
 });

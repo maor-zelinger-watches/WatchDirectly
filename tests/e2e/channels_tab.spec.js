@@ -35,6 +35,8 @@ const MOCK_CHANNELS = {
     // badge and the platform filter chips have both kinds to work on.
     { channel_name: 'Fratello', host: 'fratellowatches.com', url: 'https://www.fratellowatches.com', avatar: '' },
     { channel_name: 'Monochrome', host: 'monochrome-watches.com', url: 'https://monochrome-watches.com', avatar: '' },
+    // A row with no public fields at all — must still classify (as article).
+    { channel_name: 'Mystery Journal', host: '', url: '', avatar: '' },
   ],
 };
 
@@ -194,6 +196,20 @@ test.describe('Channels tab', () => {
     const fratelloMark = fratello.locator('.channel-card__platform');
     await expect(fratelloMark).toHaveAttribute('title', 'Article site');
     await expect(fratelloMark).toHaveText('📰');
+  });
+
+  test('no card ships unmarked — a row with no links defaults to article', async ({ page }) => {
+    await setup(page);
+    await openChannels(page);
+
+    // Every rendered card carries a platform mark…
+    const cardCount = await page.locator('.channel-card').count();
+    await expect(page.locator('.channel-card .channel-card__platform')).toHaveCount(cardCount);
+
+    // …including the row with no url/host/avatar at all.
+    const mystery = page.locator('.channel-card', { hasText: 'Mystery Journal' });
+    await expect(mystery).toHaveAttribute('data-platform', 'article');
+    await expect(mystery.locator('.channel-card__platform')).toHaveText('📰');
   });
 
   test('platform chips filter the grid and only exist on the Channels tab', async ({ page }) => {

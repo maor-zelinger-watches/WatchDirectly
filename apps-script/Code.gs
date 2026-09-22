@@ -631,13 +631,13 @@ function handleGetChannels() {
 
     // Platform for the Channels-tab badge/filter. The public url is the
     // authority, but rows onboarded from a pasted feed URL can have url blank —
-    // fall back to feed_url (crawled, so always present) rather than shipping
-    // an unclassifiable row.
+    // fall back to feed_url (crawled, so always present). A source either has
+    // a YouTube link or it's an article site, so nothing ships unclassified.
     var feedUrl = feedUrlCol === -1 ? '' : String(row[feedUrlCol] || '');
     var srcUrl = String(channel.url || '') || feedUrl;
     var domain = extractDomain(srcUrl);
     var isYouTube = /(^|\.)youtube\.com$/i.test(domain) || domain === 'youtu.be';
-    channel.platform = domain ? (isYouTube ? 'youtube' : 'article') : '';
+    channel.platform = isYouTube ? 'youtube' : 'article';
 
     if (!channel.avatar && domain && !isYouTube) {
       channel.avatar = 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=128';

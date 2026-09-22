@@ -190,13 +190,14 @@ export function avatarUrl(url, size = 176) {
 
 /**
  * Which platform a curated channel publishes on: 'youtube' for YouTube
- * channels, 'article' for news/blog sites, '' when there's nothing to go on.
- * The backend's computed `platform` field wins (it can also see feed_url,
- * which is not public); the URL/avatar heuristic below covers lists cached
- * before that field existed.
+ * channels, 'article' for everything else — a source either has a YouTube
+ * link or it's an article site, so no card ever goes unmarked. The backend's
+ * computed `platform` field wins (it can also see feed_url, which is not
+ * public); the URL/avatar heuristic below covers lists cached before that
+ * field existed.
  *
  * @param {Object} creator - A channel entry from the getChannels backend action
- * @returns {'youtube'|'article'|''}
+ * @returns {'youtube'|'article'}
  */
 export function channelPlatform(creator) {
   const explicit = creator && creator.platform;
@@ -214,7 +215,7 @@ export function channelPlatform(creator) {
   // No usable URL — YouTube avatars come from Google's image CDNs.
   const avatar = String((creator && creator.avatar) || '');
   if (/yt3\.googleusercontent\.com|ytimg\.com/i.test(avatar)) return 'youtube';
-  return avatar ? 'article' : '';
+  return 'article';
 }
 
 // Corner mark + link description per platform, keyed by channelPlatform().
@@ -264,13 +265,11 @@ export function createChannelCard(creator) {
     ? `<img src="${sanitizeHtml(avatar)}" alt="" class="channel-card__avatar" loading="lazy" referrerpolicy="no-referrer">`
     : '';
 
-  const markHtml = meta
-    ? `<span class="channel-card__platform channel-card__platform--${platform}" title="${meta.title}" aria-hidden="true">${meta.icon}</span>`
-    : '';
-  const figureLabel = meta ? `${name} ${meta.linkSuffix}` : name;
+  const markHtml = `<span class="channel-card__platform channel-card__platform--${platform}" title="${meta.title}" aria-hidden="true">${meta.icon}</span>`;
+  const figureLabel = `${name} ${meta.linkSuffix}`;
 
   return `
-    <article class="channel-card" data-channel="${name}"${platform ? ` data-platform="${platform}"` : ''}>
+    <article class="channel-card" data-channel="${name}" data-platform="${platform}">
       ${markHtml}
       <button class="media-card__star channel-card__star" data-channel="${name}" aria-pressed="false" title="Favorite this creator" aria-label="Favorite ${name}">☆</button>
       ${linkOpen} class="channel-card__figure" aria-label="${figureLabel}">

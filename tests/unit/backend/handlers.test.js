@@ -668,7 +668,7 @@ describe('handleGetChannels (Channels tab + search host-matching data)', () => {
     expect(be.handleGetChannels().channels[0].avatar).toBe('');
   });
 
-  it('classifies platform from the public url: youtube vs. article', () => {
+  it('classifies platform from the public url: youtube vs. article (article is the default)', () => {
     const rows = [
       ['Nico Leonard', '', 'https://www.youtube.com/@NicoLeonard', '', true],
       ['Worn & Wound', '', 'https://www.wornandwound.com', '', true],
@@ -678,7 +678,8 @@ describe('handleGetChannels (Channels tab + search host-matching data)', () => {
     const channels = be.handleGetChannels().channels;
     expect(channels[0].platform).toBe('youtube');
     expect(channels[1].platform).toBe('article');
-    expect(channels[2].platform).toBe('');
+    // No YouTube link anywhere = article, so nothing ships unclassified
+    expect(channels[2].platform).toBe('article');
   });
 
   it('falls back to feed_url for platform and favicon when url is blank', () => {
