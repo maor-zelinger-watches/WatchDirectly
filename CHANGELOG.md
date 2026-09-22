@@ -21,6 +21,21 @@ that component's heading.
 
 ## Frontend
 
+### 1.25.0 — 2026-09-22
+- **Sign-in overlay with a marketing-email consent step.** The header's
+  embedded Google button became a volt Sign in pill that opens a dialog
+  hosting the official Google button; on a first sign-in the SAME overlay
+  flows into an explicit opt-in question — "No thanks" / "Yes, email me",
+  nothing pre-ticked, and dismissing records nothing (it asks again next
+  visit; only a button click writes). A signed-in visitor the server says
+  never answered gets the question once per page load. The choice rides
+  the one-round-trip sign-in bootstrap (backend 1.20.0) with the same
+  epoch-race semantics as votes/stars/bookmarks, and a backend without
+  consent support never prompts. Avatar + name in the header now open
+  **Email preferences** — the change-your-mind / unsubscribe path — and
+  privacy.html documents the whole thing (new §2.5). (Andrew's
+  email-permission request — the last of the four.)
+
 ### 1.24.0 — 2026-09-22
 - **Bookmarking.** Every video and article card carries a bookmark button in
   its action bar (between comments and share): outline when unsaved, filled
@@ -597,6 +612,25 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.20.0 — 2026-09-22
+- **Email-consent machinery (CUSTOMERS spreadsheet).** POST
+  `{ "action": "emailConsent", "consent": true|false, "token": … }` records
+  the signed-in user's explicit marketing-email answer — boolean only, so
+  the timestamped `consent_updated_at` cell always reflects a deliberate
+  choice; same auth/block-list/rate-limit/lock/`'@'`-write hardening as the
+  other per-user toggles. The sign-in `bootstrap` batch now returns
+  `marketing_consent` ('yes' | 'no' | null = never answered) and lists
+  every signed-in account in the operator's CUSTOMERS spreadsheet on first
+  sighting (email, name, blank consent, `first_seen_at`, source) — blank
+  is "never asked", never "no", and only `marketing_consent = yes` rows may
+  ever be mailed. Header titles normalize to canonical names on first
+  touch: an empty or header-only sheet is rewritten outright; once data
+  rows exist, recognized alias titles rename in place and missing columns
+  append — nothing reorders. An unreachable CUSTOMERS spreadsheet (e.g.
+  not yet shared with the script owner) degrades cleanly: the key is
+  omitted, sign-in reconciliation is unaffected, and the frontend never
+  prompts.
 
 ### 1.19.0 — 2026-09-22
 - **Bookmark actions.** POST `{ "action": "bookmark", "videoId": …,

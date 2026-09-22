@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.19.0';
+const VERSION = '1.20.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -4205,8 +4205,20 @@ function appendCustomerRow(sheet, cols, fields) {
  * the row simply lands on the next load.
  */
 function readOrCreateCustomer(email, name) {
-  var sheet = getCustomersSheet();
-  var cols = customerCols(sheet);
+  var sheet;
+  var cols;
+  try {
+    sheet = getCustomersSheet();
+    cols = customerCols(sheet);
+  } catch (e) {
+    // The customers spreadsheet being unreachable (not shared with the script
+    // owner yet, deleted, …) must never break sign-in reconciliation — the
+    // bootstrap still owes the caller votes/stars/bookmarks. Returning
+    // undefined drops the marketing_consent key from the JSON payload, which
+    // the frontend reads as "consent unsupported" and never prompts.
+    log('ERROR', 'customers', 'CUSTOMERS sheet unavailable: ' + e.message);
+    return undefined;
+  }
   if (cols.email === -1) return null; // headers unfixable (shouldn't happen)
 
   var rows = sheet.getDataRange().getValues();

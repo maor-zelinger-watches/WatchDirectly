@@ -226,6 +226,21 @@ describe('bootstrap consent (every signed-in email gets listed)', () => {
     expect(row[5]).toBe('google_signin');
   });
 
+  it('an unreachable CUSTOMERS sheet degrades: bootstrap still serves, key omitted', () => {
+    const throwing = {
+      get getDataRange() { throw new Error('You do not have permission'); },
+      getLastRow: () => { throw new Error('You do not have permission'); },
+      getLastColumn: () => { throw new Error('You do not have permission'); },
+    };
+    const be = loadBackend({ customers: throwing, UrlFetchApp: tokeninfo(validClaims()) });
+    const res = be.handleBootstrap({ token: 't' });
+    expect(res.status).toBe('ok');
+    expect(res.video_ids).toEqual([]);                 // the rest still reconciles
+    expect('marketing_consent' in res && res.marketing_consent !== undefined).toBe(false);
+    // …and the serialized payload (what the client sees) omits the key entirely.
+    expect(JSON.parse(JSON.stringify(res))).not.toHaveProperty('marketing_consent');
+  });
+
   it('a returning consented account reads back its answer without a second row', () => {
     const { be, customers } = setup(liveSheet([
       CANON.slice(),
