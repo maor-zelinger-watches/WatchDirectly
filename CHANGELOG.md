@@ -21,6 +21,16 @@ that component's heading.
 
 ## Frontend
 
+### 1.28.1 — 2026-09-22
+- **Legal-page contact is now an email, not the GitHub repo link.** The Privacy
+  Policy (data-deletion + complaints) and Terms (questions) pointed visitors to
+  "open an issue on our GitHub repository," which advertised the exact repo URL
+  on the public site. Swapped all three for a `mailto:` to
+  contact@andrewmorganwatches.com — a friendlier contact channel that no longer
+  surfaces the repo from the legal pages. (The repo stays discoverable via the
+  Pages DNS CNAME regardless, so this is about not volunteering the link, not a
+  security control — the model already assumes a public repo.)
+
 ### 1.28.0 — 2026-09-22
 - **Write requests are now HMAC-signed (SEC-Sybil, phased).** Every write
   POST (`api.js` `post()`) carries a `ts` + `sig`, where `sig` is
