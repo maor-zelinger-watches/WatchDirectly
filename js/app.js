@@ -28,9 +28,10 @@ import {
   serverHasMore, cursorAfter,
   invalidatePrefetchBuffer, takeBufferedPage, refillPrefetchBuffer,
 } from './prefetch.js';
-import { prefetchComments, updateInlineCommentFormUI } from './comments-ui.js';
+import { prefetchComments, updateInlineCommentFormUI, setCommentsToggleCount } from './comments-ui.js';
 import { clearVoteMarkings } from './votes.js';
 import { loadStarsFromStorage, clearStarMarkings, setOnStarsChanged } from './stars.js';
+import { loadBookmarksFromStorage, clearBookmarkMarkings, setOnBookmarksChanged } from './bookmarks.js';
 import { loadMyVotesAndStars } from './bootstrap.js';
 import { setupFullscreenKeys } from './fullscreen.js';
 import { handleDeepLink } from './share.js';
@@ -41,6 +42,11 @@ import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged, loadMoreT
 // registered here (not in stars.js) so stars.js stays view-agnostic.
 setOnStarsChanged(() => {
   if (state.view === 'starred') update();
+});
+
+// Same shape for the Bookmarks view: bookmarks.js stays view-agnostic.
+setOnBookmarksChanged(() => {
+  if (state.view === 'bookmarks') update();
 });
 
 // A content-type chip change may leave the filtered Latest feed too shallow —
@@ -114,6 +120,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupFullscreenKeys();
   setupSinglePlay();
   loadStarsFromStorage();
+  loadBookmarksFromStorage();
 
   const cached = await showCachedFeed();
   if (!cached) {
@@ -571,7 +578,7 @@ async function revalidateFeed() {
           if (container) {
             for (const fv of freshVideos) {
               const toggle = container.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(fv.video_id)}"]`);
-              if (toggle) toggle.textContent = `💬 ${fv.comment_count || 0} comments`;
+              setCommentsToggleCount(toggle, fv.comment_count || 0);
             }
           }
         }
@@ -696,10 +703,7 @@ async function revalidateFeed() {
     for (const video of freshVideos) {
       if (existingIdSet.has(video.video_id)) {
         const toggle = document.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(video.video_id)}"]`);
-        if (toggle) {
-          const freshCount = video.comment_count || 0;
-          toggle.textContent = `💬 ${freshCount} comments`;
-        }
+        setCommentsToggleCount(toggle, video.comment_count || 0);
       }
     }
 
@@ -906,7 +910,8 @@ function setupAuthUI() {
     } else {
       clearVoteMarkings();
       clearStarMarkings();
-      if (state.view === 'starred') update();
+      clearBookmarkMarkings();
+      if (state.view === 'starred' || state.view === 'bookmarks') update();
     }
   });
 

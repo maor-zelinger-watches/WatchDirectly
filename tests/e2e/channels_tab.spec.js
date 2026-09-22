@@ -195,7 +195,7 @@ test.describe('Channels tab', () => {
     await expect(fratello).toHaveAttribute('data-platform', 'article');
     const fratelloMark = fratello.locator('.channel-card__platform');
     await expect(fratelloMark).toHaveAttribute('title', 'Article site');
-    await expect(fratelloMark).toHaveText('📰');
+    await expect(fratelloMark.locator('svg.icon--article')).toBeVisible(); // flat newspaper
   });
 
   test('no card ships unmarked — a row with no links defaults to article', async ({ page }) => {
@@ -209,7 +209,7 @@ test.describe('Channels tab', () => {
     // …including the row with no url/host/avatar at all.
     const mystery = page.locator('.channel-card', { hasText: 'Mystery Journal' });
     await expect(mystery).toHaveAttribute('data-platform', 'article');
-    await expect(mystery.locator('.channel-card__platform')).toHaveText('📰');
+    await expect(mystery.locator('.channel-card__platform svg.icon--article')).toBeVisible();
   });
 
   test('platform chips filter the grid and only exist on the Channels tab', async ({ page }) => {

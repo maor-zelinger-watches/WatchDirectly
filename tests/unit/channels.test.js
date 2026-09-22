@@ -103,7 +103,7 @@ describe('createChannelCard', () => {
     expect(html).toContain('aria-label="Nico Leonard on YouTube"');
   });
 
-  it('marks an article site: data-platform + 📰 corner mark', () => {
+  it('marks an article site: data-platform + flat newspaper corner mark', () => {
     const html = createChannelCard({
       channel_name: 'Hodinkee', host: 'hodinkee.com', url: 'https://www.hodinkee.com',
       avatar: 'https://www.google.com/s2/favicons?domain=hodinkee.com&sz=128',
@@ -111,7 +111,7 @@ describe('createChannelCard', () => {
     expect(html).toContain('data-platform="article"');
     expect(html).toContain('channel-card__platform--article');
     expect(html).toContain('title="Article site"');
-    expect(html).toContain('📰');
+    expect(html).toContain('icon--article'); // flat inline SVG, not the 📰 emoji
     expect(html).toContain('aria-label="Hodinkee website"');
   });
 

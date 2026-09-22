@@ -145,6 +145,38 @@ describe('isShort', () => {
   });
 });
 
+describe('createMediaCard (bookmark button + flat icons)', () => {
+  it('renders a bookmark button in the action bar, unsaved by default', () => {
+    const html = createMediaCard(mockVideo);
+    expect(html).toContain('media-card__bookmark');
+    expect(html).toContain('data-video-id="abc12345678"');
+    expect(html).toContain('aria-label="Bookmark Top 10 Watches Under $500"');
+    expect(html).toContain('icon--bookmark');
+    expect(html).not.toContain('media-card__bookmark--active');
+  });
+
+  it('draws every action icon as a flat inline SVG — no colored emoji', () => {
+    for (const item of [mockVideo, mockArticle]) {
+      const html = createMediaCard(item);
+      expect(html).toContain('icon--comment');
+      expect(html).toContain('icon--share');
+      expect(html).toContain('icon--bookmark');
+      expect(html).not.toMatch(/💬|🔗|📰|🎬/u);
+    }
+  });
+
+  it('marks the channel with the flat platform icon: play lozenge vs newspaper', () => {
+    expect(createMediaCard(mockVideo)).toContain('icon--video');
+    expect(createMediaCard(mockVideo)).not.toContain('icon--article');
+    expect(createMediaCard(mockArticle)).toContain('icon--article');
+  });
+
+  it('keeps the comment count in a span the icon-safe updater can target', () => {
+    const html = createMediaCard(mockVideo);
+    expect(html).toContain('<span class="media-card__comments-count">12 comments</span>');
+  });
+});
+
 describe('createMediaCard (article)', () => {
   it('renders an article card with image', () => {
     const html = createMediaCard(mockArticle);

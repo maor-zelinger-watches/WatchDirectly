@@ -290,7 +290,7 @@ describe('handleBootstrap (batched votes + stars, one token check)', () => {
     ] }),
   });
 
-  it("returns the user's votes and stars, verifying the token once", () => {
+  it("returns the user's votes, stars, and bookmarks, verifying the token once", () => {
     let tokenFetches = 0;
     const be = loadBackend({
       sheet: combinedSheet(),
@@ -300,6 +300,7 @@ describe('handleBootstrap (batched votes + stars, one token check)', () => {
     expect(res.status).toBe('ok');
     expect(res.video_ids).toEqual(['vidA', 'vidB']);
     expect(res.channels).toEqual(['ChanX']);          // deduped
+    expect(res.bookmark_ids).toEqual(['vidA', 'vidB']); // same mock sheet backs Bookmarks
     expect(tokenFetches).toBe(1);                     // ONE tokeninfo call for the batch
   });
 

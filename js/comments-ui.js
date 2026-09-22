@@ -16,6 +16,17 @@ import { isSignedIn, getCurrentUser, renderSignInButton, ensureToken } from './a
 import { showToast } from './toast.js';
 import { cssEscape, sanitizeHtml } from './utils.js';
 
+/**
+ * Sets the comment count on a toggle button. The button holds a flat SVG
+ * icon plus a count span, so callers must never assign textContent (that
+ * wipes the icon) — every count update goes through here.
+ */
+export function setCommentsToggleCount(toggleBtn, count) {
+  if (!toggleBtn) return;
+  const countEl = toggleBtn.querySelector('.media-card__comments-count');
+  if (countEl) countEl.textContent = `${count} comments`;
+}
+
 export function toggleComments(videoId) {
   const body = document.querySelector(`.media-card__comments-body[data-video-id="${cssEscape(videoId)}"]`);
   if (!body) return;
@@ -100,7 +111,7 @@ async function loadInlineComments(videoId) {
  */
 function renderComments(videoId, listEl, comments, tree) {
   const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(videoId)}"]`);
-  if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
+  setCommentsToggleCount(toggleBtn, comments.length);
 
   if (tree.length === 0) {
     listEl.innerHTML = '<p class="comments-empty">No comments yet. Be the first!</p>';
@@ -168,7 +179,7 @@ export function prefetchComments(videos) {
 
           // Update the comment count badge from real data
           const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(id)}"]`);
-          if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
+          setCommentsToggleCount(toggleBtn, comments.length);
         }
 
         // Stagger next batch to stay under rate limits
@@ -280,7 +291,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
   let previousCount = 0;
   if (toggleBtn) {
     previousCount = parseInt(toggleBtn.textContent.replace(/[^0-9]/g, '')) || 0;
-    toggleBtn.textContent = `💬 ${previousCount + 1} comments`;
+    setCommentsToggleCount(toggleBtn, previousCount + 1);
   }
 
   // Hide reply form or clear textarea
@@ -335,9 +346,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
       }
     }
 
-    if (toggleBtn) {
-      toggleBtn.textContent = `💬 ${previousCount} comments`;
-    }
+    setCommentsToggleCount(toggleBtn, previousCount);
 
     if (replyForm) {
       replyForm.style.display = '';

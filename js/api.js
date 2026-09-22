@@ -249,13 +249,26 @@ export function createApiClient(baseUrl) {
     },
 
     /**
-     * Fetches the signed-in user's votes AND starred channels in one request.
-     * Replaces the separate fetchMyVotes + fetchMyStars round trips at sign-in:
+     * Toggles the signed-in user's bookmark on an item (video or article).
+     * Requires a valid Google ID token.
+     *
+     * @param {string} videoId - YouTube video ID / article item ID
+     * @param {string} token - Google Sign-In ID token
+     * @returns {Promise<{bookmarked: boolean}>}
+     */
+    async bookmark(videoId, token) {
+      return post({ action: 'bookmark', videoId, token });
+    },
+
+    /**
+     * Fetches the signed-in user's votes, starred channels AND bookmarks in
+     * one request. Replaces the separate per-feature round trips at sign-in:
      * the backend serializes a user's requests and re-verifies the token on
-     * each, so batching halves both the queue depth and the token checks.
+     * each, so batching cuts both the queue depth and the token checks.
+     * A backend that predates bookmarks omits bookmark_ids.
      *
      * @param {string} token - Google Sign-In ID token
-     * @returns {Promise<{video_ids: string[], channels: string[]}>}
+     * @returns {Promise<{video_ids: string[], channels: string[], bookmark_ids?: string[]}>}
      */
     async fetchBootstrap(token) {
       return post({ action: 'bootstrap', token });

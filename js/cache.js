@@ -17,6 +17,7 @@
  * - wd_top_cache    — Top This Week first-page snapshot {videos, total, cursor}
  * - wd_channels     — curated creator list {creators} (small, fully cached)
  * - wd_my_stars     — starred channel names, instant paint before server reconcile
+ * - wd_my_bookmarks — bookmarked video ids, instant paint before server reconcile
  * - wd_filter_types — persisted content-type chip selection ([] = "All")
  * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.)
  */
@@ -27,6 +28,7 @@ export const CACHE_KEYS = {
   TOP: 'wd_top_cache',
   CHANNELS: 'wd_channels',
   STARS: 'wd_my_stars',
+  BOOKMARKS: 'wd_my_bookmarks',
   FILTER_TYPES: 'wd_filter_types',
 };
 
@@ -334,6 +336,38 @@ export function saveStarredChannels(channels) {
 
 export function clearStarredChannels() {
   remove(CACHE_KEYS.STARS);
+}
+
+// --- bookmarked items (instant paint, reconciled by the server) ------
+
+/**
+ * Loads the cached bookmarked video ids as a Set of strings.
+ * Corrupt or non-array payloads are cleared and yield an empty Set.
+ */
+export function loadBookmarkedIds() {
+  const raw = read(CACHE_KEYS.BOOKMARKS);
+  if (!raw) return new Set();
+
+  try {
+    const stored = JSON.parse(raw);
+    if (!Array.isArray(stored)) {
+      remove(CACHE_KEYS.BOOKMARKS);
+      return new Set();
+    }
+    return new Set(stored.map(String));
+  } catch (e) {
+    remove(CACHE_KEYS.BOOKMARKS);
+    return new Set();
+  }
+}
+
+/** Saves bookmarked video ids. Accepts a Set or an array. */
+export function saveBookmarkedIds(ids) {
+  return write(CACHE_KEYS.BOOKMARKS, JSON.stringify([...ids]));
+}
+
+export function clearBookmarkedIds() {
+  remove(CACHE_KEYS.BOOKMARKS);
 }
 
 // --- content-type filter selection (persists across sessions) --------

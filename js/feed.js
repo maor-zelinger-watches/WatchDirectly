@@ -7,6 +7,7 @@
  */
 
 import { timeAgo, sanitizeHtml, formatCount, safeUrl } from './utils.js';
+import { iconSvg } from './icons.js';
 
 /**
  * Detects YouTube Shorts from the stored URL — shorts entries in the
@@ -88,7 +89,7 @@ export function createMediaCard(item) {
   // The "Read Article" pill is a span inside it (anchors can't nest).
   const articleMedia = safeUrl(item.preview_image)
     ? `<img src="${sanitizeHtml(safeUrl(item.preview_image))}" alt="${escaped.title}" class="article-card__img" loading="lazy">`
-    : `<div class="article-card__placeholder">📰</div>`;
+    : `<div class="article-card__placeholder">${iconSvg('article', 44)}</div>`;
 
   const embedHtml = isArticle ? `
     <div class="article-card__embed">
@@ -120,7 +121,7 @@ export function createMediaCard(item) {
         <div class="media-card__content">
           <h3 class="media-card__title"><a href="${sanitizeHtml(escaped.url)}" target="_blank" rel="noopener noreferrer">${escaped.title}</a></h3>
           <div class="media-card__meta">
-            <span class="media-card__channel">${isArticle ? '📰' : '🎬'} ${escaped.channel}</span>
+            <span class="media-card__channel">${iconSvg(isArticle ? 'article' : 'video', 14)} ${escaped.channel}</span>
             <button class="media-card__star" data-channel="${escaped.channel}" aria-pressed="false" title="Favorite this creator" aria-label="Favorite ${escaped.channel}">☆</button>
             <span class="media-card__separator">·</span>
             <span class="media-card__time">${timeAgo(item.published_at)}</span>
@@ -135,10 +136,13 @@ export function createMediaCard(item) {
             <span class="media-card__vote-count">${item.vote_count || 0}</span>
           </button>
           <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}" aria-label="Comments" aria-expanded="false" aria-controls="comments-body-${escaped.videoId}">
-            💬 ${item.comment_count || 0} comments
+            ${iconSvg('comment', 14)}<span class="media-card__comments-count">${item.comment_count || 0} comments</span>
+          </button>
+          <button class="media-card__bookmark" data-video-id="${escaped.videoId}" aria-pressed="false" title="Save for later" aria-label="Bookmark ${escaped.title}">
+            ${iconSvg('bookmark', 15)}
           </button>
           <button class="media-card__share" data-video-id="${escaped.videoId}" title="Share" aria-label="Share ${escaped.title}">
-            <span class="media-card__share-icon" aria-hidden="true">🔗</span>
+            <span class="media-card__share-icon" aria-hidden="true">${iconSvg('share', 15)}</span>
           </button>
           <button class="media-card__expand" data-video-id="${escaped.videoId}" title="Expand" aria-label="Expand ${escaped.title}">
             <span class="media-card__expand-icon" aria-hidden="true">⛶</span>
@@ -220,7 +224,7 @@ export function channelPlatform(creator) {
 
 // Corner mark + link description per platform, keyed by channelPlatform().
 // The YouTube mark is the play-button lozenge drawn inline (brand red must not
-// depend on an external asset); article sites get the newspaper emoji.
+// depend on an external asset); article sites get the flat newspaper icon.
 const PLATFORM_META = {
   youtube: {
     icon: '<svg viewBox="0 0 28 20" width="22" height="16" role="img"><rect width="28" height="20" rx="5" fill="#f00"/><path d="M11 5.2l8.2 4.8-8.2 4.8z" fill="#fff"/></svg>',
@@ -228,7 +232,7 @@ const PLATFORM_META = {
     linkSuffix: 'on YouTube',
   },
   article: {
-    icon: '📰',
+    icon: iconSvg('article', 17),
     title: 'Article site',
     linkSuffix: 'website',
   },
@@ -238,7 +242,8 @@ const PLATFORM_META = {
  * Creates an HTML string for a channel card on the Channels tab: the creator's
  * avatar in a platform-colored ring (with a monogram fallback beneath, revealed
  * if the image is missing or fails to load), their name, a platform mark in the
- * card's top-left corner (YouTube play lozenge vs. 📰 for article sites), and
+ * card's top-left corner (YouTube play lozenge vs. flat newspaper for article
+ * sites), and
  * a favorite ☆ button. The star button reuses the `media-card__star` class +
  * `data-channel` attribute so the existing star engine (toggle, sign-in
  * reconcile, cross-view sync) drives it unchanged. The card's `data-platform`
