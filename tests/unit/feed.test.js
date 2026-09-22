@@ -435,6 +435,36 @@ describe('sortTopRanking (mirror of the backend compareTopWeek order)', () => {
     sortTopRanking(list);
     expect(list.map(x => x.video_id)).toEqual(ids);
   });
+
+  it('counts every 5000 views as one upvote in the score', () => {
+    const list = [
+      { ...v('votes', 5, '2026-05-07T08:00:00Z'), view_count: 0 },
+      // 2 votes + floor(20000/5000) = 6 — outranks 5 raw votes.
+      { ...v('views', 2, '2026-05-05T08:00:00Z'), view_count: 20000 },
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['views', 'votes']);
+  });
+
+  it('floors the view weight — 4999 views add nothing', () => {
+    const list = [
+      // 3 + floor(4999/5000) = 3, older → below the newer 3-vote item.
+      { ...v('almost', 3, '2026-05-05T08:00:00Z'), view_count: 4999 },
+      { ...v('plain', 3, '2026-05-07T08:00:00Z'), view_count: 0 },
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['plain', 'almost']);
+
+    // One more view crosses the threshold: 3 + 1 = 4 beats 3.
+    list[0].view_count = 5000;
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['almost', 'plain']);
+  });
+
+  it('treats a missing view_count as zero (pure vote ranking)', () => {
+    const list = [
+      v('two', 2, '2026-05-07T08:00:00Z'),
+      v('nine', 9, '2026-05-05T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['nine', 'two']);
+  });
 });
 
 describe('mergeTopRanking (Top This Week stale-while-revalidate reconcile)', () => {

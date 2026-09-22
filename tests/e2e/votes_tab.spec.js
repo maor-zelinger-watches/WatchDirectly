@@ -28,8 +28,11 @@ const TOP_WEEK = {
   total: 2,
 };
 
-/** Routes that every test needs. `signedIn` seeds a fake Google session. */
-async function setup(page, { signedIn = false } = {}) {
+/**
+ * Routes that every test needs. `signedIn` seeds a fake Google session;
+ * `topWeek` overrides the ranked payload (for the view-weight scenarios).
+ */
+async function setup(page, { signedIn = false, topWeek = TOP_WEEK } = {}) {
   await page.route('**/macros/**', async (route) => {
     const req = route.request();
     const url = req.url();
@@ -38,7 +41,7 @@ async function setup(page, { signedIn = false } = {}) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(LATEST_FEED) });
     }
     if (url.includes('action=topWeek')) {
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(TOP_WEEK) });
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(topWeek) });
     }
     if (url.includes('action=commentsBatch')) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', byVideo: {} }) });
@@ -181,6 +184,51 @@ test.describe('Upvoting', () => {
     await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
 
     await expect(page.locator('.media-card')).toHaveCount(2);
+    await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
+  });
+
+  test('view weight holds #1 in place: a raw-vote lead is not enough', async ({ page }) => {
+    // #1 has 42 votes + 15000 views = score 45. Voting #2 to 43 raw votes
+    // (score 43) beats 42 votes but NOT the view-weighted score — the order
+    // must not change. Guards against the resort ignoring view_count.
+    const topWeek = {
+      status: 'ok',
+      videos: [
+        { ...TOP_WEEK.videos[0], view_count: 15000 },
+        { ...TOP_WEEK.videos[1], view_count: 0 },
+      ],
+      total: 2,
+    };
+    await setup(page, { signedIn: true, topWeek });
+
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+    await expect(page.locator('.media-card')).toHaveCount(2);
+
+    await page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote').click();
+    await expect(page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote-count')).toHaveText('43');
+
+    await expect(page.locator('.media-card__title').first()).toContainText('Most Upvoted This Week');
+  });
+
+  test('view weight lifts the liked card: 5000 views count as one vote', async ({ page }) => {
+    // #1: 42 votes + 10000 views = 44. #2: 8 votes + 12000 views = 10; a vote
+    // takes it to 43 + 2 = 45, which now outranks 44 — the card moves up
+    // only because its views are counted.
+    const topWeek = {
+      status: 'ok',
+      videos: [
+        { ...TOP_WEEK.videos[0], view_count: 10000 },
+        { ...TOP_WEEK.videos[1], view_count: 12000 },
+      ],
+      total: 2,
+    };
+    await setup(page, { signedIn: true, topWeek });
+
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+    await expect(page.locator('.media-card')).toHaveCount(2);
+
+    await page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote').click();
+
     await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
   });
 

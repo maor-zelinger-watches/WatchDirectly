@@ -8,6 +8,7 @@
 
 import { timeAgo, sanitizeHtml, formatCount, safeUrl } from './utils.js';
 import { iconSvg } from './icons.js';
+import { CONFIG } from './config.js';
 
 /**
  * Detects YouTube Shorts from the stored URL — shorts entries in the
@@ -510,11 +511,21 @@ export function mergeTopRanking(current, fresh) {
 }
 
 /**
- * Sorts a Top This Week list into the server's ranking order: vote_count
- * descending, then published_at descending, then video_id descending — the
- * exact mirror of the backend's compareTopWeek, so a locally re-ranked list
- * lands in the same order the next fetch would return. Returns a new array —
- * does not mutate the input.
+ * Top This Week ranking score: upvotes plus one synthetic vote per
+ * CONFIG.TOP_WEEK_VIEWS_PER_VOTE views — the mirror of the backend's
+ * topWeekScore, computed from the same stored counts the row carries.
+ */
+export function topWeekScore(v) {
+  return (Number(v.vote_count) || 0) +
+    Math.floor((Number(v.view_count) || 0) / CONFIG.TOP_WEEK_VIEWS_PER_VOTE);
+}
+
+/**
+ * Sorts a Top This Week list into the server's ranking order: score
+ * descending (topWeekScore), then published_at descending, then video_id
+ * descending — the exact mirror of the backend's compareTopWeek, so a locally
+ * re-ranked list lands in the same order the next fetch would return.
+ * Returns a new array — does not mutate the input.
  */
 export function sortTopRanking(videos) {
   const time = (v) => {
@@ -522,7 +533,7 @@ export function sortTopRanking(videos) {
     return Number.isFinite(t) ? t : 0;
   };
   return [...videos].sort((a, b) => {
-    const dv = (Number(b.vote_count) || 0) - (Number(a.vote_count) || 0);
+    const dv = topWeekScore(b) - topWeekScore(a);
     if (dv !== 0) return dv;
     const dt = time(b) - time(a);
     if (dt !== 0) return dt;

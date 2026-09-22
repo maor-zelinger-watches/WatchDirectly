@@ -87,6 +87,13 @@ const VIDEO_MISS_CACHE_SECONDS = 30;
 const TOP_WEEK_CACHE_COUNT = 50;
 const TOP_WEEK_CACHE_KEY = 'top_week_v1';
 const TOP_WEEK_CACHE_SECONDS = 300;
+// Top-This-Week ranking weight: every this-many views counts as one upvote in
+// the score (floor division — 4999 views add nothing). The score is derived at
+// sort time from the stored vote_count and view_count, so it needs no column
+// of its own: the crawl refreshes view counts and already invalidates the
+// top-week cache, which re-ranks the window on the next read. Mirrored by
+// CONFIG.TOP_WEEK_VIEWS_PER_VOTE in js/config.js — keep the two in sync.
+const TOP_WEEK_VIEWS_PER_VOTE = 5000;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
 // Per-user minimum spacing between vote/star/bookmark toggles (SEC3/BE5). Each toggle takes
 // the global script lock through a sheet mutation, so an account toggling in a
@@ -3191,7 +3198,8 @@ function readTopWeek() {
 
 /**
  * Invalidates the cached Top-This-Week payload. Called from the same writers
- * that invalidate the feed head: crawl completions add rows to the window, and
+ * that invalidate the feed head: crawl completions add rows to the window AND
+ * refresh view counts (which feed the score via topWeekScore), and
  * vote/comment recounts change counts baked into the cached rows (votes also
  * reorder the ranking). Bumps the generation (which alone defeats a late
  * populate stamped with the pre-bump value) and drops the key.
@@ -3206,15 +3214,27 @@ function invalidateTopWeek() {
 }
 
 /**
- * Total order for Top This Week: vote_count descending, then published_at
- * descending, then video_id descending as a deterministic tiebreak. The
- * tiebreak matters for cursor pagination — without it two items with equal
- * votes and equal timestamps could swap between requests, letting a cursor
- * skip or repeat them (the same reason compareVideos carries an id tiebreak).
+ * Top-This-Week ranking score: upvotes plus one synthetic vote per
+ * TOP_WEEK_VIEWS_PER_VOTE views. Derived from the stored counts at sort time
+ * — a crawl that refreshes view_count changes the score on the next ranking
+ * read without any recompute-and-save step.
+ */
+function topWeekScore(v) {
+  return (Number(v.vote_count) || 0) +
+    Math.floor((Number(v.view_count) || 0) / TOP_WEEK_VIEWS_PER_VOTE);
+}
+
+/**
+ * Total order for Top This Week: score descending (upvotes + view weight, see
+ * topWeekScore), then published_at descending, then video_id descending as a
+ * deterministic tiebreak. The tiebreak matters for cursor pagination — without
+ * it two items with equal scores and equal timestamps could swap between
+ * requests, letting a cursor skip or repeat them (the same reason
+ * compareVideos carries an id tiebreak).
  */
 function compareTopWeek(a, b) {
-  var av = Number(a.vote_count) || 0;
-  var bv = Number(b.vote_count) || 0;
+  var av = topWeekScore(a);
+  var bv = topWeekScore(b);
   if (bv !== av) return bv - av;
   var diff = pubTime(b) - pubTime(a);
   if (diff !== 0) return diff;
@@ -3225,44 +3245,45 @@ function compareTopWeek(a, b) {
 
 /** Opaque cursor for the position AFTER this video in the top-week order. */
 function topCursorFor(video) {
-  return (Number(video.vote_count) || 0) + '|' +
+  return topWeekScore(video) + '|' +
     new Date(pubTime(video)).toISOString() + '|' + video.video_id;
 }
 
-/** Parses a top-week cursor "votes|iso|id" into its parts, or null if malformed. */
+/** Parses a top-week cursor "score|iso|id" into its parts, or null if malformed. */
 function parseTopCursor(cursor) {
   var i1 = cursor.indexOf('|');
   if (i1 === -1) return null;
   var i2 = cursor.indexOf('|', i1 + 1);
   if (i2 === -1) return null;
-  var votes = Number(cursor.slice(0, i1));
+  var score = Number(cursor.slice(0, i1));
   var time = new Date(cursor.slice(i1 + 1, i2)).getTime();
-  if (isNaN(votes) || isNaN(time)) return null;
+  if (isNaN(score) || isNaN(time)) return null;
   // video_id is the remainder — it never itself contains '|' (YouTube ids and
   // web-safe base64 article ids are alphanumeric), so this slice is exact.
-  return { votes: votes, time: time, id: String(cursor.slice(i2 + 1)) };
+  return { score: score, time: time, id: String(cursor.slice(i2 + 1)) };
 }
 
 /** True if `video` sorts strictly AFTER cursor position `c` in top-week order. */
 function topAfterCursor(video, c) {
-  var vv = Number(video.vote_count) || 0;
-  if (vv !== c.votes) return vv < c.votes;
+  var vv = topWeekScore(video);
+  if (vv !== c.score) return vv < c.score;
   var vt = pubTime(video);
   if (vt !== c.time) return vt < c.time;
   return String(video.video_id || '') < c.id;
 }
 
 /**
- * Returns videos published in the last 7 days, ranked by upvotes (most-voted
- * first, newest then video_id as tiebreaks). When votes are sparse this
- * gracefully degrades to the week's videos in reverse-chron order, so the tab
- * is never empty.
+ * Returns videos published in the last 7 days, ranked by score — upvotes plus
+ * one synthetic vote per TOP_WEEK_VIEWS_PER_VOTE views (topWeekScore) —
+ * highest first, newest then video_id as tiebreaks. When votes and views are
+ * sparse this gracefully degrades to the week's videos in reverse-chron
+ * order, so the tab is never empty.
  *
  * Cursor-paginated exactly like getVideos: early no-cursor pages are served
  * from the cached ranked head; deeper pages resume strictly after the
- * (vote_count, published_at, video_id) position the client last saw. So the
+ * (score, published_at, video_id) position the client last saw. So the
  * WHOLE week is reachable by scrolling even though the cache only holds the
- * head — with sparse votes the order is reverse-chron, so paging simply walks
+ * head — with sparse scores the order is reverse-chron, so paging simply walks
  * back through the week instead of stopping at the newest cap.
  */
 function handleTopWeek(params) {
@@ -3323,7 +3344,7 @@ function handleTopWeek(params) {
     total: recent.length,
   }, gen);
 
-  // Cursor pagination: resume strictly after the (vote_count, published_at,
+  // Cursor pagination: resume strictly after the (score, published_at,
   // video_id) position the client last saw. Unlike a page offset, a vote that
   // reorders the window mid-scroll can't make forward paging skip a whole page
   // — at worst it nudges one item across the boundary, which the client dedupes.
