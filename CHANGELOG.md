@@ -695,6 +695,38 @@ that component's heading.
 
 ## Backend
 
+### 1.24.0 — 2026-09-22
+- **Vote-trust gate: low-tenure accounts can't inflate the ranking (SEC-Sybil,
+  phased).** The residual anti-Sybil risk after request signing (whose secret is
+  public) is ranking manipulation — Top This Week ranks on `vote_count`, and the
+  API is callable by any Google account, so a pool of fresh accounts could vault
+  or bury a video. Now a vote from an account whose CUSTOMERS `first_seen_at` is
+  younger than the trust window is still **recorded** (the button lights up,
+  `myVotes` reflects it) but does **not** move the ranking `vote_count`. A newly
+  farmed pool therefore can't shift the ranking at all; gaming costs days of
+  pre-farming instead of being free and instant. "Tenure" is time since first
+  sign-in here, not Google account age (tokens don't expose it) — a patient
+  pre-farmer is the accepted limit.
+  - Each Votes row carries a `counted` flag set at insert from the voter's
+    tenure; un-voting decrements `vote_count` only if the row was counted, so a
+    vote cast while untrusted and withdrawn after the account ages in never
+    drifts the count. The reconcile recount totals only counted rows. Rows
+    predating the column (and the lazily-added column itself) read as counted, so
+    nothing already tallied is disturbed. The column is added from the header row
+    handleVote already reads — no extra Votes-sheet scan (BE5).
+  - A voter with no CUSTOMERS row yet (e.g. a direct API caller that skipped
+    bootstrap) is recorded with `first_seen = now`, so skipping sign-in can't
+    dodge the gate. If CUSTOMERS is unreachable the gate fails **open** (votes
+    count) — availability beats a perfect gate.
+  - Anomaly visibility: a burst of low-tenure votes on one video logs a single
+    `Possible vote manipulation` WARN for operator review. No auto-quarantine —
+    the count gate is the defense, so a genuinely viral video is never hidden.
+  - **Phased rollout:** enforcement is gated by the Meta `vote_trust_enabled`
+    row, default off = observe-only (tenure computed, anomalies logged, but every
+    vote still counts) so this ships with zero behavior change. Flip it to `true`
+    to enforce once the logs look right; `vote_trust_tenure_hours` overrides the
+    24-hour default window without a redeploy.
+
 ### 1.23.0 — 2026-09-22
 - **`refresh` is now POST-only; the admin token no longer rides in a URL.**
   The manual-crawl override was gated by `isAdmin(e.parameter.token)` in
