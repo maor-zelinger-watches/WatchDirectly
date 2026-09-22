@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.28.0 — 2026-09-22
+- **Write requests are now HMAC-signed (SEC-Sybil, phased).** Every write
+  POST (`api.js` `post()`) carries a `ts` + `sig`, where `sig` is
+  `base64url(HMAC-SHA256("action\nts", REQUEST_SIGNING_SECRET))` computed with
+  Web Crypto — the same canonicalization the backend recomputes (Backend
+  1.23.0). It's a speed bump against drive-by curl/bot abuse and stale replay,
+  layered on the existing Google Sign-In auth — **not** an authorization
+  boundary: a static site necessarily ships `REQUEST_SIGNING_SECRET` in
+  `config.js`, so it's public by construction (the comment there says so). The
+  real anti-Sybil defense (account-age gating + vote anomaly detection) is a
+  separate, secret-free follow-up. Signing is best-effort: a context without
+  Web Crypto sends the request unsigned, which the backend's soft-launch
+  window accepts. No user-visible change.
+
 ### 1.27.0 — 2026-09-22
 - **Liking a post now moves it within Top This Week immediately.** A vote
   updated the button count everywhere (FE13) but nothing re-sorted the
@@ -680,6 +694,33 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.23.0 — 2026-09-22
+- **`refresh` is now POST-only; the admin token no longer rides in a URL.**
+  The manual-crawl override was gated by `isAdmin(e.parameter.token)` in
+  `doGet`, so the admin token travelled in the query string — where it leaks
+  into browser history, referrer headers, proxy logs, and Apps Script's own
+  execution/access logs. It moves to `doPost` alongside `logs`/`enrich`
+  (token in the body), for the exact reason those endpoints are POST-only;
+  `doGet` now returns an explicit `refresh is POST-only` so an old bookmark
+  fails loudly instead of silently. No frontend caller. **Operator action:
+  rotate `admin_token` in META after this deploys — assume the old value has
+  already been logged somewhere.**
+- **Write requests carry an HMAC signature the backend can enforce (SEC-Sybil,
+  phased rollout).** `enforceRequestSignature` verifies the `ts` + `sig` the
+  frontend now sends (Frontend 1.28.0) on the ten user-write actions
+  (comment/vote/star/bookmark/emailConsent/myVotes/myStars/myBookmarks/session/
+  bootstrap), recomputing `HMAC-SHA256("action\nts")` with a 5-minute skew
+  window and constant-time compare. **Enforcement is gated by a new Meta
+  `require_signature` row**: while it's absent/not `'true'` (the default), a
+  missing/invalid signature is logged but the request still proceeds — so this
+  backend can ship before the signing frontend and older cached clients keep
+  working. Flip `require_signature` to `'true'` once signing frontends have
+  rolled out and old ones aged past their cache TTL. Admin actions
+  (addChannel/logs/enrich/refresh) and the unauthenticated `clientError`
+  telemetry are not gated (they carry their own token/budget). This is a speed
+  bump, not auth — the secret is public in `config.js`; the durable Sybil
+  defense is a separate account-age/anomaly change.
 
 ### 1.22.0 — 2026-09-22
 - **Top This Week now counts views: every 5,000 views equal one upvote.**

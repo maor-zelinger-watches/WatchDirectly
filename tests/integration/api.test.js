@@ -6,7 +6,16 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import crypto from 'node:crypto';
 import { createApiClient } from '../../js/api.js';
+import { CONFIG } from '../../js/config.js';
+
+/** The signature the backend expects for (action, ts) — mirrors Code.gs. */
+function expectedSig(action, ts) {
+  return crypto.createHmac('sha256', CONFIG.REQUEST_SIGNING_SECRET)
+    .update(`${action}\n${ts}`).digest('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_');
+}
 
 // Mock localStorage
 const localStorageMock = (() => {
@@ -276,6 +285,41 @@ describe('API Client', () => {
       });
 
       await expect(api.vote('v1', 'bad')).rejects.toThrow('Invalid authentication token');
+    });
+  });
+
+  describe('request signing (SEC-Sybil)', () => {
+    it('adds a fresh ts + a sig the backend would accept', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', voted: true, vote_count: 1 }),
+      });
+
+      const before = Math.floor(Date.now() / 1000);
+      await api.vote('v1', 'mock-token');
+      const after = Math.floor(Date.now() / 1000);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      // A timestamp within the request window...
+      expect(body.ts).toBeGreaterThanOrEqual(before);
+      expect(body.ts).toBeLessThanOrEqual(after);
+      // ...and a signature that matches the backend's canonicalization exactly
+      // (action\nts). This is the cross-runtime contract: Web Crypto here,
+      // Utilities.computeHmacSha256Signature there.
+      expect(body.sig).toBe(expectedSig('vote', body.ts));
+    });
+
+    it('signs each action for its own action name (no cross-action reuse)', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ status: 'ok', channels: [] }),
+      });
+      await api.fetchMyStars('mock-token');
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.action).toBe('myStars');
+      expect(body.sig).toBe(expectedSig('myStars', body.ts));
+      // The same ts signed for 'vote' must NOT validate this myStars request.
+      expect(body.sig).not.toBe(expectedSig('vote', body.ts));
     });
   });
 
