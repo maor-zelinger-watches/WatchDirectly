@@ -561,7 +561,14 @@ that component's heading.
 
 ## Backend
 
-### 1.16.0 — 2026-09-22
+### 1.17.0 — 2026-09-22
+- **Admin `enrich` action.** POST `{ "action": "enrich", "token": … }` runs
+  `enrichChannels` remotely — the same backfill as the editor's Run button —
+  gated by the existing constant-time admin-token check and sent over POST so
+  the token stays out of URL/query logs (same contract as `logs`). Exists so
+  channel onboarding (paste a URL in the CHANNELS sheet → enrich → refresh)
+  needs no Apps Script editor access — groundwork for letting Andrew add
+  channels himself.
 - **`getChannels` publishes a computed `platform` field** ('youtube' |
   'article') for the Channels tab's badges and filter (frontend 1.22.0).
   Classification falls back to the private `feed_url` when the `url` column

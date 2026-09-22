@@ -37,7 +37,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.16.0';
+const VERSION = '1.17.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -322,6 +322,15 @@ function doPost(e) {
           return jsonResponse({ status: 'error', message: 'Unauthorized' });
         }
         return jsonResponse(handleLogs(data));
+      case 'enrich':
+        // Admin-only, over POST like `logs`. Runs the channel-onboarding
+        // backfill (enrichChannels) remotely — the same code path as the
+        // editor's Run button, for operators without editor access. It
+        // spends UrlFetch quota on external sites, hence the token gate.
+        if (!isAdmin(data.token)) {
+          return jsonResponse({ status: 'error', message: 'Unauthorized' });
+        }
+        return jsonResponse(handleEnrich());
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -4402,6 +4411,21 @@ function handleLogs(params) {
   }
 
   return { status: 'ok', logs: logs };
+}
+
+/**
+ * Admin `enrich` action body: runs enrichChannels (the channel-onboarding
+ * backfill) and returns its summary. Auth is enforced by the router (isAdmin,
+ * constant-time) before this is reached — same contract as handleLogs.
+ */
+function handleEnrich() {
+  var summary = enrichChannels();
+  return {
+    status: 'ok',
+    processed: summary.processed,
+    filled: summary.filled,
+    results: summary.results,
+  };
 }
 
 // ============================================================
