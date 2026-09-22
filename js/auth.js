@@ -1,13 +1,15 @@
 /**
  * auth.js — Google Sign-In integration for How You Watch
  *
- * Uses Google Identity Services (GIS) for one-tap sign-in. On first sign-in we
- * verify the Google ID token once, then exchange it for a long-lived, app-issued
- * session token (see apps-script/Code.gs). From then on `currentUser.token` holds
- * that session token: page loads and authenticated calls reuse it, and it renews
- * itself with a silent fetch — so a returning visitor never sees the One Tap
- * overlay flash on open. GIS is only re-invoked if the session lapses entirely
- * (an absence longer than the session lifetime).
+ * Uses Google Identity Services (GIS). Sign-in happens through the button in
+ * the auth overlay (auth-overlay.js) — there is no automatic One Tap for
+ * signed-out visitors. On first sign-in we verify the Google ID token once,
+ * then exchange it for a long-lived, app-issued session token (see
+ * apps-script/Code.gs). From then on `currentUser.token` holds that session
+ * token: page loads and authenticated calls reuse it, and it renews itself
+ * with a silent fetch — so a returning visitor never sees any Google UI on
+ * open. GIS's One Tap is only re-invoked if the session lapses entirely (an
+ * absence longer than the session lifetime).
  */
 
 import { api } from './api-client.js';
@@ -124,12 +126,11 @@ export function initAuth(clientId) {
     auto_select: true,
   });
 
-  // Only show the one-tap prompt if user isn't already signed in. A restored
-  // session token keeps currentUser set, so a returning visitor never triggers
-  // the overlay here.
-  if (!currentUser) {
-    google.accounts.id.prompt();
-  } else {
+  // Deliberately NO automatic One Tap for signed-out visitors: the only
+  // Google UI on the page is the button inside the sign-in overlay (opened
+  // from the header's Sign in pill). One Tap remains solely the last-resort
+  // re-auth path for a lapsed session (interactiveRefresh).
+  if (currentUser) {
     // Signed in from a restored session — if the token is getting old, slide it
     // forward in the background. Fire-and-forget and fully silent (no UI); it
     // never blocks first paint.

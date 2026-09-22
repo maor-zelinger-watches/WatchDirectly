@@ -21,6 +21,14 @@ that component's heading.
 
 ## Frontend
 
+### 1.25.1 — 2026-09-22
+- **No Google UI outside the sign-in overlay.** 1.25.0 still auto-invoked
+  Google One Tap for signed-out visitors on load, so a Google-branded
+  popup appeared before anyone touched the Sign in pill. The automatic
+  prompt is gone: the header shows only our pill, and the only Google
+  surface is the button inside the overlay it opens. One Tap remains
+  solely the last-resort re-auth for a session that lapsed entirely.
+
 ### 1.25.0 — 2026-09-22
 - **Sign-in overlay with a marketing-email consent step.** The header's
   embedded Google button became a volt Sign in pill that opens a dialog
