@@ -109,8 +109,10 @@ function loadBackend(opts = {}) {
     videosSpreadsheet._tabs.Archive = makeSheet([VHEADERS, ...opts.archiveRows]);
   }
   const commentsSpreadsheet = makeSpreadsheet(makeSheet([['comment_id', 'video_id', 'user_name', 'text']]));
+  // The Votes tab lives in the CUSTOMERS spreadsheet (user-data store).
+  const customersSpreadsheet = makeSpreadsheet(makeSheet([['email', 'name']]));
   if (opts.voteRows) {
-    commentsSpreadsheet._tabs.Votes = makeSheet([['vote_id', 'video_id', 'user_email', 'created_at'], ...opts.voteRows]);
+    customersSpreadsheet._tabs.Votes = makeSheet([['vote_id', 'video_id', 'user_email', 'created_at'], ...opts.voteRows]);
   }
   const meta = makeSpreadsheet(makeSheet([['key', 'value']]));
   const logs = makeSpreadsheet(makeSheet([['ts', 'level', 'source', 'message']]));
@@ -118,6 +120,7 @@ function loadBackend(opts = {}) {
   const spreadsheets = {
     VIDEOS_ID: videosSpreadsheet,
     COMMENTS_ID: commentsSpreadsheet,
+    CUSTOMERS_ID: customersSpreadsheet,
     META_ID: meta,
     LOGS_ID: logs,
   };
@@ -139,6 +142,7 @@ function loadBackend(opts = {}) {
   const patched = SRC
     .replace(/VIDEOS:\s*'[^']+'/, "VIDEOS: 'VIDEOS_ID'")
     .replace(/COMMENTS:\s*'[^']+'/, "COMMENTS: 'COMMENTS_ID'")
+    .replace(/CUSTOMERS:\s*'[^']+'/, "CUSTOMERS: 'CUSTOMERS_ID'")
     .replace(/META:\s*'[^']+'/, "META: 'META_ID'")
     .replace(/LOGS:\s*'[^']+'/, "LOGS: 'LOGS_ID'");
 

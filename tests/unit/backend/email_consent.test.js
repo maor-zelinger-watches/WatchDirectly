@@ -78,18 +78,21 @@ function liveSheet(rows) {
 const CUSTOMERS_ID = SRC.match(/CUSTOMERS:\s*'([^']+)'/)[1];
 
 /**
- * Routes openById by spreadsheet id: the CUSTOMERS id resolves to the
- * customers sheet under test, every other spreadsheet (BLOCKED, META,
- * COMMENTS with its Votes/Stars/Bookmarks tabs, …) to a shared blank
+ * Routes openById by spreadsheet id: the CUSTOMERS id resolves to a
+ * spreadsheet whose named "Customers" tab is the sheet under test (its
+ * Votes/Stars/Bookmarks activity tabs resolve to the shared blank sheet),
+ * and every other spreadsheet (BLOCKED, META, COMMENTS, …) to the blank
  * sheet — so the customers grid can never double as the block list.
  */
 function spreadsheetApp(customers, blank) {
-  const wrap = (first) => ({
+  const wrap = (first, named = {}) => ({
     getSheets: () => [first],
-    getSheetByName: () => blank,
+    getSheetByName: (name) => (name in named ? named[name] : blank),
     insertSheet: () => blank,
   });
-  return { openById: (id) => wrap(id === CUSTOMERS_ID ? customers : blank) };
+  return {
+    openById: (id) => (id === CUSTOMERS_ID ? wrap(customers, { Customers: customers }) : wrap(blank)),
+  };
 }
 
 function memoryCache() {

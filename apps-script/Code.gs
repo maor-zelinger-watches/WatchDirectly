@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.20.0';
+const VERSION = '1.21.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -3678,18 +3678,90 @@ function updateCommentCount(videoId) {
 // ============================================================
 
 /**
- * Gets (or creates) the "Votes" tab inside the Comments spreadsheet.
- * Storing it as a named tab avoids provisioning a separate spreadsheet.
+ * Gets (or creates) a per-user activity tab ('Votes' | 'Stars' | 'Bookmarks')
+ * in the CUSTOMERS spreadsheet — the single user-data store. These tabs lived
+ * in the Comments spreadsheet before Backend 1.21.0 (a shortcut to avoid
+ * provisioning a spreadsheet, from before CUSTOMERS existed); the first access
+ * after the move creates the tab and copies the legacy tab's rows across.
+ *
+ * The create-and-migrate step is all-or-nothing: it runs under the script
+ * lock (two concurrent first requests can't both create the tab), and on any
+ * failure the half-made tab is deleted before rethrowing, so the next access
+ * retries the whole step instead of trusting an empty tab as migrated.
+ * Migration copies by id (column 1), so a retry never duplicates rows, and
+ * the legacy tab is left untouched for post-verification cleanup.
+ *
+ * @param {string} name - tab name, also the legacy Comments-spreadsheet tab name
+ * @param {string[]} headers - header row for a freshly created tab
+ * @returns {Sheet}
+ */
+function getUserDataTab(name, headers) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.CUSTOMERS);
+  var sheet = ss.getSheetByName(name);
+  if (sheet) return sheet;
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    sheet = ss.getSheetByName(name); // re-check under the lock
+    if (sheet) return sheet;
+    try {
+      sheet = ss.insertSheet(name);
+      sheet.appendRow(headers);
+      var copied = migrateLegacyUserTab(name, sheet, headers);
+      if (copied > 0) {
+        log('INFO', 'getUserDataTab', name + ': migrated ' + copied + ' row(s) from the Comments spreadsheet');
+      }
+      return sheet;
+    } catch (e) {
+      if (sheet) {
+        try { ss.deleteSheet(sheet); } catch (e2) { /* next access still retries */ }
+      }
+      throw e;
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Copies every row of the legacy Comments-spreadsheet tab of this name into
+ * `target`, skipping ids (column 1) already present, and returns the count.
+ * Throws on failure — the caller undoes the tab creation so the migration is
+ * retried rather than silently skipped.
+ */
+function migrateLegacyUserTab(name, target, headers) {
+  var legacy = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS).getSheetByName(name);
+  if (!legacy) return 0; // fresh install — nothing to migrate
+  var rows = legacy.getDataRange().getValues();
+  if (rows.length <= 1) return 0;
+
+  var existing = {};
+  var current = target.getDataRange().getValues();
+  for (var i = 1; i < current.length; i++) existing[String(current[i][0])] = true;
+
+  var toCopy = [];
+  for (var r = 1; r < rows.length; r++) {
+    var id = rows[r][0];
+    if (id === '' || id === null || id === undefined || existing[String(id)]) continue;
+    var row = rows[r].slice(0, headers.length);
+    while (row.length < headers.length) row.push('');
+    toCopy.push(row);
+  }
+  if (toCopy.length) {
+    var range = target.getRange(target.getLastRow() + 1, 1, toCopy.length, headers.length);
+    range.setNumberFormat('@'); // plain text, like the tabs' own writes
+    range.setValues(toCopy);
+  }
+  return toCopy.length;
+}
+
+/**
+ * Gets (or creates) the "Votes" tab of the CUSTOMERS spreadsheet.
  * @returns {Sheet}
  */
 function getVotesSheet() {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS);
-  var sheet = ss.getSheetByName('Votes');
-  if (!sheet) {
-    sheet = ss.insertSheet('Votes');
-    sheet.appendRow(['vote_id', 'video_id', 'user_email', 'created_at']);
-  }
-  return sheet;
+  return getUserDataTab('Votes', ['vote_id', 'video_id', 'user_email', 'created_at']);
 }
 
 /**
@@ -3919,18 +3991,11 @@ function bumpArchivedVoteCount(videoId, delta) {
 // ============================================================
 
 /**
- * Gets (or creates) the "Stars" tab inside the Comments spreadsheet,
- * following the same pattern as the Votes tab.
+ * Gets (or creates) the "Stars" tab of the CUSTOMERS spreadsheet.
  * @returns {Sheet}
  */
 function getStarsSheet() {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS);
-  var sheet = ss.getSheetByName('Stars');
-  if (!sheet) {
-    sheet = ss.insertSheet('Stars');
-    sheet.appendRow(['star_id', 'channel_name', 'user_email', 'created_at']);
-  }
-  return sheet;
+  return getUserDataTab('Stars', ['star_id', 'channel_name', 'user_email', 'created_at']);
 }
 
 /**
@@ -4083,16 +4148,22 @@ function handleBootstrap(data) {
 }
 
 // ============================================================
-// CUSTOMERS — every signed-in account + its marketing-email consent
+// CUSTOMERS — the single user-data spreadsheet
 // ============================================================
 //
-// Lives in its OWN spreadsheet (SPREADSHEET_IDS.CUSTOMERS) so the operator
-// can share the mailing list without exposing comments/votes. One row per
-// Google account: the row is created the first time the account signs in
-// (bootstrap), and marketing_consent stays blank until the person answers
-// the overlay prompt — blank is "never asked/answered", never "no". The
-// timestamped consent_updated_at cell is the compliance record: only rows
-// with marketing_consent = 'yes' may ever be emailed.
+// SPREADSHEET_IDS.CUSTOMERS holds everything keyed to a signed-in account:
+// the Customers tab (identity + marketing consent) plus the Votes, Stars,
+// and Bookmarks activity tabs (getUserDataTab above). One place to export
+// or delete a user's data — their comments, which are public content, are
+// the only per-user rows elsewhere. NOTE: because the activity tabs live
+// here, sharing this spreadsheet shares activity too — hand off a mailing
+// list by exporting the Customers tab, not by sharing the file.
+//
+// Customers rows: one per Google account, created the first time the
+// account signs in (bootstrap); marketing_consent stays blank until the
+// person answers the overlay prompt — blank is "never asked/answered",
+// never "no". The timestamped consent_updated_at cell is the compliance
+// record: only rows with marketing_consent = 'yes' may ever be emailed.
 
 var CUSTOMER_HEADERS = ['email', 'name', 'marketing_consent', 'consent_updated_at', 'first_seen_at', 'source'];
 
@@ -4108,16 +4179,33 @@ var CUSTOMER_HEADER_ALIASES = {
 };
 
 /**
- * The Customers sheet (first sheet of its own spreadsheet), with its header
- * row normalized to CUSTOMER_HEADERS on every access (idempotent — writes
- * only when something differs). An empty sheet, or one holding only a
- * header row, gets the canonical row outright; once data rows exist,
- * recognized alias titles are renamed in place and missing canonical
- * columns are appended on the right — existing data is never reordered.
+ * The "Customers" tab of the CUSTOMERS spreadsheet, with its header row
+ * normalized to CUSTOMER_HEADERS on every access (idempotent — writes only
+ * when something differs). An empty sheet, or one holding only a header row,
+ * gets the canonical row outright; once data rows exist, recognized alias
+ * titles are renamed in place and missing canonical columns are appended on
+ * the right — existing data is never reordered.
+ *
+ * Looked up BY NAME, not by position: the spreadsheet also carries the
+ * Votes/Stars/Bookmarks tabs, so "first tab" stopped being a safe address
+ * the moment a tab could be dragged. The pre-consolidation spreadsheet held
+ * a single unnamed tab (e.g. "Sheet1") — the first access claims the first
+ * non-activity tab by renaming it, so existing rows keep working; a
+ * brand-new spreadsheet gets a fresh tab.
  * @returns {Sheet}
  */
 function getCustomersSheet() {
-  var sheet = getSheet('CUSTOMERS');
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.CUSTOMERS);
+  var sheet = ss.getSheetByName('Customers');
+  if (!sheet) {
+    var tabs = ss.getSheets();
+    for (var i = 0; i < tabs.length; i++) {
+      var n = tabs[i].getName();
+      if (n !== 'Votes' && n !== 'Stars' && n !== 'Bookmarks') { sheet = tabs[i]; break; }
+    }
+    if (sheet) sheet.setName('Customers');
+    else sheet = ss.insertSheet('Customers');
+  }
   ensureCustomerHeaders(sheet);
   return sheet;
 }
@@ -4339,18 +4427,11 @@ function handleEmailConsent(data) {
 // ============================================================
 
 /**
- * Gets (or creates) the "Bookmarks" tab inside the Comments spreadsheet,
- * following the same pattern as the Votes and Stars tabs.
+ * Gets (or creates) the "Bookmarks" tab of the CUSTOMERS spreadsheet.
  * @returns {Sheet}
  */
 function getBookmarksSheet() {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS);
-  var sheet = ss.getSheetByName('Bookmarks');
-  if (!sheet) {
-    sheet = ss.insertSheet('Bookmarks');
-    sheet.appendRow(['bookmark_id', 'video_id', 'user_email', 'created_at']);
-  }
-  return sheet;
+  return getUserDataTab('Bookmarks', ['bookmark_id', 'video_id', 'user_email', 'created_at']);
 }
 
 /**

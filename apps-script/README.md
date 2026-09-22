@@ -12,16 +12,26 @@ see) needs no operator action once deployed — it reads from the backend.
 
 ## How the data is stored
 
-Each "sheet" is a **separate Google Spreadsheet**. There are six:
+Each "sheet" is a **separate Google Spreadsheet**. There are eight:
 
 | Spreadsheet | What it holds | Do you edit it? |
 |---|---|---|
 | **CHANNELS** | The list of channels/sites the app pulls from | ✅ Yes — this is where you add channels |
-| **VIDEOS** | Every fetched video/article (filled automatically) | ❌ No — the crawl manages it |
+| **VIDEOS** | Every fetched video/article (filled automatically; Archive tab for aged-out items) | ❌ No — the crawl manages it |
 | **META** | Settings & secrets (see the config table below) | ✅ Yes — for settings/keys |
 | **BLOCKED** | Users banned from commenting | ✅ Yes — for moderation |
 | **COMMENTS** | User comments (filled automatically) | ❌ No |
+| **CUSTOMERS** | Everything per signed-in user: the **Customers** tab (account + email consent) plus the **Votes**, **Stars**, and **Bookmarks** tabs | ❌ No — the app manages it |
 | **LOGS** | Diagnostic log (filled automatically) | ❌ No |
+| **CLIENT_ERRORS** | Frontend error reports (filled automatically) | ❌ No |
+
+> **CUSTOMERS is the one user-data spreadsheet.** Exporting or deleting
+> everything about a user happens there (plus their public comments). Because
+> the activity tabs live in the same file, **don't share the spreadsheet to
+> hand off a mailing list** — export the Customers tab instead. (The
+> Votes/Stars/Bookmarks tabs moved here from COMMENTS; the move is automatic
+> on first use after deploying, and the old COMMENTS tabs are left in place —
+> delete them by hand once you've confirmed stars/bookmarks still work.)
 
 ---
 
