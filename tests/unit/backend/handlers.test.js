@@ -667,4 +667,40 @@ describe('handleGetChannels (Channels tab + search host-matching data)', () => {
     const be = loadBackend({ sheet: channelsSheet(rows) });
     expect(be.handleGetChannels().channels[0].avatar).toBe('');
   });
+
+  it('classifies platform from the public url: youtube vs. article (article is the default)', () => {
+    const rows = [
+      ['Nico Leonard', '', 'https://www.youtube.com/@NicoLeonard', '', true],
+      ['Worn & Wound', '', 'https://www.wornandwound.com', '', true],
+      ['No URL', '', '', '', true],
+    ];
+    const be = loadBackend({ sheet: channelsSheet(rows) });
+    const channels = be.handleGetChannels().channels;
+    expect(channels[0].platform).toBe('youtube');
+    expect(channels[1].platform).toBe('article');
+    // No YouTube link anywhere = article, so nothing ships unclassified
+    expect(channels[2].platform).toBe('article');
+  });
+
+  it('falls back to feed_url for platform and favicon when url is blank', () => {
+    const HEADERS_WITH_FEED = ['channel_name', 'host', 'url', 'avatar', 'feed_url', 'enabled'];
+    const sheet = blankSheet({
+      getDataRange: () => ({ getValues: () => [
+        HEADERS_WITH_FEED,
+        // Onboarded from a pasted feed URL — url column never filled
+        ['Fratello', '', '', '', 'https://www.fratellowatches.com/feed/', true],
+        ['YT via feed', '', '', '', 'https://www.youtube.com/feeds/videos.xml?channel_id=UCabc', true],
+      ] }),
+    });
+    const be = loadBackend({ sheet });
+    const channels = be.handleGetChannels().channels;
+
+    expect(channels[0].platform).toBe('article');
+    expect(channels[0].avatar).toBe('https://www.google.com/s2/favicons?domain=fratellowatches.com&sz=128');
+    // feed_url stays private even though it was consulted
+    expect(channels[0].feed_url).toBeUndefined();
+
+    expect(channels[1].platform).toBe('youtube');
+    expect(channels[1].avatar).toBe(''); // no generic YouTube favicon
+  });
 });

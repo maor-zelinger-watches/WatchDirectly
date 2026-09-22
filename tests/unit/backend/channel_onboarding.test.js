@@ -66,14 +66,41 @@ const BLOG_HTML = `<!doctype html><html><head><title>My Blog</title></head><body
 
 const RSS_BODY = `<?xml version="1.0"?><rss version="2.0"><channel><title>My Blog</title></channel></rss>`;
 
+// A site with apple-touch-icons (two sizes, relative hrefs) and a declared feed.
+const PAPER_HTML = `<!doctype html><html><head>
+  <meta property="og:site_name" content="Paper Mag">
+  <link rel="apple-touch-icon" sizes="120x120" href="/icons/touch-120.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/icons/touch-180.png?v=2&amp;x=1">
+  <link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
+</head><body></body></html>`;
+
+// Its feed carries a channel-level <link> (the site) and <image> — plus an item
+// whose own <link>/media must NOT be mistaken for either.
+const PAPER_FEED = `<?xml version="1.0"?><rss version="2.0"><channel>
+  <title>Paper Mag</title>
+  <link>https://paper.example</link>
+  <image><url>https://paper.example/feed-logo.png</url><title>Paper Mag</title><link>https://paper.example</link></image>
+  <item><title>A story</title><link>https://paper.example/a-story</link></item>
+</channel></rss>`;
+
+// A site with NO touch icon whose feed declares an (http://) image.
+const MAG_HTML = `<!doctype html><html><head><title>Mag</title>
+  <link rel="alternate" type="application/rss+xml" href="https://mag.example/feed.xml">
+</head><body></body></html>`;
+const MAG_FEED = `<?xml version="1.0"?><rss version="2.0"><channel><title>Mag</title>
+  <image><url>http://mag.example/feed-logo.png</url></image>
+</channel></rss>`;
+
 function ok200(text) {
   return { getResponseCode: () => 200, getContentText: () => text, getAllHeaders: () => ({}) };
 }
 
 function load(channelRows, opts = {}) {
+  const metaRows = (opts.metaRows || [['key', 'value'], ['log_level', 'ERROR']]).map((r) => r.slice());
+  if (opts.adminToken) metaRows.push(['admin_token', opts.adminToken]);
   const sheets = {
     CHANNELS_ID: opts.channelsSheet || makeSheet([CHANNEL_HEADERS, ...channelRows]),
-    META_ID: makeSheet(opts.metaRows || [['key', 'value'], ['log_level', 'ERROR']]),
+    META_ID: makeSheet(metaRows),
   };
   const calls = [];
   const fetch = (u) => {
@@ -82,10 +109,16 @@ function load(channelRows, opts = {}) {
     if (u === 'https://news.example') return ok200(NEWS_HTML);
     if (u === 'https://blog.example') return ok200(BLOG_HTML);
     if (u === 'https://blog.example/feed/') return ok200(RSS_BODY);
+    if (u === 'https://paper.example') return ok200(PAPER_HTML);
+    if (u === 'https://paper.example/rss.xml') return ok200(PAPER_FEED);
+    if (u === 'https://mag.example') return ok200(MAG_HTML);
+    if (u === 'https://mag.example/feed.xml') return ok200(MAG_FEED);
     return { getResponseCode: () => 404, getContentText: () => '', getAllHeaders: () => ({}) };
   };
 
-  const responses = []; // every jsonResponse payload, parsed back for assertions
+  // jsonResponse serializes through ContentService; capture each payload so
+  // doPost's replies can be asserted on.
+  const responses = [];
   const globals = {
     UrlFetchApp: { fetch },
     SpreadsheetApp: { openById: (id) => ({ getSheets: () => [sheets[id]] }) },
@@ -106,6 +139,11 @@ function load(channelRows, opts = {}) {
   const names = ['enrichChannels', 'resolveChannelFromUrl', 'scheduledFetchAllFeeds', 'runScheduledEnrichment', 'handleAddChannel', 'doPost'];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
   return { ...factory(...Object.values(globals)), sheets, calls, responses };
+}
+
+/** Builds the doPost event Apps Script hands the web app for a JSON body. */
+function postEvent(body) {
+  return { postData: { contents: JSON.stringify(body) } };
 }
 
 /** Column lookup against the header row. */
@@ -168,14 +206,106 @@ describe('enrichChannels — fills missing channel metadata from a URL', () => {
 
   it('defaults a blank enabled without a network fetch when the feed already exists', () => {
     const be = load([
-      ['Ready News', '', '', '', '', 'https://news2.example', '', 'https://news2.example/rss', '', ''],
+      ['Ready News', '', '', '', '', 'https://news2.example', '', 'https://news2.example/rss', '', 'https://news2.example/icon.png'],
     ]);
     const summary = be.enrichChannels();
     expect(summary.processed).toBe(1);
-    expect(be.calls).toHaveLength(0); // name + feed already present -> no fetch
+    expect(be.calls).toHaveLength(0); // name + feed + avatar already present -> no fetch
     const grid = be.sheets.CHANNELS_ID._grid;
     expect(cell(grid, 1, 'enabled')).toBe(true);
     expect(cell(grid, 1, 'feed_url')).toBe('https://news2.example/rss'); // preserved
+  });
+
+  it('article avatar: picks the LARGEST apple-touch-icon, resolved absolute', () => {
+    const be = load([
+      ['', '', '', '', '', 'https://paper.example', '', '', '', ''],
+    ]);
+    be.enrichChannels();
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(cell(grid, 1, 'avatar')).toBe('https://paper.example/icons/touch-180.png?v=2&x=1');
+    expect(cell(grid, 1, 'feed_url')).toBe('https://paper.example/rss.xml');
+    expect(cell(grid, 1, 'channel_name')).toBe('Paper Mag');
+  });
+
+  it('article avatar: falls back to the feed <image> (https-upgraded) when the site has no touch icon', () => {
+    const be = load([
+      ['', '', '', '', '', 'https://mag.example', '', '', '', ''],
+    ]);
+    be.enrichChannels();
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(cell(grid, 1, 'avatar')).toBe('https://mag.example/feed-logo.png');
+  });
+
+  it('article avatar: stays blank when neither source exists (favicon at read time)', () => {
+    // news.example has no touch icon and its declared feed 404s in the mock.
+    const be = load([
+      ['', '', '', '', '', 'https://news.example', '', '', '', ''],
+    ]);
+    be.enrichChannels();
+    expect(cell(be.sheets.CHANNELS_ID._grid, 1, 'avatar')).toBe('');
+  });
+
+  it('url-less article row: resolves via feed_url, filling url + avatar from the feed\'s site', () => {
+    const be = load([
+      ['', '', '', '', '', '', '', 'https://paper.example/rss.xml', '', ''],
+    ]);
+    be.enrichChannels();
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(cell(grid, 1, 'url')).toBe('https://paper.example'); // from the feed's channel <link>
+    expect(cell(grid, 1, 'avatar')).toBe('https://paper.example/icons/touch-180.png?v=2&x=1');
+    expect(cell(grid, 1, 'channel_name')).toBe('Paper Mag');
+    expect(cell(grid, 1, 'feed_url')).toBe('https://paper.example/rss.xml'); // preserved
+    expect(cell(grid, 1, 'enabled')).toBe(true);
+  });
+
+  it('url-less YouTube row: fills the canonical channel url and id from feed_url', () => {
+    const be = load([
+      ['Teddy', '', '', '', '', '', '', `https://www.youtube.com/feeds/videos.xml?channel_id=${YT_CHANNEL_ID}`, true, ''],
+    ]);
+    be.enrichChannels();
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(cell(grid, 1, 'url')).toBe('https://www.youtube.com/channel/' + YT_CHANNEL_ID);
+    expect(cell(grid, 1, 'channel_id')).toBe(YT_CHANNEL_ID);
+    expect(cell(grid, 1, 'channel_name')).toBe('Teddy'); // curated name untouched
+  });
+});
+
+describe('admin enrich action (doPost)', () => {
+  it('refuses without a valid admin token, and fetches nothing', () => {
+    const be = load(
+      [['', '', '', '', '', 'https://paper.example', '', '', '', '']],
+      { adminToken: 'secret-token' },
+    );
+    be.doPost(postEvent({ action: 'enrich', token: 'wrong' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Unauthorized' });
+    expect(be.calls).toHaveLength(0);
+    // Nothing was filled
+    expect(cell(be.sheets.CHANNELS_ID._grid, 1, 'feed_url')).toBe('');
+  });
+
+  it('refuses when no admin_token is configured at all', () => {
+    const be = load([['', '', '', '', '', 'https://paper.example', '', '', '', '']]);
+    be.doPost(postEvent({ action: 'enrich', token: '' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Unauthorized' });
+    expect(be.calls).toHaveLength(0);
+  });
+
+  it('runs enrichChannels with a valid token and returns its summary', () => {
+    const be = load(
+      [['', '', '', '', '', 'https://paper.example', '', '', '', '']],
+      { adminToken: 'secret-token' },
+    );
+    be.doPost(postEvent({ action: 'enrich', token: 'secret-token' }));
+
+    const res = be.responses.at(-1);
+    expect(res.status).toBe('ok');
+    expect(res.processed).toBe(1);
+    expect(res.filled).toBeGreaterThan(0);
+    expect(res.results[0]).toMatchObject({ ok: true });
+    // The sheet actually got the backfill
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(cell(grid, 1, 'feed_url')).toBe('https://paper.example/rss.xml');
+    expect(cell(grid, 1, 'avatar')).toBe('https://paper.example/icons/touch-180.png?v=2&x=1');
   });
 });
 
@@ -240,8 +370,6 @@ describe('handleAddChannel — the password-protected add-channel form endpoint'
     // Recent marker keeps scheduleRefresh from wanting a real trigger.
     ['fetch_in_progress', new Date().toISOString()],
   ];
-
-  const postEvent = (body) => ({ postData: { contents: JSON.stringify(body) } });
 
   it('resolves a YouTube URL and appends a fully-enriched, enabled row', () => {
     const be = load([], { metaRows: ADMIN_META() });

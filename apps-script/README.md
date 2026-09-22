@@ -44,9 +44,12 @@ Each "sheet" is a **separate Google Spreadsheet**. There are six:
    below), then force a refresh.
 
 It visits the link and fills in the rest automatically:
-- **YouTube** → `channel_id`, `feed_url`, `channel_name`, `avatar`.
-- **News/blog** → `feed_url` and `channel_name`; the icon is pulled from the
-  site's favicon automatically, so `avatar` stays blank.
+- **YouTube** → `channel_id`, `feed_url`, `channel_name`, `avatar` (and the
+  canonical channel `url` if you pasted a feed URL).
+- **News/blog** → `feed_url`, `channel_name`, the site `url` (from the feed,
+  if you pasted a feed URL), and `avatar`: the site's apple-touch-icon when it
+  has one, else the image the feed itself declares, else blank — a blank
+  avatar falls back to the site's favicon automatically when served.
 
 It also flips the channel **on** (`enabled` → TRUE) so it starts being crawled.
 You can paste several rows and run once. It **only fills blank cells**, so
@@ -141,6 +144,20 @@ Send a `POST` to the web-app URL with a JSON body:
 ```
 
 Returns recent log entries. (Sent as POST so the token never lands in a URL.)
+
+### ➕ Run channel enrichment remotely
+
+Send a `POST` to the web-app URL with a JSON body:
+
+```json
+{ "action": "enrich", "token": "YOUR_ADMIN_TOKEN" }
+```
+
+Runs `enrichChannels` — the same backfill as the editor's Run button (fills
+names, feeds, avatars, urls for rows that are missing them) — and returns its
+summary (`processed`, `filled`, per-row `results`). Useful after pasting new
+channel URLs into the CHANNELS sheet when you don't have editor access; pair
+with `refresh` to crawl the new channels immediately.
 
 ---
 

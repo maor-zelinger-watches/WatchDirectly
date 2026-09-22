@@ -756,6 +756,48 @@ img {
   color: var(--accent);
 }
 
+/* Platform mark — pinned to the card's top-left corner as the exact mirror
+   of the favourite star (same 30px centered box, same corner inset): the
+   YouTube play lozenge (inline SVG) or the 📰 emoji for article sites.
+   Decorative (aria-hidden); the figure link's aria-label carries the
+   platform for screen readers. */
+.channel-card__platform {
+  position: absolute;
+  top: var(--sp-2);
+  left: var(--sp-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  line-height: 1;
+  font-size: 18px; /* sizes the 📰 emoji; the SVG carries its own size */
+}
+
+.channel-card__platform svg {
+  display: block;
+}
+
+/* Avatar ring — red for YouTube channels, hairline grey for article sites.
+   Drawn as a stacked box-shadow (surface-colored gap, then the ring) so it
+   hugs the circular figure without shifting the layout. */
+.channel-card[data-platform="youtube"] .channel-card__figure {
+  box-shadow: 0 0 0 3px var(--bg-surface), 0 0 0 5px #f00;
+}
+
+.channel-card[data-platform="article"] .channel-card__figure {
+  box-shadow: 0 0 0 3px var(--bg-surface), 0 0 0 5px var(--text-muted);
+}
+
+/* Platform filter (chips above the Channels grid): cards carry
+   data-platform, the container carries one feed--hide-platform-<value>
+   class per hidden platform — visibility is pure CSS, no re-render.
+   Scoped to .feed--channels so the classes are inert on video views. */
+.feed--channels.feed--hide-platform-youtube .channel-card[data-platform="youtube"],
+.feed--channels.feed--hide-platform-article .channel-card[data-platform="article"] {
+  display: none;
+}
+
 /* Favourite star, pinned to the card's top-right corner. Resets the negative
    inline-meta offsets .media-card__star carries and enlarges the tap target. */
 .channel-card__star {

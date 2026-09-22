@@ -237,12 +237,14 @@ describe('BE14 — handleGetChannels publishes only whitelisted fields', () => {
   // must never reach the anonymous response.
   const CH_HEADERS = ['channel_name', 'host', 'url', 'avatar', 'enabled', 'notes', 'contact_email', 'api_key'];
 
-  it('omits operator-added columns, keeping only channel_name/host/url/avatar', () => {
+  it('omits operator-added columns, keeping only channel_name/host/url/avatar (+ computed platform)', () => {
     const be = load({
       channelsGrid: [CH_HEADERS, ['A', 'Host A', 'https://a.com', 'https://cdn/a.png', true, 'private note', 'ops@x.com', 'SECRETKEY']],
     });
     const ch = be.handleGetChannels().channels[0];
-    expect(Object.keys(ch).sort()).toEqual(['avatar', 'channel_name', 'host', 'url']);
+    // `platform` is computed (never copied from the sheet), so it can't leak
+    // operator data — everything else stays whitelisted.
+    expect(Object.keys(ch).sort()).toEqual(['avatar', 'channel_name', 'host', 'platform', 'url']);
     expect(ch.notes).toBeUndefined();
     expect(ch.contact_email).toBeUndefined();
     expect(ch.api_key).toBeUndefined();

@@ -18,18 +18,26 @@ const now = Date.now();
 const MOCK_CHANNELS = {
   status: 'ok',
   channels: [
-    'Nico Leonard', 'Producer Michael', 'Teddy Baldassarre', 'Watchfinder & Co.',
-    'The Urban Gentry', 'Roman Sharf (Luxury Bazaar)', 'Hodinkee', 'Just One More Watch',
-    'Jenni Elle', 'Bark and Jack', "Ben's Watch Club", 'Federico Talks Watches',
-    'The Time Teller', 'Long Island Watch', 'YoureTerrific',
-    'The 1916 Company (formerly WatchBox)', 'Andrew Morgan Watches', 'Archieluxury',
-    'Britt Pearce',
-  ].map((channel_name) => ({
-    channel_name,
-    host: channel_name,
-    url: `https://www.youtube.com/@${channel_name.replace(/\W/g, '')}`,
-    avatar: `https://yt3.googleusercontent.com/${channel_name.replace(/\W/g, '')}`,
-  })),
+    ...[
+      'Nico Leonard', 'Producer Michael', 'Teddy Baldassarre', 'Watchfinder & Co.',
+      'The Urban Gentry', 'Roman Sharf (Luxury Bazaar)', 'Hodinkee', 'Just One More Watch',
+      'Jenni Elle', 'Bark and Jack', "Ben's Watch Club", 'Federico Talks Watches',
+      'The Time Teller', 'Long Island Watch', 'YoureTerrific',
+      'The 1916 Company (formerly WatchBox)', 'Andrew Morgan Watches', 'Archieluxury',
+      'Britt Pearce',
+    ].map((channel_name) => ({
+      channel_name,
+      host: channel_name,
+      url: `https://www.youtube.com/@${channel_name.replace(/\W/g, '')}`,
+      avatar: `https://yt3.googleusercontent.com/${channel_name.replace(/\W/g, '')}`,
+    })),
+    // Article outlets (non-YouTube URL, no avatar → monogram) so the platform
+    // badge and the platform filter chips have both kinds to work on.
+    { channel_name: 'Fratello', host: 'fratellowatches.com', url: 'https://www.fratellowatches.com', avatar: '' },
+    { channel_name: 'Monochrome', host: 'monochrome-watches.com', url: 'https://monochrome-watches.com', avatar: '' },
+    // A row with no public fields at all — must still classify (as article).
+    { channel_name: 'Mystery Journal', host: '', url: '', avatar: '' },
+  ],
 };
 
 // Teddy and Nico both exist in MOCK_CHANNELS, so a star toggled on a
@@ -171,6 +179,69 @@ test.describe('Channels tab', () => {
     await expect(page.locator('#feed-container')).not.toHaveClass(/feed--channels/);
     await expect(page.locator('.media-card')).toHaveCount(2);
     await expect(page.locator('#feed-controls')).toBeVisible();
+  });
+
+  test('cards carry a platform mark: YouTube vs. article site', async ({ page }) => {
+    await setup(page);
+    await openChannels(page);
+
+    const teddy = page.locator('.channel-card', { hasText: 'Teddy Baldassarre' });
+    await expect(teddy).toHaveAttribute('data-platform', 'youtube');
+    const teddyMark = teddy.locator('.channel-card__platform');
+    await expect(teddyMark).toHaveAttribute('title', 'YouTube channel');
+    await expect(teddyMark.locator('svg')).toBeVisible(); // inline play lozenge
+
+    const fratello = page.locator('.channel-card', { hasText: 'Fratello' });
+    await expect(fratello).toHaveAttribute('data-platform', 'article');
+    const fratelloMark = fratello.locator('.channel-card__platform');
+    await expect(fratelloMark).toHaveAttribute('title', 'Article site');
+    await expect(fratelloMark).toHaveText('📰');
+  });
+
+  test('no card ships unmarked — a row with no links defaults to article', async ({ page }) => {
+    await setup(page);
+    await openChannels(page);
+
+    // Every rendered card carries a platform mark…
+    const cardCount = await page.locator('.channel-card').count();
+    await expect(page.locator('.channel-card .channel-card__platform')).toHaveCount(cardCount);
+
+    // …including the row with no url/host/avatar at all.
+    const mystery = page.locator('.channel-card', { hasText: 'Mystery Journal' });
+    await expect(mystery).toHaveAttribute('data-platform', 'article');
+    await expect(mystery.locator('.channel-card__platform')).toHaveText('📰');
+  });
+
+  test('platform chips filter the grid and only exist on the Channels tab', async ({ page }) => {
+    await setup(page);
+
+    // Not on Latest…
+    await expect(page.locator('#channels-controls')).toBeHidden();
+
+    await openChannels(page);
+    const chips = page.locator('#platform-chips .chip');
+    await expect(chips).toHaveText(['All', 'YouTube', 'Articles']);
+    await expect(chips.filter({ hasText: 'All' })).toHaveClass(/chip--active/);
+
+    // YouTube-only: article outlets disappear, YouTube channels stay.
+    await chips.filter({ hasText: 'YouTube' }).click();
+    await expect(page.locator('.channel-card', { hasText: 'Fratello' })).toBeHidden();
+    await expect(page.locator('.channel-card', { hasText: 'Teddy Baldassarre' })).toBeVisible();
+
+    // Articles-only: the reverse.
+    await chips.filter({ hasText: 'Articles' }).click();
+    await expect(page.locator('.channel-card', { hasText: 'Teddy Baldassarre' })).toBeHidden();
+    await expect(page.locator('.channel-card', { hasText: 'Fratello' })).toBeVisible();
+    await expect(page.locator('.channel-card', { hasText: 'Monochrome' })).toBeVisible();
+
+    // All restores everything.
+    await chips.filter({ hasText: 'All' }).click();
+    await expect(page.locator('.channel-card', { hasText: 'Teddy Baldassarre' })).toBeVisible();
+    await expect(page.locator('.channel-card', { hasText: 'Fratello' })).toBeVisible();
+
+    // Leaving the tab hides the platform controls again.
+    await page.locator('.feed-tab', { hasText: 'Latest' }).click();
+    await expect(page.locator('#channels-controls')).toBeHidden();
   });
 });
 
