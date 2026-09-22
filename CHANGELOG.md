@@ -21,6 +21,23 @@ that component's heading.
 
 ## Frontend
 
+### 1.27.0 — 2026-09-22
+- **Liking a post now moves it within Top This Week immediately.** A vote
+  updated the button count everywhere (FE13) but nothing re-sorted the
+  loaded ranking, and the tab never refetches within a session
+  (`topLoaded` stays true), so the liked card kept its old position until
+  a full page reload. After the server confirms a vote, the loaded list
+  is now re-sorted client-side with an exact mirror of the backend's
+  ranking order and the Top tab repaints if it's visible — no extra
+  round trip. The saved first-page snapshot refreshes too (only while it
+  covers the whole loaded window), so the next session paints the new
+  order instantly.
+- **The local re-rank uses the new view-weighted score.** Backend 1.22.0
+  counts every 5,000 views as one upvote in the Top This Week ranking;
+  the client mirror (`CONFIG.TOP_WEEK_VIEWS_PER_VOTE`, kept in sync with
+  the backend constant) applies the same formula, so a liked card lands
+  exactly where the next server fetch would put it, views included.
+
 ### 1.26.0 — 2026-09-22
 - **Search now genuinely covers the whole catalog and archive.** The
   backend clamps every page request to 100 rows (BE11) and computes
@@ -663,6 +680,22 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.22.0 — 2026-09-22
+- **Top This Week now counts views: every 5,000 views equal one upvote.**
+  The ranking score becomes `vote_count + floor(view_count / 5000)`
+  (`topWeekScore`, weight in `TOP_WEEK_VIEWS_PER_VOTE`), so a widely
+  watched video can rank without votes while a single view never
+  outweighs one. The score is derived from the stored counts at sort
+  time rather than saved as its own column — the crawl already refreshes
+  `view_count` for videos in the RSS window and invalidates the top-week
+  cache, so every view update re-ranks the window on the next read with
+  nothing extra to keep in sync. The pagination cursor carries the score
+  in place of the raw vote count (`score|date|id`), keeping deep scrolls
+  gapless under the new order; an in-flight cursor minted before this
+  deploy resumes slightly off-position at worst, which the client's
+  dedupe already absorbs. Mirrored by `CONFIG.TOP_WEEK_VIEWS_PER_VOTE`
+  in Frontend 1.27.0's local re-rank.
 
 ### 1.21.0 — 2026-09-22
 - **CUSTOMERS becomes the single user-data spreadsheet.** The Votes, Stars,

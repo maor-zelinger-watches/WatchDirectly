@@ -30,14 +30,14 @@ import {
   invalidatePrefetchBuffer, takeBufferedPage, refillPrefetchBuffer,
 } from './prefetch.js';
 import { prefetchComments, updateInlineCommentFormUI, setCommentsToggleCount } from './comments-ui.js';
-import { clearVoteMarkings } from './votes.js';
+import { clearVoteMarkings, setOnVotesChanged } from './votes.js';
 import { loadStarsFromStorage, clearStarMarkings, setOnStarsChanged } from './stars.js';
 import { loadBookmarksFromStorage, clearBookmarkMarkings, setOnBookmarksChanged } from './bookmarks.js';
 import { loadMyVotesAndStars } from './bootstrap.js';
 import { setupFullscreenKeys } from './fullscreen.js';
 import { handleDeepLink } from './share.js';
 import { setupSinglePlay } from './single-play.js';
-import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged, loadMoreTop } from './views.js';
+import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged, loadMoreTop, resortTopRanking } from './views.js';
 
 // The Starred view repaints when a star lands or the server reconciles —
 // registered here (not in stars.js) so stars.js stays view-agnostic.
@@ -49,6 +49,10 @@ setOnStarsChanged(() => {
 setOnBookmarksChanged(() => {
   if (state.view === 'bookmarks') update();
 });
+
+// A confirmed vote changes the count the Top This Week ranking sorts by —
+// re-rank the loaded list so the card moves without waiting for a refetch.
+setOnVotesChanged(() => resortTopRanking());
 
 // A content-type chip change may leave the filtered Latest feed too shallow —
 // registered here (not in views.js) because pagination lives in this module.

@@ -20,6 +20,15 @@ import { cssEscape } from './utils.js';
 // request settles.
 const votesInFlight = new Set();
 
+// Fires after a server-confirmed vote lands (count patched into every cached
+// row copy). app.js registers the Top This Week re-rank here — same shape as
+// stars.js's setOnStarsChanged, keeping votes.js view-agnostic.
+let onVotesChanged = () => {};
+
+export function setOnVotesChanged(fn) {
+  onVotesChanged = fn;
+}
+
 /** Updates every vote button for a video (both views may have one rendered). */
 function setVoteButtons(videoId, voted, count) {
   document.querySelectorAll(`.media-card__vote[data-video-id="${cssEscape(videoId)}"]`).forEach(btn => {
@@ -67,6 +76,8 @@ export async function toggleVote(videoId) {
     setVoteButtons(videoId, res.voted, res.vote_count);
     // Every cached copy of the row (+ localStorage, coalesced) — FE13.
     patchVideoEverywhere(videoId, { vote_count: res.vote_count });
+    // The new count may move this video within the Top This Week ranking.
+    onVotesChanged();
   } catch (error) {
     console.error('Failed to vote:', error);
     // Rollback — unless the failure signed the user out, in which case

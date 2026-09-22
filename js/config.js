@@ -7,7 +7,7 @@
  */
 
 export const CONFIG = {
-  APP_VERSION: '1.26.0',      // frontend version (npm semver) — bump on every
+  APP_VERSION: '1.27.0',      // frontend version (npm semver) — bump on every
                               // user-visible change; shown in the header and
                               // logged at boot. Backend has its own VERSION
                               // in apps-script/Code.gs; package.json tracks
@@ -15,6 +15,11 @@ export const CONFIG = {
   APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwyt7c8SWw9y0TnKq4RhcV7yLjS1JkXnNThYInpj-EnNYbA3ecgwVSX4gBIACNKHCqu0A/exec',
   GOOGLE_CLIENT_ID: '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com',
   PAGE_SIZE: 10,
+  TOP_WEEK_VIEWS_PER_VOTE: 5000, // Top This Week ranking weight: every this
+                              // many views counts as one upvote in the score
+                              // (floor division). Mirrors
+                              // TOP_WEEK_VIEWS_PER_VOTE in apps-script/Code.gs
+                              // — keep the two in sync.
   COMMENT_BATCH_SIZE: 10,     // ids per commentsBatch request (backend caps at 20)
   SEARCH_CHUNK_SIZE: 100,     // page size for building the search index; the
                               // catalog is fetched in parallel chunks of this

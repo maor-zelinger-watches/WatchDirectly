@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createMediaCard, sortVideos, filterVideos, isShort, mediaType, dedupeVideos, mergeTopRanking, searchFields } from '../../js/feed.js';
+import { createMediaCard, sortVideos, sortTopRanking, filterVideos, isShort, mediaType, dedupeVideos, mergeTopRanking, searchFields } from '../../js/feed.js';
 
 const mockVideo = {
   video_id: 'abc12345678',
@@ -379,6 +379,91 @@ describe('sortVideos', () => {
   it('handles single item', () => {
     const result = sortVideos([mockVideo]);
     expect(result).toHaveLength(1);
+  });
+});
+
+describe('sortTopRanking (mirror of the backend compareTopWeek order)', () => {
+  const v = (id, votes, publishedAt) => ({
+    video_id: id, vote_count: votes, published_at: publishedAt,
+  });
+
+  it('ranks by vote_count descending', () => {
+    const list = [
+      v('low', 2, '2026-05-07T08:00:00Z'),
+      v('hi', 9, '2026-05-05T08:00:00Z'),
+      v('mid', 5, '2026-05-06T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['hi', 'mid', 'low']);
+  });
+
+  it('breaks vote ties by published_at descending (newest first)', () => {
+    const list = [
+      v('older', 3, '2026-05-05T08:00:00Z'),
+      v('newer', 3, '2026-05-07T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['newer', 'older']);
+  });
+
+  it('breaks vote+time ties by video_id descending, matching the server', () => {
+    const list = [
+      v('aaa', 3, '2026-05-07T08:00:00Z'),
+      v('bbb', 3, '2026-05-07T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['bbb', 'aaa']);
+  });
+
+  it('treats a missing or non-numeric vote_count as zero', () => {
+    const list = [
+      { video_id: 'none', published_at: '2026-05-07T08:00:00Z' },
+      v('one', 1, '2026-05-05T08:00:00Z'),
+      { video_id: 'junk', vote_count: 'n/a', published_at: '2026-05-06T08:00:00Z' },
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['one', 'none', 'junk']);
+  });
+
+  it('sorts invalid dates oldest within a vote tier', () => {
+    const list = [
+      v('undated', 2, 'not-a-date'),
+      v('dated', 2, '2026-05-07T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['dated', 'undated']);
+  });
+
+  it('does not mutate the input array', () => {
+    const list = [v('a', 1, '2026-05-07T08:00:00Z'), v('b', 9, '2026-05-06T08:00:00Z')];
+    const ids = list.map(x => x.video_id);
+    sortTopRanking(list);
+    expect(list.map(x => x.video_id)).toEqual(ids);
+  });
+
+  it('counts every 5000 views as one upvote in the score', () => {
+    const list = [
+      { ...v('votes', 5, '2026-05-07T08:00:00Z'), view_count: 0 },
+      // 2 votes + floor(20000/5000) = 6 — outranks 5 raw votes.
+      { ...v('views', 2, '2026-05-05T08:00:00Z'), view_count: 20000 },
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['views', 'votes']);
+  });
+
+  it('floors the view weight — 4999 views add nothing', () => {
+    const list = [
+      // 3 + floor(4999/5000) = 3, older → below the newer 3-vote item.
+      { ...v('almost', 3, '2026-05-05T08:00:00Z'), view_count: 4999 },
+      { ...v('plain', 3, '2026-05-07T08:00:00Z'), view_count: 0 },
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['plain', 'almost']);
+
+    // One more view crosses the threshold: 3 + 1 = 4 beats 3.
+    list[0].view_count = 5000;
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['almost', 'plain']);
+  });
+
+  it('treats a missing view_count as zero (pure vote ranking)', () => {
+    const list = [
+      v('two', 2, '2026-05-07T08:00:00Z'),
+      v('nine', 9, '2026-05-05T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['nine', 'two']);
   });
 });
 
