@@ -122,6 +122,20 @@ Send a `POST` to the web-app URL with a JSON body:
 
 Returns recent log entries. (Sent as POST so the token never lands in a URL.)
 
+### ➕ Run channel enrichment remotely
+
+Send a `POST` to the web-app URL with a JSON body:
+
+```json
+{ "action": "enrich", "token": "YOUR_ADMIN_TOKEN" }
+```
+
+Runs `enrichChannels` — the same backfill as the editor's Run button (fills
+names, feeds, avatars, urls for rows that are missing them) — and returns its
+summary (`processed`, `filled`, per-row `results`). Useful after pasting new
+channel URLs into the CHANNELS sheet when you don't have editor access; pair
+with `refresh` to crawl the new channels immediately.
+
 ---
 
 ## Things that happen automatically (no action needed)

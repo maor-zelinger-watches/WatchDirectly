@@ -95,10 +95,12 @@ function ok200(text) {
   return { getResponseCode: () => 200, getContentText: () => text, getAllHeaders: () => ({}) };
 }
 
-function load(channelRows) {
+function load(channelRows, { adminToken } = {}) {
+  const metaRows = [['key', 'value'], ['log_level', 'ERROR']];
+  if (adminToken) metaRows.push(['admin_token', adminToken]);
   const sheets = {
     CHANNELS_ID: makeSheet([CHANNEL_HEADERS, ...channelRows]),
-    META_ID: makeSheet([['key', 'value'], ['log_level', 'ERROR']]),
+    META_ID: makeSheet(metaRows),
   };
   const calls = [];
   const fetch = (u) => {
@@ -114,13 +116,19 @@ function load(channelRows) {
     return { getResponseCode: () => 404, getContentText: () => '', getAllHeaders: () => ({}) };
   };
 
+  // jsonResponse serializes through ContentService; capture each payload so
+  // doPost's replies can be asserted on.
+  const responses = [];
   const globals = {
     UrlFetchApp: { fetch },
     SpreadsheetApp: { openById: (id) => ({ getSheets: () => [sheets[id]] }) },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     Utilities: { sleep() {} },
     Logger: { log() {} },
-    ContentService: { createTextOutput: () => ({ setMimeType: () => ({}) }), MimeType: { JSON: 'json' } },
+    ContentService: {
+      createTextOutput: (text) => { responses.push(JSON.parse(text)); return { setMimeType: () => ({}) }; },
+      MimeType: { JSON: 'json' },
+    },
     ScriptApp: {},
     XmlService: undefined,
   };
@@ -128,9 +136,14 @@ function load(channelRows) {
     .replace(/CHANNELS:\s*'[^']+'/, "CHANNELS: 'CHANNELS_ID'")
     .replace(/META:\s*'[^']+'/, "META: 'META_ID'");
 
-  const names = ['enrichChannels', 'resolveChannelFromUrl'];
+  const names = ['enrichChannels', 'resolveChannelFromUrl', 'doPost'];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
-  return { ...factory(...Object.values(globals)), sheets, calls };
+  return { ...factory(...Object.values(globals)), sheets, calls, responses };
+}
+
+/** Builds the doPost event Apps Script hands the web app for a JSON body. */
+function postEvent(body) {
+  return { postData: { contents: JSON.stringify(body) } };
 }
 
 /** Column lookup against the header row. */
@@ -254,6 +267,45 @@ describe('enrichChannels — fills missing channel metadata from a URL', () => {
     expect(cell(grid, 1, 'url')).toBe('https://www.youtube.com/channel/' + YT_CHANNEL_ID);
     expect(cell(grid, 1, 'channel_id')).toBe(YT_CHANNEL_ID);
     expect(cell(grid, 1, 'channel_name')).toBe('Teddy'); // curated name untouched
+  });
+});
+
+describe('admin enrich action (doPost)', () => {
+  it('refuses without a valid admin token, and fetches nothing', () => {
+    const be = load(
+      [['', '', '', '', '', 'https://paper.example', '', '', '', '']],
+      { adminToken: 'secret-token' },
+    );
+    be.doPost(postEvent({ action: 'enrich', token: 'wrong' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Unauthorized' });
+    expect(be.calls).toHaveLength(0);
+    // Nothing was filled
+    expect(cell(be.sheets.CHANNELS_ID._grid, 1, 'feed_url')).toBe('');
+  });
+
+  it('refuses when no admin_token is configured at all', () => {
+    const be = load([['', '', '', '', '', 'https://paper.example', '', '', '', '']]);
+    be.doPost(postEvent({ action: 'enrich', token: '' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Unauthorized' });
+    expect(be.calls).toHaveLength(0);
+  });
+
+  it('runs enrichChannels with a valid token and returns its summary', () => {
+    const be = load(
+      [['', '', '', '', '', 'https://paper.example', '', '', '', '']],
+      { adminToken: 'secret-token' },
+    );
+    be.doPost(postEvent({ action: 'enrich', token: 'secret-token' }));
+
+    const res = be.responses.at(-1);
+    expect(res.status).toBe('ok');
+    expect(res.processed).toBe(1);
+    expect(res.filled).toBeGreaterThan(0);
+    expect(res.results[0]).toMatchObject({ ok: true });
+    // The sheet actually got the backfill
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(cell(grid, 1, 'feed_url')).toBe('https://paper.example/rss.xml');
+    expect(cell(grid, 1, 'avatar')).toBe('https://paper.example/icons/touch-180.png?v=2&x=1');
   });
 });
 
