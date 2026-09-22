@@ -228,11 +228,43 @@ img {
   flex-shrink: 0;
 }
 
+/* Signed-out: our own pill opens the sign-in overlay (the official Google
+   button renders inside the overlay, not in the header). */
+.header__signin-btn {
+  padding: var(--sp-1) var(--sp-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bg-canvas);
+  background: var(--accent);
+  border-radius: var(--radius-lg);
+  transition: background var(--transition-fast);
+}
+
+.header__signin-btn:hover {
+  background: var(--accent-hover);
+}
+
 /* Signed-in user display */
 .header__user {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+/* Avatar + name are one button — the door to Email preferences. */
+.header__user-info {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 2px;
+  border-radius: var(--radius-lg);
+  transition: background var(--transition-fast);
+}
+
+.header__user-info:hover {
+  background: var(--bg-surface-hover);
 }
 
 .header__user-avatar {
@@ -1448,6 +1480,111 @@ body.fullscreen-mode {
 }
 
 
+
+/* ============================================================
+   SIGN-IN / EMAIL-CONSENT OVERLAY
+   One dialog, three faces (js/auth-overlay.js): Google sign-in,
+   the first-sign-in marketing-email question, Email preferences.
+   ============================================================ */
+
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 350; /* above the fullscreen overlay (300), below toasts (400) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+}
+
+.auth-overlay[hidden] {
+  display: none;
+}
+
+.auth-overlay__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.auth-overlay__dialog {
+  position: relative;
+  width: min(92vw, 400px);
+  padding: var(--sp-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  outline: none;
+}
+
+.auth-overlay__close {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  font-size: var(--fs-base);
+  line-height: 1;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast);
+}
+
+.auth-overlay__close:hover {
+  color: var(--text-primary);
+}
+
+.auth-overlay__title {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--sp-3);
+}
+
+.auth-overlay__copy {
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-4);
+}
+
+.auth-overlay__copy--muted {
+  color: var(--text-muted);
+}
+
+.auth-overlay__note {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  margin-top: var(--sp-3);
+}
+
+.auth-overlay__actions {
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: flex-end;
+}
+
+.auth-overlay__gsi {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-4) 0 var(--sp-2);
+  min-height: 44px;
+}
+
+.auth-overlay__pending {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-4) 0;
+}
+
+.btn--ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* ============================================================
    TOAST NOTIFICATIONS

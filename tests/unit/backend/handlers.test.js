@@ -29,9 +29,10 @@ function spreadsheetReturning(sheet) {
 function blankSheet(overrides = {}) {
   return {
     getDataRange: () => ({ getValues: () => [[]] }),
-    getRange: () => ({ setValue() {}, setValues() {}, setNumberFormat() {} }),
+    getRange: () => ({ setValue() {}, setValues() {}, setNumberFormat() {}, clearContent() {}, getValues: () => [[]] }),
     appendRow: () => {},
     getLastRow: () => 0,
+    getLastColumn: () => 0,
     ...overrides,
   };
 }

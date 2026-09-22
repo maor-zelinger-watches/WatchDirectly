@@ -35,10 +35,13 @@ function recordingSheet(rows) {
     _deleted: deleted,
     getDataRange: () => ({ getValues: () => grid.map((r) => r.slice()) }),
     getLastRow: () => grid.length,
+    getLastColumn: () => 0, // the CUSTOMERS header path degrades to a no-op here
     getRange: (row, col, numRows, numCols) => ({
       setNumberFormat(fmt) { formats.push({ numCols, fmt }); return this; },
       setValue() { return this; },
       setValues(values) { writes.push({ numCols, values }); return this; },
+      clearContent() { return this; },
+      getValues: () => [[]],
     }),
     appendRow: (r) => { grid.push(r.slice()); },
     deleteRow: (n) => { deleted.push(n); grid.splice(n - 1, 1); },
