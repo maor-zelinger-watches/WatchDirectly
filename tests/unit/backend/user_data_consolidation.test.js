@@ -113,10 +113,12 @@ describe('getUserDataTab — activity tabs live in the CUSTOMERS spreadsheet', (
 
     const sheet = be.getVotesSheet();
     expect(be.customersSS.getSheetByName('Votes')).toBe(sheet);
+    // getVotesSheet now creates the tab with the vote-trust `counted` column;
+    // legacy 4-col rows migrate padded with a blank counted (read as counted).
     expect(sheet._grid).toEqual([
-      VOTE_HEADERS,
-      ['v1', 'vidA', 'a@x.com', 't1'],
-      ['v2', 'vidB', 'b@x.com', 't2'],
+      ['vote_id', 'video_id', 'user_email', 'created_at', 'counted'],
+      ['v1', 'vidA', 'a@x.com', 't1', ''],
+      ['v2', 'vidB', 'b@x.com', 't2', ''],
     ]);
     expect(legacy._grid).toHaveLength(3); // legacy tab left untouched
   });
@@ -151,7 +153,10 @@ describe('getUserDataTab — activity tabs live in the CUSTOMERS spreadsheet', (
     expect(be.customersSS.getSheetByName('Votes')).toBeNull(); // rolled back
 
     const sheet = be.getVotesSheet(); // retry succeeds and migrates
-    expect(sheet._grid).toEqual([VOTE_HEADERS, ['v1', 'vidA', 'a@x.com', 't1']]);
+    expect(sheet._grid).toEqual([
+      ['vote_id', 'video_id', 'user_email', 'created_at', 'counted'],
+      ['v1', 'vidA', 'a@x.com', 't1', ''],
+    ]);
   });
 
   it('a fresh install (no legacy tab) just creates an empty, headed tab', () => {

