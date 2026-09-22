@@ -262,6 +262,21 @@ export function createApiClient(baseUrl) {
     },
 
     /**
+     * Adds a channel to the curated list from a bare URL (admin only, from
+     * the add-channel.html page). The password is the operator's admin token,
+     * sent in the POST body so it never appears in a URL. The backend
+     * resolves the URL (YouTube channel, site homepage, or RSS feed), refuses
+     * duplicates, appends an enabled row, and schedules a crawl.
+     *
+     * @param {string} url - YouTube channel / site homepage / RSS feed URL
+     * @param {string} password - The admin password
+     * @returns {Promise<{channel: {channel_name: string, platform: string, feed_url: string, avatar: string}}>}
+     */
+    async addChannel(url, password) {
+      return post({ action: 'addChannel', url, token: password });
+    },
+
+    /**
      * Exchanges a credential for a fresh app session token. Pass a Google ID
      * token (the first exchange right after sign-in) or an existing session
      * token (a silent renewal) — the backend accepts either and mints a new

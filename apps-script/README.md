@@ -54,13 +54,20 @@ re-running is always safe and never overwrites your edits.
 
 ### 🤝 Letting a co-editor add channels (no script access needed)
 
-Adding a channel is now pure spreadsheet editing, so anyone can do it: share
-the **CHANNELS** spreadsheet with their Google account as **Editor** (Share →
-their email — the spreadsheet only, not the script). They paste URLs into the
-`url` column exactly as above, and the next scheduled refresh enriches and
-enables the rows automatically. They never see the Apps Script editor, and
-since enrichment **only fills blank cells**, nothing they or you curated by
-hand is ever overwritten.
+Two ways, both without touching the Apps Script editor:
+
+- **The add-channel page (easiest):** `add-channel.html` on the live site is a
+  small password-protected form — paste the link, enter the admin password
+  (the `admin_token` value from META), done. It fills in everything, refuses
+  duplicates, and kicks off a crawl so the content shows up within minutes.
+  Share the page URL and the password with whoever should be able to add.
+- **The spreadsheet:** share the **CHANNELS** spreadsheet with their Google
+  account as **Editor** (Share → their email — the spreadsheet only, not the
+  script). They paste URLs into the `url` column exactly as above, and the
+  next scheduled refresh enriches and enables the rows automatically.
+
+Either way, enrichment **only fills blank cells**, so nothing curated by hand
+is ever overwritten.
 
 ### ⏸️ Pause or remove a channel
 
@@ -171,8 +178,8 @@ Each row is a `key` in column A and its `value` in column B.
 
 | Goal | Do this |
 |---|---|
-| Add a YouTube channel or news site | Paste its URL into CHANNELS — live on the next refresh (≤4h). Right now: run `enrichChannels`, then force a refresh |
-| Let someone else add channels | Share the CHANNELS spreadsheet with them as Editor |
+| Add a YouTube channel or news site | Use the `add-channel.html` page (admin password) — or paste its URL into CHANNELS, live on the next refresh (≤4h) |
+| Let someone else add channels | Give them the `add-channel.html` link + admin password, or share the CHANNELS spreadsheet as Editor |
 | Stop pulling from a channel | Set its `enabled` cell to `FALSE` |
 | See new content right now | `?action=refresh&token=…` |
 | Ban a commenter | Add their email to the BLOCKED sheet |

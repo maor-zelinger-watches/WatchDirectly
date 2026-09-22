@@ -85,23 +85,27 @@ function load(channelRows, opts = {}) {
     return { getResponseCode: () => 404, getContentText: () => '', getAllHeaders: () => ({}) };
   };
 
+  const responses = []; // every jsonResponse payload, parsed back for assertions
   const globals = {
     UrlFetchApp: { fetch },
     SpreadsheetApp: { openById: (id) => ({ getSheets: () => [sheets[id]] }) },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     Utilities: { sleep() {} },
     Logger: { log() {} },
-    ContentService: { createTextOutput: () => ({ setMimeType: () => ({}) }), MimeType: { JSON: 'json' } },
-    ScriptApp: {},
+    ContentService: {
+      createTextOutput: (text) => { responses.push(JSON.parse(text)); return { setMimeType: () => ({}) }; },
+      MimeType: { JSON: 'json' },
+    },
+    ScriptApp: opts.scriptApp || {},
     XmlService: undefined,
   };
   const patched = SRC
     .replace(/CHANNELS:\s*'[^']+'/, "CHANNELS: 'CHANNELS_ID'")
     .replace(/META:\s*'[^']+'/, "META: 'META_ID'");
 
-  const names = ['enrichChannels', 'resolveChannelFromUrl', 'scheduledFetchAllFeeds', 'runScheduledEnrichment'];
+  const names = ['enrichChannels', 'resolveChannelFromUrl', 'scheduledFetchAllFeeds', 'runScheduledEnrichment', 'handleAddChannel', 'doPost'];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
-  return { ...factory(...Object.values(globals)), sheets, calls };
+  return { ...factory(...Object.values(globals)), sheets, calls, responses };
 }
 
 /** Column lookup against the header row. */
@@ -224,5 +228,91 @@ describe('scheduledFetchAllFeeds — self-serve channel adds go live without the
     const be = load([], { channelsSheet: brokenChannels, metaRows: CRAWL_BUSY_META() });
     expect(be.runScheduledEnrichment()).toBeNull();       // swallowed, reported as failed
     expect(() => be.scheduledFetchAllFeeds()).not.toThrow(); // crawl leg still reached
+  });
+});
+
+describe('handleAddChannel — the password-protected add-channel form endpoint', () => {
+  const ADMIN_META = () => [
+    ['key', 'value'],
+    ['log_level', 'ERROR'],
+    ['admin_token', 'sekret-admin-token'],
+    // Recent marker keeps scheduleRefresh from wanting a real trigger.
+    ['fetch_in_progress', new Date().toISOString()],
+  ];
+
+  const postEvent = (body) => ({ postData: { contents: JSON.stringify(body) } });
+
+  it('resolves a YouTube URL and appends a fully-enriched, enabled row', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://www.youtube.com/@WatchGuy' });
+
+    expect(res.status).toBe('ok');
+    expect(res.channel).toEqual({
+      channel_name: 'Watch Guy',
+      platform: 'youtube',
+      feed_url: 'https://www.youtube.com/feeds/videos.xml?channel_id=' + YT_CHANNEL_ID,
+      avatar: 'https://yt3.googleusercontent.com/abc=s900-c-k-c0x00ffffff-no-rj',
+    });
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(grid).toHaveLength(2); // headers + the new row
+    expect(cell(grid, 1, 'channel_id')).toBe(YT_CHANNEL_ID);
+    expect(cell(grid, 1, 'url')).toBe('https://www.youtube.com/@WatchGuy');
+    expect(cell(grid, 1, 'enabled')).toBe(true);
+  });
+
+  it('schedules an async crawl after a successful add', () => {
+    const created = [];
+    const scriptApp = {
+      getProjectTriggers: () => [],
+      newTrigger: (name) => ({ timeBased: () => ({ after: () => ({ create: () => created.push(name) }) }) }),
+    };
+    // No fetch_in_progress marker — the refresh path must actually install.
+    const be = load([], {
+      metaRows: [['key', 'value'], ['log_level', 'ERROR'], ['admin_token', 't']],
+      scriptApp,
+    });
+    be.handleAddChannel({ url: 'https://news.example' });
+    expect(created).toEqual(['kickoffRefresh']);
+  });
+
+  it('refuses a duplicate (same channel id via a different URL form)', () => {
+    const be = load([
+      ['Watch Guy', '', '', '', '', 'https://youtube.com/c/watchguy', YT_CHANNEL_ID, 'https://www.youtube.com/feeds/videos.xml?channel_id=' + YT_CHANNEL_ID, true, ''],
+    ], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://www.youtube.com/@WatchGuy' });
+    expect(res.status).toBe('error');
+    expect(res.message).toMatch(/Already in the list as "Watch Guy"/);
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(2); // nothing appended
+  });
+
+  it('refuses a duplicate site URL despite trailing-slash/protocol differences', () => {
+    const be = load([
+      ['News & Co', '', '', '', '', 'http://news.example/', '', 'https://other.feed/rss', true, ''],
+    ], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://news.example' });
+    expect(res.status).toBe('error');
+    expect(res.message).toMatch(/Already in the list/);
+  });
+
+  it('reports a resolvable error for a URL with no discoverable feed', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://nofeed.example' });
+    expect(res.status).toBe('error');
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1); // nothing appended
+  });
+
+  it('doPost refuses a wrong password without touching the sheet', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: 'wrong' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Wrong password' });
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1);
+    expect(be.calls).toHaveLength(0); // not even resolved — auth comes first
+  });
+
+  it('doPost adds the channel with the correct password', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: 'sekret-admin-token' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'ok' });
+    expect(cell(be.sheets.CHANNELS_ID._grid, 1, 'feed_url')).toBe('https://news.example/rss.xml');
   });
 });

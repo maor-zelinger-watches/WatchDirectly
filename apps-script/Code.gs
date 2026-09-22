@@ -316,6 +316,13 @@ function doPost(e) {
         return jsonResponse(handleSession(data));
       case 'clientError':
         return jsonResponse(handleClientError(data));
+      case 'addChannel':
+        // Admin-only — the add-channel page's password IS the admin token.
+        // Over POST so it never lands in a URL/query log.
+        if (!isAdmin(data.token)) {
+          return jsonResponse({ status: 'error', message: 'Wrong password' });
+        }
+        return jsonResponse(handleAddChannel(data));
       case 'logs':
         // Admin-only, over POST so the token never lands in a URL/query log.
         if (!isAdmin(data.token)) {
@@ -2434,6 +2441,84 @@ function parseRegex(xml, channelName, tier, category) {
     });
   }
   return videos;
+}
+
+/**
+ * POST endpoint behind the add-channel.html admin form. The caller was already
+ * authenticated by the router (isAdmin, constant-time — the form's password is
+ * the admin token, sent in the POST body so it never lands in a URL).
+ *
+ * Resolves the submitted URL through the same SSRF-guarded resolver the sheet
+ * flow uses, refuses duplicates (by channel id, feed URL, or site URL), appends
+ * one fully-enriched, enabled row, and schedules an async crawl so the new
+ * channel's content shows up within minutes instead of at the next 4h cycle.
+ *
+ * @param {{url:string}} data
+ * @returns {Object} { status:'ok', channel:{channel_name, platform, feed_url,
+ *   avatar} } on success, else { status:'error', message }
+ */
+function handleAddChannel(data) {
+  var rawUrl = String(data.url || '').trim();
+  if (!rawUrl) return { status: 'error', message: 'Missing channel URL' };
+  if (rawUrl.length > 500) return { status: 'error', message: 'URL too long' };
+
+  var info = resolveChannelFromUrl(rawUrl);
+  if (!info.ok) return { status: 'error', message: info.error };
+  if (!info.feed_url) {
+    return { status: 'error', message: 'No RSS/Atom feed found at ' + rawUrl };
+  }
+
+  var sheet = getSheet('CHANNELS');
+  var rows = sheet.getDataRange().getValues();
+  var headers = rows[0].slice();
+  var urlCol     = ensureChannelColumn(sheet, headers, 'url');
+  var nameCol    = ensureChannelColumn(sheet, headers, 'channel_name');
+  var idCol      = ensureChannelColumn(sheet, headers, 'channel_id');
+  var feedCol    = ensureChannelColumn(sheet, headers, 'feed_url');
+  var avatarCol  = ensureChannelColumn(sheet, headers, 'avatar');
+  var enabledCol = ensureChannelColumn(sheet, headers, 'enabled');
+
+  // Duplicate check — the sheet flow tolerates re-runs because it only fills
+  // blanks, but a form submit APPENDS, so it must refuse instead. Compare the
+  // stable identifiers, normalized the way the sheet stores them.
+  var normUrl = normalizeChannelUrl(rawUrl).replace(/\/+$/, '').toLowerCase();
+  for (var i = 1; i < rows.length; i++) {
+    var row = rows[i];
+    var dup =
+      (info.channel_id && String(row[idCol] || '').trim() === info.channel_id) ||
+      (String(row[feedCol] || '').trim() === info.feed_url) ||
+      (normUrl && normalizeChannelUrl(row[urlCol]).replace(/\/+$/, '').toLowerCase() === normUrl);
+    if (dup) {
+      var existing = String(row[nameCol] || row[urlCol] || ('row ' + (i + 1)));
+      return { status: 'error', message: 'Already in the list as "' + existing + '"' };
+    }
+  }
+
+  var newRow = [];
+  for (var c = 0; c < headers.length; c++) newRow.push('');
+  newRow[urlCol]     = normalizeChannelUrl(rawUrl);
+  newRow[nameCol]    = info.channel_name || '';
+  newRow[idCol]      = info.channel_id || '';
+  newRow[feedCol]    = info.feed_url;
+  newRow[avatarCol]  = info.avatar || '';
+  newRow[enabledCol] = true;
+  sheet.appendRow(newRow);
+
+  log('INFO', 'handleAddChannel', 'Added ' + (info.channel_name || normUrl) +
+    ' (' + (info.media_type === 'video' ? 'youtube' : 'article') + ')');
+
+  // Best-effort: the row is saved either way; the 4h cycle covers a failure.
+  try { scheduleRefresh(); } catch (e) { /* logged inside scheduleRefresh */ }
+
+  return {
+    status: 'ok',
+    channel: {
+      channel_name: info.channel_name || '',
+      platform: info.media_type === 'video' ? 'youtube' : 'article',
+      feed_url: info.feed_url,
+      avatar: info.avatar || ''
+    }
+  };
 }
 
 // ============================================================
