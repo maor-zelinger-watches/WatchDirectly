@@ -159,23 +159,22 @@ async function maybeSlideSession() {
 }
 
 /**
- * Renders the Google Sign-In button in a container element.
- * 
+ * Renders the Google Sign-In button in a container element. Always the full
+ * "Sign in with Google" pill: its only home is the auth overlay's dialog,
+ * which has room on every viewport — the icon-only compact mode existed for
+ * the cramped mobile header the button no longer lives in.
+ *
  * @param {HTMLElement} container - DOM element to render the button in
  */
 export function renderSignInButton(container) {
   if (typeof google === 'undefined' || !google.accounts) return;
 
-  // Icon-only on narrow screens — the full "Sign in with Google" pill
-  // overflows the mobile header and gets clipped
-  const compact = window.innerWidth < 480;
-
   google.accounts.id.renderButton(container, {
     theme: 'filled_black',
-    size: 'medium',
+    size: 'large',
     shape: 'pill',
     text: 'signin_with',
-    type: compact ? 'icon' : 'standard',
+    type: 'standard',
   });
 }
 

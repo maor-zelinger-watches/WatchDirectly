@@ -21,6 +21,14 @@ that component's heading.
 
 ## Frontend
 
+### 1.25.2 — 2026-09-22
+- **Full Google pill inside the overlay on every viewport.** The overlay's
+  Google button rendered as the icon-only circle on phones — a leftover of
+  the header's `< 480px` compact mode, from before the button moved into
+  the dialog. The overlay has room everywhere, so it's now always the
+  full-width "Sign in with Google" pill, sized large for the dialog's
+  primary action.
+
 ### 1.25.1 — 2026-09-22
 - **No Google UI outside the sign-in overlay.** 1.25.0 still auto-invoked
   Google One Tap for signed-out visitors on load, so a Google-branded
