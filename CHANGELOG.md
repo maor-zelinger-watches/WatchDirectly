@@ -21,6 +21,12 @@ that component's heading.
 
 ## Frontend
 
+### 1.28.2 — 2026-09-22
+- **Header badge reads "Beta" instead of "Alpha."** The `header__logo-icon`
+  label next to the site title, on every page (home, add-channel, privacy,
+  terms, 404), now says Beta — the site has moved past its alpha phase.
+  Cosmetic only; no behavior change.
+
 ### 1.28.1 — 2026-09-22
 - **Legal-page contact is now an email, not the GitHub repo link.** The Privacy
   Policy (data-deletion + complaints) and Terms (questions) pointed visitors to
