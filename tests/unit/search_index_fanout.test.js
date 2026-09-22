@@ -21,7 +21,7 @@ import { api } from '../../js/api-client.js';
 // IntersectionObserver at module load — stub it before the dynamic import.
 class FakeIO { constructor() {} observe() {} unobserve() {} disconnect() {} }
 
-const CHUNK = CONFIG.SEARCH_CHUNK_SIZE;   // 500
+const CHUNK = CONFIG.SEARCH_CHUNK_SIZE;   // 100
 const CAP = CONFIG.SEARCH_INDEX_LIMIT;    // 5000
 
 let appendArchiveToIndex;
@@ -60,15 +60,16 @@ afterEach(() => {
 
 describe('FE7 — appendArchiveToIndex sizes fetches to remaining headroom', () => {
   it('fetches only the archive pages that fit under the cap, not the whole archive', async () => {
-    // Live index sits 600 below the ceiling: after archive page 1 (500 rows)
-    // merges, only ~100 items of headroom remain — one more page at most.
-    state.searchIndex = rows('live', CAP - 600);
+    // Live index sits one chunk + 100 below the ceiling: after archive page 1
+    // (CHUNK rows) merges, only ~100 items of headroom remain — one more page
+    // at most.
+    state.searchIndex = rows('live', CAP - CHUNK - 100);
 
     const seen = [];
     vi.spyOn(api, 'fetchArchive').mockImplementation(async (page) => {
       seen.push(page);
       // A huge archive total: the OLD code sized pages to min(total, cap) and
-      // would have fetched pages 2..10 here.
+      // would have fetched the whole tail here.
       return { videos: rows(`arch${page}`, CHUNK), total: 100_000 };
     });
 
