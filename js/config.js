@@ -7,7 +7,7 @@
  */
 
 export const CONFIG = {
-  APP_VERSION: '1.25.3',      // frontend version (npm semver) — bump on every
+  APP_VERSION: '1.26.0',      // frontend version (npm semver) — bump on every
                               // user-visible change; shown in the header and
                               // logged at boot. Backend has its own VERSION
                               // in apps-script/Code.gs; package.json tracks
@@ -16,9 +16,13 @@ export const CONFIG = {
   GOOGLE_CLIENT_ID: '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com',
   PAGE_SIZE: 10,
   COMMENT_BATCH_SIZE: 10,     // ids per commentsBatch request (backend caps at 20)
-  SEARCH_CHUNK_SIZE: 500,     // page size for building the search index; the
+  SEARCH_CHUNK_SIZE: 100,     // page size for building the search index; the
                               // catalog is fetched in parallel chunks of this
-                              // size so results paint as each chunk lands
+                              // size so results paint as each chunk lands.
+                              // Matches the backend's MAX_PAGE_LIMIT (BE11) —
+                              // asking for more gets clamped to 100 anyway,
+                              // and the index build's page math follows the
+                              // size the server actually returns
   SEARCH_RENDER_LIMIT: 200,   // max cards painted for a filtered render — a
                               // broad query (e.g. a single letter) can match
                               // nearly the whole index, and building thousands

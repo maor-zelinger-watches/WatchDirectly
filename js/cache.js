@@ -70,7 +70,11 @@ function remove(key) {
 // self-heals (cleared on read) exactly like a corrupt one — so a flaky build
 // can't strand a session on a months-old catalog with no way to notice.
 
-export const CACHE_VERSION = 1;      // bump when a payload's shape changes
+export const CACHE_VERSION = 2;      // bump when a payload's shape changes.
+                                     // v2: discard indexes built before the
+                                     // page-clamp fix — they silently hold only
+                                     // ~a fifth of the catalog, and the top-up
+                                     // path trusts a cached index as complete
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 
 /** Wraps a payload with the current schema version and a save timestamp. */

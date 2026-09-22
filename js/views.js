@@ -171,8 +171,16 @@ async function buildSearchIndex() {
 
   const total = Math.min(first.total || firstVideos.length, cap);
   if (firstVideos.length > 0 && total > firstVideos.length) {
+    // Page math MUST use the page size the backend actually served, not the
+    // size we asked for: the server clamps oversized limits (MAX_PAGE_LIMIT)
+    // and computes offsets from the CLAMPED value. Assuming our requested
+    // chunk here made pages 2..N land on already-fetched offsets, silently
+    // capping the index at a fraction of the catalog. Page 1 came back short
+    // of the request, so its length IS the server's effective page size
+    // (a short LAST page only happens when total <= its length, excluded above).
+    const served = firstVideos.length;
     const pages = [];
-    for (let p = 2; (p - 1) * chunk < total; p++) pages.push(p);
+    for (let p = 2; (p - 1) * served < total; p++) pages.push(p);
     await runBounded(pages, SEARCH_FETCH_CONCURRENCY, p =>
       api.fetchFeed(p, chunk)
         .then(data => {
@@ -224,10 +232,15 @@ async function appendArchiveToIndex() {
   const remaining = cap - (state.searchIndex ? state.searchIndex.length : 0);
   if (remaining <= 0) return;
 
+  // Same served-size rule as buildSearchIndex: offsets follow the CLAMPED
+  // limit the backend applied, so page math trusts what page 1 returned.
+  // (A short page 1 here can also mean a small archive — then archiveTotal
+  // bounds the loop to no pages at all, so the fallback is harmless.)
+  const served = firstVideos.length;
   const archiveTotal = firstArchive.total || firstVideos.length;
-  const morePages = Math.ceil(remaining / chunk);
+  const morePages = Math.ceil(remaining / served);
   const pages = [];
-  for (let p = 2; p <= 1 + morePages && (p - 1) * chunk < archiveTotal; p++) pages.push(p);
+  for (let p = 2; p <= 1 + morePages && (p - 1) * served < archiveTotal; p++) pages.push(p);
 
   await runBounded(pages, SEARCH_FETCH_CONCURRENCY, p =>
     api.fetchArchive(p, chunk)
@@ -239,6 +252,52 @@ async function appendArchiveToIndex() {
       })
       .catch(() => { /* best-effort — those archived items miss this session */ })
   );
+}
+
+/**
+ * Refreshes a complete cached index instead of re-walking the whole catalog.
+ *
+ * A persisted index is only ever saved after a COMPLETE build, so everything
+ * the catalog held at save time is already in it — including every archived
+ * row (items only enter the archive by aging out of the live feed, and the
+ * live retention window is weeks, far past the cache's 24h TTL). The only
+ * rows a fresh-cached session can be missing are new items at the HEAD of the
+ * live feed. So: walk feed pages newest-first, sequentially, and stop at the
+ * first page that adds no unknown key — that page and everything older is
+ * already indexed. Usually that's one request, where a full rebuild is ~40
+ * (and the backend serializes concurrent executions, so a full walk costs
+ * minutes of wall clock every session).
+ *
+ * Rows deleted server-side linger until the cache's 24h TTL forces the next
+ * full rebuild — the same staleness window the TTL already accepts.
+ */
+async function topUpSearchIndex() {
+  const chunk = CONFIG.SEARCH_CHUNK_SIZE;
+  const cap = CONFIG.SEARCH_INDEX_LIMIT;
+  const known = new Set((state.searchIndex || []).map(indexKey));
+
+  let page = 1;
+  let served = 0; // effective server page size, learned from page 1
+  for (;;) {
+    const data = await api.fetchFeed(page, chunk);
+    const videos = data.videos || [];
+    if (videos.length === 0) break;
+    if (page === 1) served = videos.length;
+
+    const unknown = videos.filter(v => !known.has(indexKey(v)));
+    state.searchIndex = mergeIndexChunk(state.searchIndex || [], videos);
+    notifyIndexProgress();
+
+    // Fully-known page: the cached index already covers from here on down.
+    if (unknown.length === 0) break;
+    for (const v of unknown) known.add(indexKey(v));
+
+    const total = Math.min(data.total || videos.length, cap);
+    if (page * served >= total) break; // walked the whole live catalog
+    if (state.searchIndex.length >= cap) break;
+    page++;
+  }
+  return state.searchIndex;
 }
 
 /**
@@ -283,11 +342,18 @@ export function ensureSearchIndex(onProgress) {
   }
 
   if (!state.searchIndexPromise) {
-    state.searchIndexPromise = buildSearchIndex()
+    // A fresh cached index is a COMPLETE snapshot (it's only saved after a
+    // full build), so it just needs new head items merged in — not the
+    // whole-catalog walk. Cold sessions (no usable cache) do the full build.
+    const fullBuild = !indexFromCache;
+    state.searchIndexPromise = (fullBuild ? buildSearchIndex() : topUpSearchIndex())
       .then(full => {
         state.searchIndex = full;
         state.searchIndexComplete = true;
-        saveSearchIndex(full);
+        // Only a full walk may overwrite the persisted snapshot: a top-up
+        // re-stamping savedAt would keep deferring the TTL'd full rebuild —
+        // the pass that lets server-side deletions age out — indefinitely.
+        if (fullBuild) saveSearchIndex(full);
         state.searchIndexProgress.clear();
         return full;
       })
@@ -1233,5 +1299,5 @@ async function applyFilter() {
 }
 
 // Internal seams exposed for unit tests (bounded fan-out / archive headroom /
-// progress-render throttle).
-export const __test__ = { buildSearchIndex, appendArchiveToIndex, runBounded, throttleToFrame };
+// cached-index top-up / progress-render throttle).
+export const __test__ = { buildSearchIndex, appendArchiveToIndex, topUpSearchIndex, runBounded, throttleToFrame };

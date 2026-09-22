@@ -21,6 +21,31 @@ that component's heading.
 
 ## Frontend
 
+### 1.26.0 — 2026-09-22
+- **Search now genuinely covers the whole catalog and archive.** The
+  backend clamps every page request to 100 rows (BE11) and computes
+  offsets from the clamped value, but the search-index build still did
+  its page math with the requested 500-row chunk — pages 2..N landed on
+  already-fetched offsets and the page loop cut out ~5× early, so the
+  index silently held only the newest ~400 live + ~500 archive rows of a
+  ~4,100-item catalog. Search, Favorites, and Bookmarks were blind to the
+  rest. The build now derives the effective page size from what page 1
+  actually returned (any future server-side clamp self-heals), and
+  `SEARCH_CHUNK_SIZE` drops to 100 to match what the backend serves.
+  Verified live: the index completes at 3,788 rows and deep-archive
+  articles from months back are searchable again.
+- **Cached sessions top up the index instead of re-walking the catalog.**
+  Correct coverage means ~41 page requests per full build against a
+  backend that serializes executions (~3.7 min wall clock, measured; all
+  background, the UI never blocks). That cost is now paid at most once
+  per 24h per device: a session seeding from a fresh complete cached
+  index walks feed pages newest-first only until the first fully-known
+  page — usually one ~4s background request. A top-up never re-stamps
+  the persisted snapshot, so the TTL'd full rebuild (the pass that lets
+  server-side deletions age out) still comes due on schedule.
+  `CACHE_VERSION` bumps to 2 so pre-fix truncated indexes are discarded
+  rather than trusted as complete.
+
 ### 1.25.3 — 2026-09-22
 - **Tab row no longer drags vertically on iOS.** Making the five-tab row
   horizontally scrollable (1.24.0) silently made it a vertical scroll
