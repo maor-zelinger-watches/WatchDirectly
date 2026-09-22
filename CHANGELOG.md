@@ -21,6 +21,18 @@ that component's heading.
 
 ## Frontend
 
+### 1.22.0 — 2026-09-22
+- **Channels tab shows each creator's platform.** Every channel card now
+  carries a platform-colored ring around the avatar (red = YouTube, hairline
+  grey = article site) and a corner mark — the YouTube play lozenge or 📰 —
+  mirroring the favorite star's geometry on the opposite corner. A new chips
+  row (All / YouTube / Articles) filters the grid, reusing the feed's
+  pure-CSS visibility pattern (`data-platform` + container classes, no
+  re-render). Classification prefers the backend's computed `platform` field
+  (backend 1.16.0) and falls back to a URL/avatar heuristic for cached lists;
+  a source with no YouTube link is an article site by definition, so no card
+  ever renders unmarked. (Andrew's channel-list request.)
+
 ### 1.21.9 — 2026-09-10
 - **No more re-fade when leaving fullscreen.** `.media-card--fullscreen`
   overrides `animation`, so exiting fullscreen re-applied a card's still-present
@@ -548,6 +560,26 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.16.0 — 2026-09-22
+- **`getChannels` publishes a computed `platform` field** ('youtube' |
+  'article') for the Channels tab's badges and filter (frontend 1.22.0).
+  Classification falls back to the private `feed_url` when the `url` column
+  is blank — 11 live rows are in that state — and everything without a
+  YouTube link is an article site, so nothing ships unclassified. The
+  read-time favicon fallback derives its domain the same way, so URL-less
+  article outlets stop rendering as bare monograms. The field is computed,
+  never copied, so the BE14 public-field whitelist is unchanged.
+- **`enrichChannels` fills article avatars and url-less rows.** Article
+  onboarding now resolves an avatar: the site's apple-touch-icon (largest
+  declared size, SSRF-checked like every scraper fetch), falling back to the
+  feed's channel-level `<image>`/`<logo>`, else blank (favicon at read time,
+  as before). Rows with a blank `url` are no longer skipped: they resolve
+  via `feed_url`, and the url column is filled back — the feed's
+  channel-level `<link>` for article sites, the canonical `/channel/UC…` URL
+  for YouTube — so re-running enrichChannels backfills links, avatars, and
+  platform data for the existing catalog. A blank avatar now counts as
+  resolvable, making the backfill a one-click operator action.
 
 ### 1.15.1 — 2026-08-30
 - **Fixed the archive duplication loop (~16K rows for ~1.7K unique items).**
