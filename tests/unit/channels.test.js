@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createChannelCard, avatarUrl } from '../../js/feed.js';
+import { createChannelCard, avatarUrl, channelPlatform } from '../../js/feed.js';
 
 const mockCreator = {
   channel_name: 'Nico Leonard',
@@ -92,5 +92,68 @@ describe('createChannelCard', () => {
     const html = createChannelCard({ ...mockCreator, channel_name: '<script>alert("xss")</script>' });
     expect(html).not.toContain('<script>');
     expect(html).toContain('&lt;script&gt;');
+  });
+
+  it('marks a YouTube channel: data-platform + play-lozenge corner mark', () => {
+    const html = createChannelCard(mockCreator);
+    expect(html).toContain('data-platform="youtube"');
+    expect(html).toContain('channel-card__platform--youtube');
+    expect(html).toContain('title="YouTube channel"');
+    expect(html).toContain('<svg'); // inline play lozenge, no external asset
+    expect(html).toContain('aria-label="Nico Leonard on YouTube"');
+  });
+
+  it('marks an article site: data-platform + 📰 corner mark', () => {
+    const html = createChannelCard({
+      channel_name: 'Hodinkee', host: 'hodinkee.com', url: 'https://www.hodinkee.com',
+      avatar: 'https://www.google.com/s2/favicons?domain=hodinkee.com&sz=128',
+    });
+    expect(html).toContain('data-platform="article"');
+    expect(html).toContain('channel-card__platform--article');
+    expect(html).toContain('title="Article site"');
+    expect(html).toContain('📰');
+    expect(html).toContain('aria-label="Hodinkee website"');
+  });
+
+  it('omits the badge when the platform is unknown', () => {
+    const html = createChannelCard({ channel_name: 'Mystery' });
+    expect(html).not.toContain('data-platform');
+    expect(html).not.toContain('channel-card__platform');
+  });
+});
+
+describe('channelPlatform', () => {
+  it('prefers the backend-computed platform field over the heuristic', () => {
+    // The backend can also see feed_url, so its verdict wins even when the
+    // public fields alone would say otherwise.
+    expect(channelPlatform({ platform: 'article', url: 'https://www.youtube.com/@x' })).toBe('article');
+    expect(channelPlatform({ platform: 'youtube' })).toBe('youtube');
+    // Junk values fall through to the heuristic
+    expect(channelPlatform({ platform: 'weird', url: 'https://www.hodinkee.com' })).toBe('article');
+  });
+
+  it('classifies YouTube URLs in every flavor', () => {
+    expect(channelPlatform({ url: 'https://www.youtube.com/@NicoLeonard' })).toBe('youtube');
+    expect(channelPlatform({ url: 'https://youtube.com/channel/UCabc' })).toBe('youtube');
+    expect(channelPlatform({ url: 'https://m.youtube.com/@handle' })).toBe('youtube');
+    expect(channelPlatform({ url: 'https://youtu.be/xyz' })).toBe('youtube');
+  });
+
+  it('classifies non-YouTube URLs as article sites', () => {
+    expect(channelPlatform({ url: 'https://www.hodinkee.com' })).toBe('article');
+    expect(channelPlatform({ url: 'https://fratellowatches.com/feed' })).toBe('article');
+    // A hostile lookalike host must not pass as YouTube
+    expect(channelPlatform({ url: 'https://notyoutube.com' })).toBe('article');
+    expect(channelPlatform({ url: 'https://youtube.com.evil.example' })).toBe('article');
+  });
+
+  it('falls back to the avatar origin when the URL is missing', () => {
+    expect(channelPlatform({ avatar: 'https://yt3.googleusercontent.com/abc=s900' })).toBe('youtube');
+    expect(channelPlatform({ avatar: 'https://www.google.com/s2/favicons?domain=x.com' })).toBe('article');
+  });
+
+  it('returns empty when there is nothing to classify', () => {
+    expect(channelPlatform({})).toBe('');
+    expect(channelPlatform(undefined)).toBe('');
   });
 });

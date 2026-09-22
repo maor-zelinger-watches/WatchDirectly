@@ -189,11 +189,60 @@ export function avatarUrl(url, size = 176) {
 }
 
 /**
+ * Which platform a curated channel publishes on: 'youtube' for YouTube
+ * channels, 'article' for news/blog sites, '' when there's nothing to go on.
+ * The backend's computed `platform` field wins (it can also see feed_url,
+ * which is not public); the URL/avatar heuristic below covers lists cached
+ * before that field existed.
+ *
+ * @param {Object} creator - A channel entry from the getChannels backend action
+ * @returns {'youtube'|'article'|''}
+ */
+export function channelPlatform(creator) {
+  const explicit = creator && creator.platform;
+  if (explicit === 'youtube' || explicit === 'article') return explicit;
+
+  const url = String((creator && creator.url) || '');
+  const match = url.match(/^https?:\/\/([^/?#]+)/i);
+  if (match) {
+    const host = match[1].replace(/^www\./i, '').toLowerCase();
+    if (host === 'youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com')) {
+      return 'youtube';
+    }
+    return 'article';
+  }
+  // No usable URL — YouTube avatars come from Google's image CDNs.
+  const avatar = String((creator && creator.avatar) || '');
+  if (/yt3\.googleusercontent\.com|ytimg\.com/i.test(avatar)) return 'youtube';
+  return avatar ? 'article' : '';
+}
+
+// Corner mark + link description per platform, keyed by channelPlatform().
+// The YouTube mark is the play-button lozenge drawn inline (brand red must not
+// depend on an external asset); article sites get the newspaper emoji.
+const PLATFORM_META = {
+  youtube: {
+    icon: '<svg viewBox="0 0 28 20" width="22" height="16" role="img"><rect width="28" height="20" rx="5" fill="#f00"/><path d="M11 5.2l8.2 4.8-8.2 4.8z" fill="#fff"/></svg>',
+    title: 'YouTube channel',
+    linkSuffix: 'on YouTube',
+  },
+  article: {
+    icon: '📰',
+    title: 'Article site',
+    linkSuffix: 'website',
+  },
+};
+
+/**
  * Creates an HTML string for a channel card on the Channels tab: the creator's
- * avatar (with a monogram fallback beneath, revealed if the image is missing or
- * fails to load), their name, and a favorite ☆ button. The star button reuses
- * the `media-card__star` class + `data-channel` attribute so the existing star
- * engine (toggle, sign-in reconcile, cross-view sync) drives it unchanged.
+ * avatar in a platform-colored ring (with a monogram fallback beneath, revealed
+ * if the image is missing or fails to load), their name, a platform mark in the
+ * card's top-left corner (YouTube play lozenge vs. 📰 for article sites), and
+ * a favorite ☆ button. The star button reuses the `media-card__star` class +
+ * `data-channel` attribute so the existing star engine (toggle, sign-in
+ * reconcile, cross-view sync) drives it unchanged. The card's `data-platform`
+ * powers both the ring color and the Channels-tab platform filter the same way
+ * `data-media-type` powers the feed's type chips: styling/hiding is pure CSS.
  *
  * @param {Object} creator - A channel entry from the getChannels backend action
  * @returns {string} HTML string for the card
@@ -203,6 +252,8 @@ export function createChannelCard(creator) {
   const url = safeUrl(creator.url);
   const avatar = safeUrl(avatarUrl(creator.avatar));
   const initial = sanitizeHtml((creator.channel_name || '?').trim().charAt(0).toUpperCase());
+  const platform = channelPlatform(creator);
+  const meta = PLATFORM_META[platform];
 
   const linkOpen = url
     ? `<a href="${sanitizeHtml(url)}" target="_blank" rel="noopener noreferrer"`
@@ -213,10 +264,16 @@ export function createChannelCard(creator) {
     ? `<img src="${sanitizeHtml(avatar)}" alt="" class="channel-card__avatar" loading="lazy" referrerpolicy="no-referrer">`
     : '';
 
+  const markHtml = meta
+    ? `<span class="channel-card__platform channel-card__platform--${platform}" title="${meta.title}" aria-hidden="true">${meta.icon}</span>`
+    : '';
+  const figureLabel = meta ? `${name} ${meta.linkSuffix}` : name;
+
   return `
-    <article class="channel-card" data-channel="${name}">
+    <article class="channel-card" data-channel="${name}"${platform ? ` data-platform="${platform}"` : ''}>
+      ${markHtml}
       <button class="media-card__star channel-card__star" data-channel="${name}" aria-pressed="false" title="Favorite this creator" aria-label="Favorite ${name}">☆</button>
-      ${linkOpen} class="channel-card__figure" aria-label="${name} on YouTube">
+      ${linkOpen} class="channel-card__figure" aria-label="${figureLabel}">
         <span class="channel-card__monogram" aria-hidden="true">${initial}</span>
         ${imgHtml}
       ${linkClose}

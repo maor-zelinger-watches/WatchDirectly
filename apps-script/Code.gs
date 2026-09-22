@@ -608,12 +608,14 @@ function handleGetChannels() {
 
   var headers = data[0];
   var enabledCol = headers.indexOf('enabled');
+  var feedUrlCol = headers.indexOf('feed_url');
   var channels = [];
 
   // BE14: publish ONLY the fields the frontend renders — the Channels-tab card
   // (channel_name, url, avatar) plus the search host-map (host). Copying every
   // column (the old behavior) leaked any operator-added column — notes, contact,
   // a per-channel key — into this anonymous response the moment it was created.
+  // `platform` below is computed, not copied: feed_url itself stays private.
   var PUBLIC_FIELDS = ['channel_name', 'host', 'url', 'avatar'];
 
   for (var i = 1; i < data.length; i++) {
@@ -627,11 +629,18 @@ function handleGetChannels() {
       if (PUBLIC_FIELDS.indexOf(headers[j]) !== -1) channel[headers[j]] = row[j];
     }
 
-    if (!channel.avatar && channel.url) {
-      var domain = extractDomain(channel.url);
-      if (domain && !/(^|\.)youtube\.com$/i.test(domain) && domain !== 'youtu.be') {
-        channel.avatar = 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=128';
-      }
+    // Platform for the Channels-tab badge/filter. The public url is the
+    // authority, but rows onboarded from a pasted feed URL can have url blank —
+    // fall back to feed_url (crawled, so always present) rather than shipping
+    // an unclassifiable row.
+    var feedUrl = feedUrlCol === -1 ? '' : String(row[feedUrlCol] || '');
+    var srcUrl = String(channel.url || '') || feedUrl;
+    var domain = extractDomain(srcUrl);
+    var isYouTube = /(^|\.)youtube\.com$/i.test(domain) || domain === 'youtu.be';
+    channel.platform = domain ? (isYouTube ? 'youtube' : 'article') : '';
+
+    if (!channel.avatar && domain && !isYouTube) {
+      channel.avatar = 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=128';
     }
 
     channels.push(channel);

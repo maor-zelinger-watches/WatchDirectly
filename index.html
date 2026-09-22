@@ -83,6 +83,12 @@
         <div class="feed-controls__chips" id="category-chips" role="group" aria-label="Filter by category"></div>
       </div>
 
+      <!-- Channels-tab controls: platform filter chips (YouTube vs. article
+           sites). Hidden everywhere else; update() flips it with the tab. -->
+      <div class="feed-controls" id="channels-controls" style="display: none">
+        <div class="feed-controls__chips" id="platform-chips" role="group" aria-label="Filter channels by platform"></div>
+      </div>
+
       <!-- Deep-linked card mount (share.js). Outside #feed-container on
            purpose: the feed's revalidation diff, dedupe, and scroll-anchor
            logic are all scoped to that container and must never see the
