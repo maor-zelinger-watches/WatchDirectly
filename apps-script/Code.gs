@@ -523,11 +523,39 @@ function setupScheduledRefresh() {
 }
 
 /**
+ * Enrichment pass run ahead of the scheduled crawl, so a URL pasted into a new
+ * CHANNELS row by a sheet editor (no script access needed) goes live on the
+ * next cycle: the blanks are filled, the row is enabled, and the crawl that
+ * follows in this same execution picks it up. When every row is already
+ * enriched this costs one sheet read — enrichChannels only fetches for rows
+ * with blanks to fill. A bad row or a scrape outage must never cost the crawl,
+ * so failures are contained here.
+ *
+ * @returns {{processed:number, filled:number, results:Object[]}|null} The
+ *   enrichChannels summary, or null when enrichment itself failed.
+ */
+function runScheduledEnrichment() {
+  try {
+    var summary = enrichChannels();
+    if (summary.processed > 0) {
+      log('INFO', 'scheduledFetchAllFeeds', 'Enriched ' + summary.processed +
+        ' channel row(s), filled ' + summary.filled + ' cell(s)');
+    }
+    return summary;
+  } catch (e) {
+    log('ERROR', 'scheduledFetchAllFeeds', 'Channel enrichment failed: ' + e.message);
+    return null;
+  }
+}
+
+/**
  * Entry point called by the time-based trigger.
- * Wraps fetchAllFeeds with logging/error handling.
+ * Enriches freshly pasted CHANNELS rows, then wraps fetchAllFeeds with
+ * logging/error handling.
  */
 function scheduledFetchAllFeeds() {
   log('INFO', 'scheduledFetchAllFeeds', 'Scheduled refresh starting');
+  runScheduledEnrichment();
   try {
     var stats = fetchAllFeeds();
     log('INFO', 'scheduledFetchAllFeeds', 'Completed. New: ' + stats.new_videos + ', Errors: ' + stats.errors);

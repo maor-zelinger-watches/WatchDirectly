@@ -70,10 +70,10 @@ function ok200(text) {
   return { getResponseCode: () => 200, getContentText: () => text, getAllHeaders: () => ({}) };
 }
 
-function load(channelRows) {
+function load(channelRows, opts = {}) {
   const sheets = {
-    CHANNELS_ID: makeSheet([CHANNEL_HEADERS, ...channelRows]),
-    META_ID: makeSheet([['key', 'value'], ['log_level', 'ERROR']]),
+    CHANNELS_ID: opts.channelsSheet || makeSheet([CHANNEL_HEADERS, ...channelRows]),
+    META_ID: makeSheet(opts.metaRows || [['key', 'value'], ['log_level', 'ERROR']]),
   };
   const calls = [];
   const fetch = (u) => {
@@ -99,7 +99,7 @@ function load(channelRows) {
     .replace(/CHANNELS:\s*'[^']+'/, "CHANNELS: 'CHANNELS_ID'")
     .replace(/META:\s*'[^']+'/, "META: 'META_ID'");
 
-  const names = ['enrichChannels', 'resolveChannelFromUrl'];
+  const names = ['enrichChannels', 'resolveChannelFromUrl', 'scheduledFetchAllFeeds', 'runScheduledEnrichment'];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
   return { ...factory(...Object.values(globals)), sheets, calls };
 }
@@ -193,5 +193,36 @@ describe('resolveChannelFromUrl — direct resolver', () => {
     expect(r.ok).toBe(true);
     expect(r.channel_id).toBe(YT_CHANNEL_ID);
     expect(r.feed_url).toBe('https://www.youtube.com/feeds/videos.xml?channel_id=' + YT_CHANNEL_ID);
+  });
+});
+
+describe('scheduledFetchAllFeeds — self-serve channel adds go live without the editor', () => {
+  // A recent fetch_in_progress marker makes fetchAllFeeds no-op, so these tests
+  // exercise the enrichment leg of the scheduled run without the real crawl.
+  const CRAWL_BUSY_META = () => [
+    ['key', 'value'],
+    ['log_level', 'ERROR'],
+    ['fetch_in_progress', new Date().toISOString()],
+  ];
+
+  it('enriches a freshly pasted URL row before the crawl', () => {
+    const be = load(
+      [['', '', '', '', '', 'https://news.example', '', '', '', '']],
+      { metaRows: CRAWL_BUSY_META() },
+    );
+    be.scheduledFetchAllFeeds();
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(cell(grid, 1, 'feed_url')).toBe('https://news.example/rss.xml');
+    expect(cell(grid, 1, 'channel_name')).toBe('News & Co');
+    expect(cell(grid, 1, 'enabled')).toBe(true);
+  });
+
+  it('a failing enrichment is contained and never blocks the run', () => {
+    const brokenChannels = {
+      getDataRange: () => { throw new Error('CHANNELS unavailable'); },
+    };
+    const be = load([], { channelsSheet: brokenChannels, metaRows: CRAWL_BUSY_META() });
+    expect(be.runScheduledEnrichment()).toBeNull();       // swallowed, reported as failed
+    expect(() => be.scheduledFetchAllFeeds()).not.toThrow(); // crawl leg still reached
   });
 });
