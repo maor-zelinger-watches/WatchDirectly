@@ -57,10 +57,13 @@ re-running is always safe and never overwrites your edits.
 Two ways, both without touching the Apps Script editor:
 
 - **The add-channel page (easiest):** `add-channel.html` on the live site is a
-  small password-protected form — paste the link, enter the admin password
-  (the `admin_token` value from META), done. It fills in everything, refuses
-  duplicates, and kicks off a crawl so the content shows up within minutes.
-  Share the page URL and the password with whoever should be able to add.
+  small password-protected form — paste the link, enter the add-channel
+  password (the `add_channel_password` value in META), done. It fills in
+  everything, refuses duplicates, and kicks off a crawl so the content shows
+  up within minutes. The password is deliberately separate from `admin_token`,
+  so you can share the page URL and password with whoever should be able to
+  add channels without also handing them the admin powers. Until you add that
+  row to META, the page refuses everyone.
 - **The spreadsheet:** share the **CHANNELS** spreadsheet with their Google
   account as **Editor** (Share → their email — the spreadsheet only, not the
   script). They paste URLs into the `url` column exactly as above, and the
@@ -164,6 +167,7 @@ Each row is a `key` in column A and its `value` in column B.
 | Key | What it controls | Example |
 |---|---|---|
 | `admin_token` | Secret that unlocks the admin actions above. **Keep private.** If unset, admin actions are fully disabled. | `a-long-random-string` |
+| `add_channel_password` | Password for the `add-channel.html` page. Separate from `admin_token` on purpose — shareable with a co-editor without granting admin actions. If unset, the page is disabled. | `a-different-random-string` |
 | `youtube_api_key` | YouTube Data API key. Enables live/premiere detection and fresh view counts. Without it, the app still works from plain RSS. | `AIza…` |
 | `refresh_interval_hours` | How stale (in hours) data can get before a refresh is triggered | `4` |
 | `log_level` | How much detail to log: `DEBUG`, `INFO`, `WARN`, or `ERROR` | `ERROR` |
@@ -178,8 +182,8 @@ Each row is a `key` in column A and its `value` in column B.
 
 | Goal | Do this |
 |---|---|
-| Add a YouTube channel or news site | Use the `add-channel.html` page (admin password) — or paste its URL into CHANNELS, live on the next refresh (≤4h) |
-| Let someone else add channels | Give them the `add-channel.html` link + admin password, or share the CHANNELS spreadsheet as Editor |
+| Add a YouTube channel or news site | Use the `add-channel.html` page (`add_channel_password` from META) — or paste its URL into CHANNELS, live on the next refresh (≤4h) |
+| Let someone else add channels | Give them the `add-channel.html` link + the add-channel password, or share the CHANNELS spreadsheet as Editor |
 | Stop pulling from a channel | Set its `enabled` cell to `FALSE` |
 | See new content right now | `?action=refresh&token=…` |
 | Ban a commenter | Add their email to the BLOCKED sheet |

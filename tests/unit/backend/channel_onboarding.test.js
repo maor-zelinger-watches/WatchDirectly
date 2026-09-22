@@ -236,6 +236,7 @@ describe('handleAddChannel — the password-protected add-channel form endpoint'
     ['key', 'value'],
     ['log_level', 'ERROR'],
     ['admin_token', 'sekret-admin-token'],
+    ['add_channel_password', 'sekret-add-password'],
     // Recent marker keeps scheduleRefresh from wanting a real trigger.
     ['fetch_in_progress', new Date().toISOString()],
   ];
@@ -309,10 +310,26 @@ describe('handleAddChannel — the password-protected add-channel form endpoint'
     expect(be.calls).toHaveLength(0); // not even resolved — auth comes first
   });
 
-  it('doPost adds the channel with the correct password', () => {
+  it('doPost adds the channel with the add-channel password', () => {
     const be = load([], { metaRows: ADMIN_META() });
-    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: 'sekret-admin-token' }));
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: 'sekret-add-password' }));
     expect(be.responses.at(-1)).toMatchObject({ status: 'ok' });
     expect(cell(be.sheets.CHANNELS_ID._grid, 1, 'feed_url')).toBe('https://news.example/rss.xml');
+  });
+
+  it('the admin token does NOT unlock the form (separate secrets on purpose)', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: 'sekret-admin-token' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Wrong password' });
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1);
+  });
+
+  it('fails closed when no add_channel_password row is configured', () => {
+    const be = load([], {
+      metaRows: [['key', 'value'], ['log_level', 'ERROR'], ['admin_token', 'sekret-admin-token']],
+    });
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: '' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Wrong password' });
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1);
   });
 });

@@ -317,9 +317,9 @@ function doPost(e) {
       case 'clientError':
         return jsonResponse(handleClientError(data));
       case 'addChannel':
-        // Admin-only — the add-channel page's password IS the admin token.
-        // Over POST so it never lands in a URL/query log.
-        if (!isAdmin(data.token)) {
+        // Gated by the add-channel page's own password (its META row), over
+        // POST so it never lands in a URL/query log.
+        if (!isAddChannelAuthorized(data.token)) {
           return jsonResponse({ status: 'error', message: 'Wrong password' });
         }
         return jsonResponse(handleAddChannel(data));
@@ -352,6 +352,22 @@ function isAdmin(token) {
   var adminToken = getMeta('admin_token');
   if (!adminToken || !token) return false;
   return constantTimeEquals(String(token), String(adminToken));
+}
+
+/**
+ * Constant-time check of the add-channel page's password against the
+ * `add_channel_password` row in META. Deliberately a SEPARATE secret from
+ * admin_token: the form's password can be shared with a co-editor without
+ * also granting the admin endpoints (refresh, logs). Fails CLOSED when the
+ * row is missing or blank — no password configured means nobody can add.
+ *
+ * @param {string} token
+ * @returns {boolean}
+ */
+function isAddChannelAuthorized(token) {
+  var password = getMeta('add_channel_password');
+  if (!password || !token) return false;
+  return constantTimeEquals(String(token), String(password));
 }
 
 function jsonResponse(data) {
