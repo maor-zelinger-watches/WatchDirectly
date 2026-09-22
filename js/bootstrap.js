@@ -1,11 +1,12 @@
 /**
  * bootstrap.js — one-round-trip sign-in reconciliation.
  *
- * On sign-in the client needs three things about the user: which videos
- * they've upvoted, which creators they've starred, and which items they've
- * bookmarked. Fetched separately those were POSTs that — because Apps Script
- * serializes a user's requests — queued nose-to-tail at boot, and each
- * re-verified the ID token over the network.
+ * On sign-in the client needs four things about the user: which videos
+ * they've upvoted, which creators they've starred, which items they've
+ * bookmarked, and whether they've answered the marketing-email question.
+ * Fetched separately those were POSTs that — because Apps Script serializes
+ * a user's requests — queued nose-to-tail at boot, and each re-verified the
+ * ID token over the network.
  *
  * loadMyVotesAndStars fires the single batched `bootstrap` request and hands
  * the SAME promise to every reconciler. Each still captures its own epoch
@@ -34,6 +35,7 @@ import { isSignedIn, getToken, isTokenExpired, refreshToken } from './auth.js';
 import { reconcileMyVotes } from './votes.js';
 import { reconcileMyStars } from './stars.js';
 import { reconcileMyBookmarks } from './bookmarks.js';
+import { reconcileMyEmailConsent } from './auth-overlay.js';
 
 export async function loadMyVotesAndStars() {
   if (!isSignedIn()) return;
@@ -46,5 +48,6 @@ export async function loadMyVotesAndStars() {
     reconcileMyVotes(pending),
     reconcileMyStars(pending),
     reconcileMyBookmarks(pending),
+    reconcileMyEmailConsent(pending),
   ]);
 }

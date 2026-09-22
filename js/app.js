@@ -19,7 +19,8 @@ import { state, isFilterActive, typeFilterActive, patchVideoEverywhere, epoch } 
 import { api } from './api-client.js';
 import { isShort, mediaType, sortVideos, typeFilterVisible } from './feed.js';
 import { loadFeedCache, saveFeedCache, saveFeedCacheSoon } from './cache.js';
-import { initAuth, renderSignInButton, getCurrentUser, onAuthChange, signOut } from './auth.js';
+import { initAuth, getCurrentUser, onAuthChange, signOut } from './auth.js';
+import { setupAuthOverlay, openAuthOverlay, authOverlayOnAuthChange } from './auth-overlay.js';
 import { sanitizeHtml, cssEscape, safeUrl } from './utils.js';
 import { showToast } from './toast.js';
 import { buildCard, insertCardChronologically, renderList, cardTimeMs } from './cards.js';
@@ -901,9 +902,11 @@ async function topUpTypeFilter() {
 
 function setupAuthUI() {
   const container = document.getElementById('auth-container');
+  setupAuthOverlay();
 
   onAuthChange((user) => {
     updateAuthUI(user);
+    authOverlayOnAuthChange(user);
     state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
     if (user) {
       loadMyVotesAndStars();
@@ -926,7 +929,7 @@ function setupAuthUI() {
     loadMyVotesAndStars();
     state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
   } else {
-    renderSignInButton(container);
+    updateAuthUI(null);
   }
 }
 
@@ -943,17 +946,24 @@ function updateAuthUI(user) {
   _authUiKey = key;
 
   if (user) {
+    // Avatar + name double as the door to Email preferences (the consent
+    // change/unsubscribe path) in the auth overlay.
     container.innerHTML = `
       <div class="header__user">
-        <img src="${sanitizeHtml(safeUrl(user.picture))}" alt="${sanitizeHtml(user.name)}" class="header__user-avatar" referrerpolicy="no-referrer" />
-        <span class="header__user-name">${sanitizeHtml(user.name)}</span>
+        <button class="header__user-info" id="email-prefs-btn" title="Email preferences" aria-label="Email preferences">
+          <img src="${sanitizeHtml(safeUrl(user.picture))}" alt="" class="header__user-avatar" referrerpolicy="no-referrer" />
+          <span class="header__user-name">${sanitizeHtml(user.name)}</span>
+        </button>
         <button class="header__signout-btn" id="signout-btn">Sign out</button>
       </div>
     `;
+    document.getElementById('email-prefs-btn').addEventListener('click', () => openAuthOverlay('prefs'));
     document.getElementById('signout-btn').addEventListener('click', () => signOut());
   } else {
-    container.innerHTML = '';
-    renderSignInButton(container);
+    // Our own pill opens the sign-in overlay; the official Google button
+    // renders inside the overlay (auth-overlay.js), not in the header.
+    container.innerHTML = '<button class="header__signin-btn" id="signin-btn">Sign in</button>';
+    document.getElementById('signin-btn').addEventListener('click', () => openAuthOverlay('signin'));
   }
 }
 

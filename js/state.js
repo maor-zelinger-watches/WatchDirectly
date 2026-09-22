@@ -61,6 +61,9 @@ export const state = {
   myVotes: new Set(),       // video IDs the signed-in user has upvoted
   myStars: new Set(),       // channel names the signed-in user has starred
   myBookmarks: new Set(),   // video IDs the signed-in user has bookmarked
+  emailConsent: undefined,  // marketing-email consent: 'yes' | 'no' | null
+                            // (asked the server; never answered) | undefined
+                            // (not loaded / signed out / backend predates it)
   hostsByChannel: {},       // channel_name -> host, from getChannels (search matching)
   creators: null,           // full channel list, loaded once via getChannels (Channels tab + host map)
   fullscreenVideoId: null,      // video expanded to fullscreen, or null

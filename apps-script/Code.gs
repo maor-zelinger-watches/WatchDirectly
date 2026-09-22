@@ -27,6 +27,7 @@ const SPREADSHEET_IDS = {
   BLOCKED:      '1ZNePTyTIZsM73WW4nC3AwSb27oDjVoftjJJeWTajjL0',
   LOGS:         '1C6kVxkdANBBech6sDPRye62Mo4MdeSrGCkY78ZHi_9s',
   CLIENT_ERRORS:'1jTR_cz0F4qBgzQm0pNx3t6Gfc0zCFIFTOsa8jXo6s6E',
+  CUSTOMERS:    '1vMKv5f59lsAQQwmN4I04-OJRGyRrZW2GWAI-Lc52ico',
 };
 
 // ============================================================
@@ -314,6 +315,8 @@ function doPost(e) {
         return jsonResponse(handleBookmark(data));
       case 'myBookmarks':
         return jsonResponse(handleMyBookmarks(data));
+      case 'emailConsent':
+        return jsonResponse(handleEmailConsent(data));
       case 'bootstrap':
         return jsonResponse(handleBootstrap(data));
       case 'session':
@@ -4072,7 +4075,251 @@ function handleBootstrap(data) {
     video_ids: readUserVoteIds(user.email),
     channels: readUserStarChannels(user.email),
     bookmark_ids: readUserBookmarkIds(user.email),
+    // 'yes' | 'no' | null (never answered). The read also lists the account
+    // in the CUSTOMERS sheet on first sighting — every signed-in email is
+    // recorded there, consent answered or not.
+    marketing_consent: readOrCreateCustomer(user.email, user.name),
   };
+}
+
+// ============================================================
+// CUSTOMERS — every signed-in account + its marketing-email consent
+// ============================================================
+//
+// Lives in its OWN spreadsheet (SPREADSHEET_IDS.CUSTOMERS) so the operator
+// can share the mailing list without exposing comments/votes. One row per
+// Google account: the row is created the first time the account signs in
+// (bootstrap), and marketing_consent stays blank until the person answers
+// the overlay prompt — blank is "never asked/answered", never "no". The
+// timestamped consent_updated_at cell is the compliance record: only rows
+// with marketing_consent = 'yes' may ever be emailed.
+
+var CUSTOMER_HEADERS = ['email', 'name', 'marketing_consent', 'consent_updated_at', 'first_seen_at', 'source'];
+
+// Operator-typed header variants the normalizer rewrites to canonical names,
+// keyed by the lowercased, underscore-joined cell text.
+var CUSTOMER_HEADER_ALIASES = {
+  'e-mail': 'email', 'mail': 'email', 'email_address': 'email', 'user_email': 'email',
+  'full_name': 'name', 'user_name': 'name', 'username': 'name', 'customer': 'name', 'customer_name': 'name',
+  'consent': 'marketing_consent', 'marketing': 'marketing_consent', 'marketing_emails': 'marketing_consent',
+  'newsletter': 'marketing_consent', 'subscribed': 'marketing_consent', 'emails': 'marketing_consent',
+  'consent_date': 'consent_updated_at', 'consent_at': 'consent_updated_at', 'updated_at': 'consent_updated_at',
+  'created_at': 'first_seen_at', 'signup_date': 'first_seen_at', 'signed_up_at': 'first_seen_at', 'date': 'first_seen_at',
+};
+
+/**
+ * The Customers sheet (first sheet of its own spreadsheet), with its header
+ * row normalized to CUSTOMER_HEADERS on every access (idempotent — writes
+ * only when something differs). An empty sheet, or one holding only a
+ * header row, gets the canonical row outright; once data rows exist,
+ * recognized alias titles are renamed in place and missing canonical
+ * columns are appended on the right — existing data is never reordered.
+ * @returns {Sheet}
+ */
+function getCustomersSheet() {
+  var sheet = getSheet('CUSTOMERS');
+  ensureCustomerHeaders(sheet);
+  return sheet;
+}
+
+function ensureCustomerHeaders(sheet) {
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+
+  // Nothing but (at most) a title row: make row 1 exactly canonical.
+  if (lastRow <= 1) {
+    var same = false;
+    if (lastCol >= CUSTOMER_HEADERS.length) {
+      var current = sheet.getRange(1, 1, 1, CUSTOMER_HEADERS.length).getValues()[0];
+      same = lastCol === CUSTOMER_HEADERS.length &&
+        current.join('|') === CUSTOMER_HEADERS.join('|');
+    }
+    if (!same) {
+      if (lastRow === 1 && lastCol > 0) sheet.getRange(1, 1, 1, lastCol).clearContent();
+      var hr = sheet.getRange(1, 1, 1, CUSTOMER_HEADERS.length);
+      hr.setNumberFormat('@');
+      hr.setValues([CUSTOMER_HEADERS]);
+    }
+    return;
+  }
+
+  // Data rows exist: rename recognized aliases in place, append what's missing.
+  var row1 = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var canon = row1.map(function (h) {
+    var norm = String(h || '').trim().toLowerCase().replace(/\s+/g, '_');
+    return CUSTOMER_HEADER_ALIASES[norm] || norm;
+  });
+  for (var c = 0; c < canon.length; c++) {
+    if (CUSTOMER_HEADERS.indexOf(canon[c]) !== -1 && row1[c] !== canon[c]) {
+      sheet.getRange(1, c + 1).setValue(canon[c]);
+    }
+  }
+  var have = {};
+  for (var i = 0; i < canon.length; i++) have[canon[i]] = true;
+  var appendAt = lastCol;
+  for (var k = 0; k < CUSTOMER_HEADERS.length; k++) {
+    if (!have[CUSTOMER_HEADERS[k]]) {
+      appendAt++;
+      sheet.getRange(1, appendAt).setValue(CUSTOMER_HEADERS[k]);
+    }
+  }
+}
+
+/** Column index per canonical header for the sheet's CURRENT row 1. */
+function customerCols(sheet) {
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var cols = {};
+  for (var i = 0; i < CUSTOMER_HEADERS.length; i++) {
+    cols[CUSTOMER_HEADERS[i]] = headers.indexOf(CUSTOMER_HEADERS[i]);
+  }
+  cols._width = headers.length;
+  return cols;
+}
+
+/** Normalizes a stored consent cell to 'yes' | 'no' | null (blank/unknown). */
+function normalizeConsent(value) {
+  var v = String(value == null ? '' : value).trim().toLowerCase();
+  return v === 'yes' || v === 'no' ? v : null;
+}
+
+/** Appends one customer row shaped to the sheet's current columns ('@' text). */
+function appendCustomerRow(sheet, cols, fields) {
+  var row = [];
+  for (var i = 0; i < cols._width; i++) row.push('');
+  if (cols.email !== -1) row[cols.email] = fields.email;
+  if (cols.name !== -1) row[cols.name] = fields.name || '';
+  if (cols.marketing_consent !== -1) row[cols.marketing_consent] = fields.consent || '';
+  if (cols.consent_updated_at !== -1) row[cols.consent_updated_at] = fields.consentAt || '';
+  if (cols.first_seen_at !== -1) row[cols.first_seen_at] = fields.firstSeenAt || '';
+  if (cols.source !== -1) row[cols.source] = fields.source || '';
+  var range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, cols._width);
+  range.setNumberFormat('@');
+  range.setValues([row]);
+}
+
+/**
+ * The account's current consent ('yes' | 'no' | null), creating its
+ * CUSTOMERS row on first sighting so every signed-in email is listed.
+ * The insert (and only the insert) runs under the script lock so two
+ * parallel bootstraps can't double-list an account; on lock contention
+ * the row simply lands on the next load.
+ */
+function readOrCreateCustomer(email, name) {
+  var sheet = getCustomersSheet();
+  var cols = customerCols(sheet);
+  if (cols.email === -1) return null; // headers unfixable (shouldn't happen)
+
+  var rows = sheet.getDataRange().getValues();
+  for (var i = 1; i < rows.length; i++) {
+    if (rows[i][cols.email] === email) return normalizeConsent(rows[i][cols.marketing_consent]);
+  }
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return null; // busy — the account gets listed on its next load
+  }
+  try {
+    // Re-check under the lock: a parallel bootstrap may have inserted it.
+    var again = sheet.getDataRange().getValues();
+    for (var j = 1; j < again.length; j++) {
+      if (again[j][cols.email] === email) return normalizeConsent(again[j][cols.marketing_consent]);
+    }
+    appendCustomerRow(sheet, cols, {
+      email: email,
+      name: name,
+      firstSeenAt: new Date().toISOString(),
+      source: 'google_signin',
+    });
+    return null;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Records the signed-in user's marketing-email choice from the overlay
+ * prompt (or a later change from Email preferences). `consent` must be a
+ * literal boolean — an explicit yes or an explicit no; there is no way to
+ * blank a consent back out through the API, so the timestamped record
+ * always reflects a deliberate answer.
+ */
+function handleEmailConsent(data) {
+  var token = data.token;
+  if (typeof data.consent !== 'boolean') {
+    return { status: 'error', message: 'consent must be true or false' };
+  }
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = authenticateUser(token);
+  if (!user) {
+    log('ERROR', 'emailConsent', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+
+  // Same pre-lock throttle as the other per-user toggles.
+  if (isActionRateLimited('consent', user.email, VOTE_STAR_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
+  var consent = data.consent ? 'yes' : 'no';
+  var now = new Date().toISOString();
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
+
+  try {
+    var sheet = getCustomersSheet();
+    var cols = customerCols(sheet);
+    if (cols.email === -1 || cols.marketing_consent === -1) {
+      return { status: 'error', message: 'Customers sheet is misconfigured' };
+    }
+
+    var rows = sheet.getDataRange().getValues();
+    var rowNum = -1;
+    for (var i = 1; i < rows.length; i++) {
+      if (rows[i][cols.email] === user.email) {
+        rowNum = i + 1; // 1-based sheet row
+        break;
+      }
+    }
+
+    if (rowNum !== -1) {
+      var set = function (col, value) {
+        if (col === -1) return;
+        var cell = sheet.getRange(rowNum, col + 1);
+        cell.setNumberFormat('@');
+        cell.setValue(value);
+      };
+      set(cols.marketing_consent, consent);
+      set(cols.consent_updated_at, now);
+      if (user.name) set(cols.name, user.name);
+    } else {
+      appendCustomerRow(sheet, cols, {
+        email: user.email,
+        name: user.name,
+        consent: consent,
+        consentAt: now,
+        firstSeenAt: now,
+        source: 'consent_prompt',
+      });
+    }
+
+    return { status: 'ok', marketing_consent: consent };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ============================================================

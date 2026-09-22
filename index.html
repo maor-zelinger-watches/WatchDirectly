@@ -133,6 +133,19 @@
 
   </main>
 
+  <!-- ===== SIGN-IN / EMAIL-CONSENT OVERLAY =====
+       One dialog, three faces (js/auth-overlay.js): the Google sign-in
+       button, the first-sign-in marketing-email question, and the Email
+       preferences view. Content renders into __body per step. -->
+  <div class="auth-overlay" id="auth-overlay" hidden>
+    <div class="auth-overlay__backdrop" data-close></div>
+    <div class="auth-overlay__dialog" role="dialog" aria-modal="true" aria-labelledby="auth-overlay-title" tabindex="-1">
+      <button class="auth-overlay__close" data-close aria-label="Close">✕</button>
+      <h2 class="auth-overlay__title" id="auth-overlay-title"></h2>
+      <div class="auth-overlay__body"></div>
+    </div>
+  </div>
+
   <!-- ===== TOAST NOTIFICATIONS ===== -->
   <div class="toast-container" id="toast-container" role="status" aria-live="polite" aria-atomic="true"></div>
 

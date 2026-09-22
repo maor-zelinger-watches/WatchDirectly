@@ -261,14 +261,28 @@ export function createApiClient(baseUrl) {
     },
 
     /**
-     * Fetches the signed-in user's votes, starred channels AND bookmarks in
-     * one request. Replaces the separate per-feature round trips at sign-in:
-     * the backend serializes a user's requests and re-verifies the token on
-     * each, so batching cuts both the queue depth and the token checks.
-     * A backend that predates bookmarks omits bookmark_ids.
+     * Records the signed-in user's marketing-email choice (the consent step
+     * of the sign-in overlay, or a later change from Email preferences).
+     * Requires a valid Google ID token.
+     *
+     * @param {boolean} consent - explicit yes (true) / no (false)
+     * @param {string} token - Google Sign-In ID token
+     * @returns {Promise<{marketing_consent: 'yes'|'no'}>}
+     */
+    async emailConsent(consent, token) {
+      return post({ action: 'emailConsent', consent: !!consent, token });
+    },
+
+    /**
+     * Fetches the signed-in user's votes, starred channels, bookmarks AND
+     * marketing-consent state in one request. Replaces the separate
+     * per-feature round trips at sign-in: the backend serializes a user's
+     * requests and re-verifies the token on each, so batching cuts both the
+     * queue depth and the token checks. A backend that predates a feature
+     * omits its key (bookmark_ids / marketing_consent).
      *
      * @param {string} token - Google Sign-In ID token
-     * @returns {Promise<{video_ids: string[], channels: string[], bookmark_ids?: string[]}>}
+     * @returns {Promise<{video_ids: string[], channels: string[], bookmark_ids?: string[], marketing_consent?: 'yes'|'no'|null}>}
      */
     async fetchBootstrap(token) {
       return post({ action: 'bootstrap', token });
