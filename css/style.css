@@ -408,12 +408,17 @@ img {
    ============================================================ */
 
 /* Five tabs no longer fit a phone row — the row scrolls horizontally
-   (scrollbar hidden) instead of wrapping or shrinking the labels. */
+   (scrollbar hidden) instead of wrapping or shrinking the labels.
+   overflow-y is pinned to hidden: with overflow-x:auto alone the spec
+   computes overflow-y to auto too, and the active underline's 1px
+   protrusion made the whole row vertically draggable on iOS (labels
+   rubber-banded half out of view). */
 .feed-tabs {
   display: flex;
   gap: var(--sp-1);
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: none;
 }
 
@@ -444,13 +449,15 @@ img {
   color: var(--text-primary);
 }
 
-/* Accent underline under the active tab */
+/* Accent underline under the active tab. bottom: 0, not -1px — the row is
+   a scroll container now, so anything past the content edge would either
+   be clipped or (worse) become scrollable vertical overflow. */
 .feed-tab--active::after {
   content: '';
   position: absolute;
   left: var(--sp-4);
   right: var(--sp-4);
-  bottom: -1px;
+  bottom: 0;
   height: 2px;
   background: var(--accent);
   border-radius: 2px 2px 0 0;

@@ -163,4 +163,22 @@ test.describe('Bookmarks tab', () => {
     await page.locator('.feed-tab', { hasText: 'Latest' }).click();
     await expect(page.locator('.media-card')).toHaveCount(3);
   });
+
+  test('the five-tab row scrolls horizontally only — no vertical drag', async ({ page }) => {
+    await setup(page);
+    const metrics = await page.locator('#feed-tabs').evaluate((el) => ({
+      scrollWidth: el.scrollWidth,
+      clientWidth: el.clientWidth,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+      viewport: window.innerWidth,
+    }));
+    // No vertical scrollable overflow — a single stray pixel here is what let
+    // iOS rubber-band the whole row and clip the labels (the 1.25.x drag bug).
+    expect(metrics.scrollHeight).toBeLessThanOrEqual(metrics.clientHeight);
+    // On the phone viewport the five tabs overflow sideways by design.
+    if (metrics.viewport < 500) {
+      expect(metrics.scrollWidth).toBeGreaterThan(metrics.clientWidth);
+    }
+  });
 });
