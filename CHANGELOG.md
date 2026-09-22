@@ -21,6 +21,16 @@ that component's heading.
 
 ## Frontend
 
+### 1.25.3 — 2026-09-22
+- **Tab row no longer drags vertically on iOS.** Making the five-tab row
+  horizontally scrollable (1.24.0) silently made it a vertical scroll
+  container too — `overflow-x: auto` computes `overflow-y` to auto — and
+  the active tab's underline protruded 1px past the content edge, so iOS
+  offered that pixel as draggable overflow and rubber-banded the labels
+  half out of view. overflow-y is now pinned to hidden and the underline
+  sits at bottom: 0, with an e2e guard asserting the row has zero
+  vertical scrollable overflow.
+
 ### 1.25.2 — 2026-09-22
 - **Full Google pill inside the overlay on every viewport.** The overlay's
   Google button rendered as the icon-only circle on phones — a leftover of
