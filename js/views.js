@@ -12,7 +12,7 @@
 import { state, isFilterActive, activeFilter, typeFilterActive } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
-import { filterVideos, sortVideos, dedupeVideos, mergeTopRanking, typeFilterVisible, searchFields } from './feed.js';
+import { filterVideos, sortVideos, sortTopRanking, dedupeVideos, mergeTopRanking, typeFilterVisible, searchFields } from './feed.js';
 import { renderList, reconcileList, buildChannelCard } from './cards.js';
 import { prefetchComments } from './comments-ui.js';
 import { exitFullscreen } from './fullscreen.js';
@@ -735,6 +735,37 @@ async function revalidateTop() {
   // Only the ranked-content render is driven here; a search query owns the
   // container (renderTop filters the loaded set) and must not be interrupted.
   if (changed && state.view === 'top' && !isFilterActive()) renderTop();
+}
+
+/**
+ * Re-ranks the loaded Top This Week list after a confirmed vote changes a
+ * count (votes.js patched the row copies; app.js routes its callback here).
+ * The sort mirrors the server's compareTopWeek order, so the liked card lands
+ * exactly where the next fetch would put it — no round trip, no waiting on
+ * topLoaded (which stays true all session, so a tab re-open never refetches).
+ *
+ * Repaints only when the order actually moved and the ranked list owns the
+ * container — an active search keeps filtering the loaded set, which now
+ * holds the new order for when it clears (same rule as revalidateTop). The
+ * saved first-page snapshot is refreshed only while it covers the whole
+ * loaded window: with deeper pages loaded, a page-1 slice paired with the
+ * deep cursor would disagree on restore, and the next session's revalidate
+ * refreshes the snapshot anyway.
+ */
+export function resortTopRanking() {
+  const list = state.topVideos;
+  if (!list || list.length === 0) return;
+
+  const before = list.map(v => v.video_id).join(',');
+  const sorted = sortTopRanking(list);
+  state.topVideos = sorted;
+
+  if (sorted.length <= CONFIG.PAGE_SIZE) {
+    saveTopCache(sorted, state.topTotal, state.topCursor);
+  }
+
+  if (sorted.map(v => v.video_id).join(',') === before) return;
+  if (state.view === 'top' && !isFilterActive()) renderTop();
 }
 
 /**

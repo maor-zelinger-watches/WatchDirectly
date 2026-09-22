@@ -510,6 +510,29 @@ export function mergeTopRanking(current, fresh) {
 }
 
 /**
+ * Sorts a Top This Week list into the server's ranking order: vote_count
+ * descending, then published_at descending, then video_id descending — the
+ * exact mirror of the backend's compareTopWeek, so a locally re-ranked list
+ * lands in the same order the next fetch would return. Returns a new array —
+ * does not mutate the input.
+ */
+export function sortTopRanking(videos) {
+  const time = (v) => {
+    const t = new Date(v.published_at).getTime();
+    return Number.isFinite(t) ? t : 0;
+  };
+  return [...videos].sort((a, b) => {
+    const dv = (Number(b.vote_count) || 0) - (Number(a.vote_count) || 0);
+    if (dv !== 0) return dv;
+    const dt = time(b) - time(a);
+    if (dt !== 0) return dt;
+    const aId = String(a.video_id || '');
+    const bId = String(b.video_id || '');
+    return aId < bId ? 1 : (aId > bId ? -1 : 0);
+  });
+}
+
+/**
  * Sorts videos in reverse chronological order (newest first).
  * Invalid dates sort oldest, and video_id breaks timestamp ties, so the
  * order is deterministic (and matches the server's pagination order).

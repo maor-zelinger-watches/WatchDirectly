@@ -60,8 +60,10 @@ async function setup(page, { signedIn = false } = {}) {
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', video_ids: [] }) });
       }
       if (body.action === 'vote') {
-        // Echo a toggled-on vote, count bumped by 1 from the seed
-        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', voted: true, vote_count: 2 }) });
+        // Echo a toggled-on vote, count bumped by 1 from the seed. A vote on
+        // the #2 top-week video outranks #1 (42), for the reorder tests.
+        const count = body.videoId === 'top_vid_lo' ? 43 : 2;
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', voted: true, vote_count: count }) });
       }
     }
 
@@ -146,6 +148,40 @@ test.describe('Upvoting', () => {
     // Server echoes voted=true, vote_count=2
     await expect(vote).toHaveClass(/media-card__vote--active/);
     await expect(vote.locator('.media-card__vote-count')).toHaveText('2');
+  });
+
+  test('a vote that outranks #1 moves the card to the top of Top This Week', async ({ page }) => {
+    await setup(page, { signedIn: true });
+
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+    await expect(page.locator('.media-card')).toHaveCount(2);
+    await expect(page.locator('.media-card__title').first()).toContainText('Most Upvoted This Week');
+
+    // Vote on #2 — the mocked server confirms with 43, beating #1's 42.
+    await page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote').click();
+
+    // The liked card re-ranks to the top, count carried along.
+    await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
+    await expect(page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote-count')).toHaveText('43');
+    await expect(page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote')).toHaveClass(/media-card__vote--active/);
+  });
+
+  test('the re-ranked order survives leaving and reopening the Top tab', async ({ page }) => {
+    await setup(page, { signedIn: true });
+
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+    await expect(page.locator('.media-card')).toHaveCount(2);
+    await page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote').click();
+    await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
+
+    // Leave for Latest and come back — the tab renders from state (no refetch),
+    // which must hold the re-ranked order, not the load-time one.
+    await page.locator('.feed-tab', { hasText: 'Latest' }).click();
+    await expect(page.locator('.media-card__title').first()).toContainText('Latest Video One');
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+
+    await expect(page.locator('.media-card')).toHaveCount(2);
+    await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
   });
 
   test('a vote cast after the search index is built shows in search results', async ({ page }) => {
