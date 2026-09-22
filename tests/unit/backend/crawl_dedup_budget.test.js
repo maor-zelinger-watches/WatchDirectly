@@ -265,3 +265,64 @@ describe('crawl wall-clock budget + resume index (B8)', () => {
     expect(ids).toEqual(['AAAAAAAAAAA', 'BBBBBBBBBBB', 'CCCCCCCCCCC']);
   });
 });
+
+describe('single-feed crawl (the add-channel path)', () => {
+  // YouTube items: their ids come from the watch URL, so the two channels stay
+  // distinguishable under this harness's constant digest stub.
+  const TWO = {
+    channels: [['C1', 'https://feed.example/1'], ['C2', 'https://feed.example/2']],
+    feeds: {
+      'https://feed.example/1': rssVideo('AAAAAAAAAAA'),
+      'https://feed.example/2': rssVideo('BBBBBBBBBBB'),
+    },
+    broadcast: { AAAAAAAAAAA: { status: 'none' }, BBBBBBBBBBB: { status: 'none' } },
+  };
+
+  it('fetches only the named feed and ingests only its items', () => {
+    const be = loadCrawl(TWO);
+    const res = be.crawlAllFeeds('https://feed.example/2');
+
+    expect(res.new_videos).toBe(1);
+    const rows = be.videosSheet._grid.slice(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0][0]).toBe('BBBBBBBBBBB');
+  });
+
+  it('leaves last_fetch and the resume index to the full crawl', () => {
+    // Both are whole-catalog claims. Stamping last_fetch would tell handleFeed
+    // the catalog is fresh when 1 of 2 channels was crawled; overwriting the
+    // resume index would make the next full pass skip channels.
+    const be = loadCrawl({ ...TWO, meta: [['crawl_resume_index', '1'], ['last_fetch', '2026-01-01T00:00:00.000Z']] });
+    be.crawlAllFeeds('https://feed.example/2');
+
+    expect(metaValue(be.metaSheet, 'crawl_resume_index')).toBe('1');
+    expect(metaValue(be.metaSheet, 'last_fetch')).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('still dedups against what is already in the sheet', () => {
+    const preexisting = ['BBBBBBBBBBB', 'C2', 'Vid', 'https://www.youtube.com/watch?v=BBBBBBBBBBB', '2026-07-01', '2026-07-01', 0, 'Heavyweights', 0, 0, 'video', '', 0, 'none', '', ''];
+    const be = loadCrawl({ ...TWO, videoRows: [preexisting] });
+
+    const res = be.crawlAllFeeds('https://feed.example/2');
+    expect(res.new_videos).toBe(0);
+    expect(be.videosSheet._grid).toHaveLength(2); // header + the original row
+  });
+
+  it('a no-match feed url is a no-op, not a full crawl', () => {
+    const be = loadCrawl(TWO);
+    const res = be.crawlAllFeeds('https://feed.example/nope');
+
+    expect(res.new_videos).toBe(0);
+    expect(be.videosSheet._grid).toHaveLength(1); // header only — nothing ingested
+    expect(metaValue(be.metaSheet, 'last_fetch')).toBeUndefined();
+  });
+
+  it('an unrestricted crawl is unaffected — both channels still ingest', () => {
+    const be = loadCrawl(TWO);
+    const res = be.crawlAllFeeds();
+
+    expect(res.new_videos).toBe(2);
+    expect(metaValue(be.metaSheet, 'crawl_resume_index')).toBe('0');
+    expect(metaValue(be.metaSheet, 'last_fetch')).toBeTruthy();
+  });
+});

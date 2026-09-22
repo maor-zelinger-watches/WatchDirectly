@@ -499,12 +499,53 @@ function scheduleRefresh() {
     ScriptApp.newTrigger('kickoffRefresh').timeBased().after(1000).create();
     log('INFO', 'scheduleRefresh', 'Async refresh scheduled');
   } catch (e) {
-    // Log the exception NAME too: a missing script.scriptapp OAuth scope surfaces
-    // here as a permission error, and without the name that failure is invisible —
-    // the async auto-refresh would silently never install its trigger.
-    log('ERROR', 'scheduleRefresh', (e && e.name ? e.name + ': ' : '') + (e && e.message ? e.message : e));
+    var msg = (e && e.message) ? String(e.message) : String(e);
+    // A missing script.scriptapp scope surfaces here as a permission error, and
+    // on this deployment that is the PERMANENT state, not an incident: adding
+    // the scope to oauthScopes puts the ANONYMOUS web app into a
+    // re-authorization state and 403s the live /exec (backend 1.14.3, reverted
+    // in 1.14.4). handleFeed calls scheduleRefresh on EVERY request while the
+    // feed is stale, so logging per occurrence buried the log under one ERROR
+    // per visitor. Report it once an hour at WARN and stay quiet in between.
+    // Match on the scope URL — it is the one part of the message Google does
+    // NOT localize (the text arrives in the script owner's locale, e.g.
+    // Hebrew).
+    if (msg.indexOf('script.scriptapp') !== -1) {
+      if (firstInWindow_('scheduleRefresh:no-scriptapp-scope', 3600)) {
+        log('WARN', 'scheduleRefresh', 'Async refresh unavailable: this deployment has no ' +
+          'script.scriptapp scope, so no refresh trigger can be installed. The 4h scheduled ' +
+          'crawl is unaffected. Suppressing for 1h. (' + msg + ')');
+      }
+      return;
+    }
+    // Anything else: one ERROR per occurrence, with the exception NAME too —
+    // without it a permission failure is invisible and the async auto-refresh
+    // would silently never install its trigger.
+    log('ERROR', 'scheduleRefresh', (e && e.name ? e.name + ': ' : '') + msg);
   } finally {
     lock.releaseLock();
+  }
+}
+
+/**
+ * True the first time `key` is seen in a `seconds`-long window, false for every
+ * call until that window expires — a log-rate limiter for a condition that
+ * recurs on every request. Cache-backed, so it is best-effort by design: an
+ * eviction or a CacheService outage just lets one extra line through, which is
+ * the right direction to fail for a log.
+ *
+ * @param {string} key
+ * @param {number} seconds
+ * @returns {boolean}
+ */
+function firstInWindow_(key, seconds) {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (cache.get(key)) return false;
+    cache.put(key, '1', seconds);
+    return true;
+  } catch (e) {
+    return true; // never let the rate limiter swallow what it is limiting
   }
 }
 
@@ -614,7 +655,18 @@ function scheduledFetchAllFeeds() {
 // RSS FEED FETCHING
 // ============================================================
 
-function fetchAllFeeds() {
+/**
+ * Crawls every enabled channel, or — when onlyFeedUrl is given — just the one
+ * channel whose feed_url matches. The single-feed form backs handleAddChannel:
+ * it is bounded work (one feed fetch) that fits inside a web-app request, so a
+ * newly added channel has content immediately instead of waiting for the 4h
+ * trigger. It shares this function's one-crawl-at-a-time marker, so it can
+ * never append against the same stale dedup snapshot as a running full crawl.
+ *
+ * @param {string} [onlyFeedUrl] - restrict the crawl to this feed_url
+ * @returns {{new_videos:number, errors:number, skipped?:boolean}}
+ */
+function fetchAllFeeds(onlyFeedUrl) {
   // One crawl at a time. Concurrent runs (scheduled trigger + stale-feed
   // web requests) raced each other: both self-initialized columns, both
   // appended rows against the same stale dedup snapshot, and both wrote
@@ -641,7 +693,7 @@ function fetchAllFeeds() {
   }
 
   try {
-    return crawlAllFeeds();
+    return crawlAllFeeds(onlyFeedUrl);
   } finally {
     setMeta('fetch_in_progress', '');
   }
@@ -723,9 +775,15 @@ function handleGetChannels() {
   return { status: 'ok', channels: channels };
 }
 
-function crawlAllFeeds() {
+/**
+ * @param {string} [onlyFeedUrl] - when set, every channel whose feed_url differs
+ *   is skipped, and the whole-catalog bookkeeping (resume index, last_fetch,
+ *   retention pruning) is left to the full crawl that owns it.
+ */
+function crawlAllFeeds(onlyFeedUrl) {
   // Wall-clock deadline (production runtime timing — NOT a test stopwatch).
   var crawlStartMs = new Date().getTime();
+  var targetFeed = onlyFeedUrl ? String(onlyFeedUrl).trim() : '';
 
   var channelsSheet = getSheet('CHANNELS');
   var videosSheet = getSheet('VIDEOS');
@@ -901,6 +959,10 @@ function crawlAllFeeds() {
       continue;
     }
 
+    // Single-feed crawl: skip before the fetch (and before the politeness
+    // sleep at the bottom of the loop), so the pass costs one HTTP request.
+    if (targetFeed && String(feedUrl).trim() !== targetFeed) continue;
+
     try {
       var videos = fetchAndParseFeed(feedUrl, channelName, tier, category);
 
@@ -1050,26 +1112,36 @@ function crawlAllFeeds() {
   }
   // ---- end BE6 batched flush ------------------------------------------------
 
-  // Persist where the next crawl should resume: the first channel we didn't
-  // reach when the budget cut us off, or 0 after a completed full pass. This is
-  // normal end-of-crawl finalization (it runs whether we finished or stopped
-  // early — only a hard kill skips it, which is exactly the case the budget
-  // check exists to avoid).
-  setMeta(CRAWL_RESUME_KEY, String(nextResumeIndex));
+  // Whole-catalog bookkeeping, and therefore the full crawl's alone. A
+  // single-feed crawl visited exactly one channel: it has no opinion on where
+  // the next full pass should resume, and last_fetch — which handleFeed reads
+  // as "every feed crawled at" — is still false. Writing either from the
+  // add-channel path would make the next full crawl skip channels and suppress
+  // the staleness signal.
+  var archived = 0;
+  var retired = 0;
+  if (!targetFeed) {
+    // Persist where the next crawl should resume: the first channel we didn't
+    // reach when the budget cut us off, or 0 after a completed full pass. This
+    // is normal end-of-crawl finalization (it runs whether we finished or
+    // stopped early — only a hard kill skips it, which is exactly the case the
+    // budget check exists to avoid).
+    setMeta(CRAWL_RESUME_KEY, String(nextResumeIndex));
 
-  // Update last_fetch timestamp
-  setMeta('last_fetch', new Date().toISOString());
+    // Update last_fetch timestamp
+    setMeta('last_fetch', new Date().toISOString());
 
-  // Archive videos past the retention window so the every-request scan in
-  // readAllVideos stays bounded. Runs before the cache invalidations below so
-  // the head/top-week caches repopulate against the pruned totals.
-  var archived = pruneOldVideos();
+    // Archive videos past the retention window so the every-request scan in
+    // readAllVideos stays bounded. Runs before the cache invalidations below so
+    // the head/top-week caches repopulate against the pruned totals.
+    archived = pruneOldVideos();
 
-  // Second-stage retention: drop archived rows past the hard age cap so the
-  // Archive tab itself stays bounded (pruneOldVideos only ever appends to it).
-  // Takes its own lock, like pruneOldVideos, and invalidates the archive cache
-  // when it removes anything.
-  var retired = pruneOldArchive();
+    // Second-stage retention: drop archived rows past the hard age cap so the
+    // Archive tab itself stays bounded (pruneOldVideos only ever appends to it).
+    // Takes its own lock, like pruneOldVideos, and invalidates the archive cache
+    // when it removes anything.
+    retired = pruneOldArchive();
+  }
 
   // The crawl appended rows and refreshed view counts / live state in place —
   // the cached head and the cached top-week window no longer reflect the sheet.
@@ -2578,12 +2650,12 @@ function parseRegex(xml, channelName, tier, category) {
  *
  * Resolves the submitted URL through the same SSRF-guarded resolver the sheet
  * flow uses, refuses duplicates (by channel id, feed URL, or site URL), appends
- * one fully-enriched, enabled row, and schedules an async crawl so the new
- * channel's content shows up within minutes instead of at the next 4h cycle.
+ * one fully-enriched, enabled row, and crawls that one feed inline so the new
+ * channel's content is there immediately instead of at the next 4h cycle.
  *
  * @param {{url:string}} data
- * @returns {Object} { status:'ok', channel:{channel_name, platform, feed_url,
- *   avatar} } on success, else { status:'error', message }
+ * @returns {Object} { status:'ok', new_items:number, channel:{channel_name,
+ *   platform, feed_url, avatar} } on success, else { status:'error', message }
  */
 function handleAddChannel(data) {
   var rawUrl = String(data.url || '').trim();
@@ -2635,11 +2707,31 @@ function handleAddChannel(data) {
   log('INFO', 'handleAddChannel', 'Added ' + (info.channel_name || normUrl) +
     ' (' + (info.media_type === 'video' ? 'youtube' : 'article') + ')');
 
-  // Best-effort: the row is saved either way; the 4h cycle covers a failure.
-  try { scheduleRefresh(); } catch (e) { /* logged inside scheduleRefresh */ }
+  // Crawl JUST this feed, inline, so the channel has content the moment it is
+  // added. This used to call scheduleRefresh(), but that path has never worked
+  // on this deployment: installing a trigger needs the script.scriptapp scope,
+  // which the ANONYMOUS web app deliberately does not carry (see
+  // scheduleRefresh), so every add silently fell through to the 4h trigger.
+  // One feed fetch is bounded work, well inside the request budget, and
+  // fetchAllFeeds' own in-progress marker keeps this off a running full crawl.
+  // Best-effort: the row is saved either way, and the 4h cycle still covers a
+  // failure or a skip.
+  var newItems = 0;
+  try {
+    // The row was appended through the Sheets API above; flush so the crawl's
+    // own read of CHANNELS sees it rather than a pre-append snapshot.
+    SpreadsheetApp.flush();
+    var crawl = fetchAllFeeds(info.feed_url);
+    newItems = (crawl && crawl.new_videos) || 0;
+    log('INFO', 'handleAddChannel', 'Initial crawl of ' + info.feed_url + ': ' +
+      (crawl && crawl.skipped ? 'skipped (a crawl is already running)' : newItems + ' new item(s)'));
+  } catch (e) {
+    log('ERROR', 'handleAddChannel', 'Initial crawl failed for ' + info.feed_url + ': ' + e.message);
+  }
 
   return {
     status: 'ok',
+    new_items: newItems,
     channel: {
       channel_name: info.channel_name || '',
       platform: info.media_type === 'video' ? 'youtube' : 'article',

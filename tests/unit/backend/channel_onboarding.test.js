@@ -21,7 +21,21 @@ function makeSheet(rows) {
   return {
     _grid: grid,
     getDataRange: () => ({ getValues: () => grid.map((r) => r.slice()) }),
-    getRange: (row, col) => ({
+    getRange: (row, col, numRows, numCols) => ({
+      // Faithful block read (real Sheets implements this): the batched crawl
+      // flush reads a column/trio block via getRange(...).getValues().
+      getValues() {
+        const nr = numRows || 1;
+        const nc = numCols || 1;
+        const out = [];
+        for (let i = 0; i < nr; i++) {
+          const r = grid[row - 1 + i] || [];
+          const outRow = [];
+          for (let j = 0; j < nc; j++) outRow.push(r[col - 1 + j] !== undefined ? r[col - 1 + j] : '');
+          out.push(outRow);
+        }
+        return out;
+      },
       setValue(v) {
         while (grid.length < row) grid.push([]);
         const r = grid[row - 1];
@@ -47,6 +61,10 @@ function makeSheet(rows) {
 
 const CHANNEL_HEADERS = ['channel_name', 'host', 'tier', 'category', 'description', 'url', 'channel_id', 'feed_url', 'enabled', 'avatar'];
 
+// Full Videos schema incl. the live trio, so the inline crawl never has to
+// self-add columns.
+const VIDEO_HEADERS = ['video_id', 'channel_name', 'title', 'url', 'published_at', 'fetched_at', 'tier', 'category', 'comment_count', 'vote_count', 'media_type', 'preview_image', 'view_count', 'live_status', 'scheduled_start', 'expires_at'];
+
 // UC id is exactly 22 chars after the UC prefix.
 const YT_CHANNEL_ID = 'UCabcdefghijklmnopqrstuv';
 
@@ -61,6 +79,15 @@ const NEWS_HTML = `<!doctype html><html><head>
   <meta property="og:site_name" content="News &amp; Co">
   <link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
 </head><body></body></html>`;
+
+// What news.example's declared feed actually serves — two items, so the
+// add-channel path's inline crawl has real content to ingest.
+const NEWS_FEED = `<?xml version="1.0"?><rss version="2.0"><channel><title>News &amp; Co</title>
+  <item><title>First story</title><link>https://news.example/first</link>
+    <pubDate>Mon, 21 Sep 2026 10:00:00 GMT</pubDate></item>
+  <item><title>Second story</title><link>https://news.example/second</link>
+    <pubDate>Mon, 21 Sep 2026 11:00:00 GMT</pubDate></item>
+</channel></rss>`;
 
 const BLOG_HTML = `<!doctype html><html><head><title>My Blog</title></head><body></body></html>`;
 
@@ -101,12 +128,17 @@ function load(channelRows, opts = {}) {
   const sheets = {
     CHANNELS_ID: opts.channelsSheet || makeSheet([CHANNEL_HEADERS, ...channelRows]),
     META_ID: makeSheet(metaRows),
+    // handleAddChannel crawls the feed it just added, so the add path now
+    // touches Videos and Logs too.
+    VIDEOS_ID: opts.videosSheet || makeSheet([VIDEO_HEADERS]),
+    LOGS_ID: makeSheet([['ts', 'level', 'source', 'message']]),
   };
   const calls = [];
   const fetch = (u) => {
     calls.push(u);
     if (u === 'https://www.youtube.com/@WatchGuy') return ok200(YT_HTML);
     if (u === 'https://news.example') return ok200(NEWS_HTML);
+    if (u === 'https://news.example/rss.xml') return ok200(NEWS_FEED);
     if (u === 'https://blog.example') return ok200(BLOG_HTML);
     if (u === 'https://blog.example/feed/') return ok200(RSS_BODY);
     if (u === 'https://paper.example') return ok200(PAPER_HTML);
@@ -119,11 +151,26 @@ function load(channelRows, opts = {}) {
   // jsonResponse serializes through ContentService; capture each payload so
   // doPost's replies can be asserted on.
   const responses = [];
+  // Stateful, so firstInWindow_'s once-per-window suppression is really
+  // exercised rather than mocked away.
+  const cacheStore = new Map();
   const globals = {
     UrlFetchApp: { fetch },
-    SpreadsheetApp: { openById: (id) => ({ getSheets: () => [sheets[id]] }) },
+    SpreadsheetApp: {
+      openById: (id) => ({ getSheets: () => [sheets[id]] }),
+      flush() {},
+    },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
-    Utilities: { sleep() {} },
+    Utilities: {
+      sleep() {},
+      getUuid: () => '0',
+      DigestAlgorithm: { MD5: 'MD5' },
+      // Input-dependent on purpose: the crawl hashes each item's guid/link into
+      // its id, so a constant digest would collapse every item of a feed under
+      // one id and the id dedup would drop all but the first.
+      computeDigest: (_algo, text) => Array.from(String(text)).map((c) => c.charCodeAt(0)),
+      base64EncodeWebSafe: (bytes) => 'ID' + bytes.reduce((a, b) => (a * 31 + b) % 1e12, 7).toString(36),
+    },
     Logger: { log() {} },
     ContentService: {
       createTextOutput: (text) => { responses.push(JSON.parse(text)); return { setMimeType: () => ({}) }; },
@@ -131,12 +178,21 @@ function load(channelRows, opts = {}) {
     },
     ScriptApp: opts.scriptApp || {},
     XmlService: undefined,
+    CacheService: {
+      getScriptCache: () => ({
+        get: (k) => (cacheStore.has(k) ? cacheStore.get(k) : null),
+        put: (k, v) => cacheStore.set(k, v),
+        remove: (k) => cacheStore.delete(k),
+      }),
+    },
   };
   const patched = SRC
     .replace(/CHANNELS:\s*'[^']+'/, "CHANNELS: 'CHANNELS_ID'")
-    .replace(/META:\s*'[^']+'/, "META: 'META_ID'");
+    .replace(/META:\s*'[^']+'/, "META: 'META_ID'")
+    .replace(/VIDEOS:\s*'[^']+'/, "VIDEOS: 'VIDEOS_ID'")
+    .replace(/LOGS:\s*'[^']+'/, "LOGS: 'LOGS_ID'");
 
-  const names = ['enrichChannels', 'resolveChannelFromUrl', 'scheduledFetchAllFeeds', 'runScheduledEnrichment', 'handleAddChannel', 'doPost'];
+  const names = ['enrichChannels', 'resolveChannelFromUrl', 'scheduledFetchAllFeeds', 'runScheduledEnrichment', 'handleAddChannel', 'scheduleRefresh', 'doPost'];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
   return { ...factory(...Object.values(globals)), sheets, calls, responses };
 }
@@ -367,7 +423,8 @@ describe('handleAddChannel — the password-protected add-channel form endpoint'
     ['log_level', 'ERROR'],
     ['admin_token', 'sekret-admin-token'],
     ['add_channel_password', 'sekret-add-password'],
-    // Recent marker keeps scheduleRefresh from wanting a real trigger.
+    // A fresh marker parks the add path's inline crawl, so the tests below
+    // exercise resolution/dedup without needing feed fixtures.
     ['fetch_in_progress', new Date().toISOString()],
   ];
 
@@ -389,19 +446,57 @@ describe('handleAddChannel — the password-protected add-channel form endpoint'
     expect(cell(grid, 1, 'enabled')).toBe(true);
   });
 
-  it('schedules an async crawl after a successful add', () => {
-    const created = [];
-    const scriptApp = {
-      getProjectTriggers: () => [],
-      newTrigger: (name) => ({ timeBased: () => ({ after: () => ({ create: () => created.push(name) }) }) }),
-    };
-    // No fetch_in_progress marker — the refresh path must actually install.
+  it('crawls the new channel inline so it has content immediately', () => {
+    // No fetch_in_progress marker — the crawl must actually run. ScriptApp is
+    // left empty on purpose: the add path must not need a trigger (and so must
+    // not need the script.scriptapp scope this deployment does not carry).
     const be = load([], {
       metaRows: [['key', 'value'], ['log_level', 'ERROR'], ['admin_token', 't']],
-      scriptApp,
     });
+    const res = be.handleAddChannel({ url: 'https://news.example' });
+
+    expect(res.status).toBe('ok');
+    expect(res.new_items).toBe(2);
+    // Both feed items landed in Videos, attributed to the channel just added.
+    const rows = be.sheets.VIDEOS_ID._grid.slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r[3]).sort()).toEqual([
+      'https://news.example/first',
+      'https://news.example/second',
+    ]);
+    expect(rows.every((r) => r[1] === 'News & Co')).toBe(true);
+  });
+
+  it('crawls ONLY the added feed, leaving other channels and the crawl bookkeeping alone', () => {
+    // An existing channel whose feed would also parse. The inline crawl must
+    // not touch it, must not advance the resume index, and must not stamp
+    // last_fetch — that would tell handleFeed the whole catalog is fresh.
+    const be = load([
+      ['Paper Mag', '', 0, '', '', 'https://paper.example', '', 'https://paper.example/rss.xml', true, ''],
+    ], { metaRows: [['key', 'value'], ['log_level', 'ERROR'], ['admin_token', 't']] });
+
     be.handleAddChannel({ url: 'https://news.example' });
-    expect(created).toEqual(['kickoffRefresh']);
+
+    const rows = be.sheets.VIDEOS_ID._grid.slice(1);
+    expect(rows.every((r) => r[1] === 'News & Co')).toBe(true);
+    expect(rows.some((r) => r[3] === 'https://paper.example/a-story')).toBe(false);
+
+    const meta = be.sheets.META_ID._grid;
+    expect(meta.find((r) => r[0] === 'last_fetch')).toBeUndefined();
+    expect(meta.find((r) => r[0] === 'crawl_resume_index')).toBeUndefined();
+  });
+
+  it('still adds the channel when a full crawl is already running', () => {
+    // fetch_in_progress is fresh, so fetchAllFeeds' one-crawl-at-a-time guard
+    // parks the inline crawl. The row must still be saved — the 4h cycle picks
+    // the content up — and the caller must not see an error.
+    const be = load([], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://news.example' });
+
+    expect(res.status).toBe('ok');
+    expect(res.new_items).toBe(0);
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(2); // row appended anyway
+    expect(be.sheets.VIDEOS_ID._grid).toHaveLength(1);   // header only
   });
 
   it('refuses a duplicate (same channel id via a different URL form)', () => {
@@ -459,5 +554,58 @@ describe('handleAddChannel — the password-protected add-channel form endpoint'
     be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: '' }));
     expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Wrong password' });
     expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1);
+  });
+});
+
+describe('scheduleRefresh — the missing script.scriptapp scope is logged once, not per request', () => {
+  // The real message, in both locales Google has actually served it in. The
+  // scope URL is the only part it does not localize.
+  const EN = 'Exception: Specified permissions are not sufficient to call ScriptApp.getProjectTriggers. Required permissions: https://www.googleapis.com/auth/script.scriptapp';
+  const HE = 'Exception: ההרשאות שצוינו לא מספיקות כדי לשלוח קריאה אל ScriptApp.getProjectTriggers. ההרשאות הנדרשות: https://www.googleapis.com/auth/script.scriptapp';
+
+  /** Loads the backend with a ScriptApp whose trigger calls throw `message`. */
+  function loadThrowing(message) {
+    return load([], {
+      // WARN, not DEBUG: log() resolves its threshold with
+      // `LOG_LEVELS[configLevel] || LOG_LEVELS.ERROR`, and LOG_LEVELS.DEBUG is
+      // 0 — falsy — so a DEBUG setting silently filters at ERROR instead. WARN
+      // lets both levels this suite asserts on through.
+      metaRows: [['key', 'value'], ['log_level', 'WARN']],
+      scriptApp: { getProjectTriggers: () => { throw new Error(message); } },
+    });
+  }
+
+  const linesFrom = (be) => be.sheets.LOGS_ID._grid.slice(1).filter((r) => r[2] === 'scheduleRefresh');
+
+  it('logs one WARN for a burst of stale-feed requests, not one per call', () => {
+    const be = loadThrowing(EN);
+    for (let i = 0; i < 25; i++) be.scheduleRefresh();
+
+    const lines = linesFrom(be);
+    expect(lines).toHaveLength(1);
+    expect(lines[0][1]).toBe('WARN');
+    expect(lines[0][3]).toMatch(/Async refresh unavailable/);
+    expect(lines[0][3]).toMatch(/4h scheduled\s+crawl is unaffected|4h scheduled crawl is unaffected/);
+  });
+
+  it('recognizes the localized message too (matched on the scope URL)', () => {
+    const be = loadThrowing(HE);
+    be.scheduleRefresh();
+    be.scheduleRefresh();
+
+    const lines = linesFrom(be);
+    expect(lines).toHaveLength(1);
+    expect(lines[0][1]).toBe('WARN');
+  });
+
+  it('still ERRORs, every time, on any other failure', () => {
+    const be = loadThrowing('Exception: Service Spreadsheets timed out');
+    be.scheduleRefresh();
+    be.scheduleRefresh();
+
+    const lines = linesFrom(be);
+    expect(lines).toHaveLength(2);
+    expect(lines.every((l) => l[1] === 'ERROR')).toBe(true);
+    expect(lines[0][3]).toMatch(/timed out/);
   });
 });
