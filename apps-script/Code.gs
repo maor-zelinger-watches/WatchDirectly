@@ -37,7 +37,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.17.0';
+const VERSION = '1.18.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -316,6 +316,13 @@ function doPost(e) {
         return jsonResponse(handleSession(data));
       case 'clientError':
         return jsonResponse(handleClientError(data));
+      case 'addChannel':
+        // Gated by the add-channel page's own password (its META row), over
+        // POST so it never lands in a URL/query log.
+        if (!isAddChannelAuthorized(data.token)) {
+          return jsonResponse({ status: 'error', message: 'Wrong password' });
+        }
+        return jsonResponse(handleAddChannel(data));
       case 'logs':
         // Admin-only, over POST so the token never lands in a URL/query log.
         if (!isAdmin(data.token)) {
@@ -354,6 +361,22 @@ function isAdmin(token) {
   var adminToken = getMeta('admin_token');
   if (!adminToken || !token) return false;
   return constantTimeEquals(String(token), String(adminToken));
+}
+
+/**
+ * Constant-time check of the add-channel page's password against the
+ * `add_channel_password` row in META. Deliberately a SEPARATE secret from
+ * admin_token: the form's password can be shared with a co-editor without
+ * also granting the admin endpoints (refresh, logs). Fails CLOSED when the
+ * row is missing or blank — no password configured means nobody can add.
+ *
+ * @param {string} token
+ * @returns {boolean}
+ */
+function isAddChannelAuthorized(token) {
+  var password = getMeta('add_channel_password');
+  if (!password || !token) return false;
+  return constantTimeEquals(String(token), String(password));
 }
 
 function jsonResponse(data) {
@@ -532,11 +555,39 @@ function setupScheduledRefresh() {
 }
 
 /**
+ * Enrichment pass run ahead of the scheduled crawl, so a URL pasted into a new
+ * CHANNELS row by a sheet editor (no script access needed) goes live on the
+ * next cycle: the blanks are filled, the row is enabled, and the crawl that
+ * follows in this same execution picks it up. When every row is already
+ * enriched this costs one sheet read — enrichChannels only fetches for rows
+ * with blanks to fill. A bad row or a scrape outage must never cost the crawl,
+ * so failures are contained here.
+ *
+ * @returns {{processed:number, filled:number, results:Object[]}|null} The
+ *   enrichChannels summary, or null when enrichment itself failed.
+ */
+function runScheduledEnrichment() {
+  try {
+    var summary = enrichChannels();
+    if (summary.processed > 0) {
+      log('INFO', 'scheduledFetchAllFeeds', 'Enriched ' + summary.processed +
+        ' channel row(s), filled ' + summary.filled + ' cell(s)');
+    }
+    return summary;
+  } catch (e) {
+    log('ERROR', 'scheduledFetchAllFeeds', 'Channel enrichment failed: ' + e.message);
+    return null;
+  }
+}
+
+/**
  * Entry point called by the time-based trigger.
- * Wraps fetchAllFeeds with logging/error handling.
+ * Enriches freshly pasted CHANNELS rows, then wraps fetchAllFeeds with
+ * logging/error handling.
  */
 function scheduledFetchAllFeeds() {
   log('INFO', 'scheduledFetchAllFeeds', 'Scheduled refresh starting');
+  runScheduledEnrichment();
   try {
     var stats = fetchAllFeeds();
     log('INFO', 'scheduledFetchAllFeeds', 'Completed. New: ' + stats.new_videos + ', Errors: ' + stats.errors);
@@ -2504,6 +2555,84 @@ function parseRegex(xml, channelName, tier, category) {
     });
   }
   return videos;
+}
+
+/**
+ * POST endpoint behind the add-channel.html admin form. The caller was already
+ * authenticated by the router (isAdmin, constant-time — the form's password is
+ * the admin token, sent in the POST body so it never lands in a URL).
+ *
+ * Resolves the submitted URL through the same SSRF-guarded resolver the sheet
+ * flow uses, refuses duplicates (by channel id, feed URL, or site URL), appends
+ * one fully-enriched, enabled row, and schedules an async crawl so the new
+ * channel's content shows up within minutes instead of at the next 4h cycle.
+ *
+ * @param {{url:string}} data
+ * @returns {Object} { status:'ok', channel:{channel_name, platform, feed_url,
+ *   avatar} } on success, else { status:'error', message }
+ */
+function handleAddChannel(data) {
+  var rawUrl = String(data.url || '').trim();
+  if (!rawUrl) return { status: 'error', message: 'Missing channel URL' };
+  if (rawUrl.length > 500) return { status: 'error', message: 'URL too long' };
+
+  var info = resolveChannelFromUrl(rawUrl);
+  if (!info.ok) return { status: 'error', message: info.error };
+  if (!info.feed_url) {
+    return { status: 'error', message: 'No RSS/Atom feed found at ' + rawUrl };
+  }
+
+  var sheet = getSheet('CHANNELS');
+  var rows = sheet.getDataRange().getValues();
+  var headers = rows[0].slice();
+  var urlCol     = ensureChannelColumn(sheet, headers, 'url');
+  var nameCol    = ensureChannelColumn(sheet, headers, 'channel_name');
+  var idCol      = ensureChannelColumn(sheet, headers, 'channel_id');
+  var feedCol    = ensureChannelColumn(sheet, headers, 'feed_url');
+  var avatarCol  = ensureChannelColumn(sheet, headers, 'avatar');
+  var enabledCol = ensureChannelColumn(sheet, headers, 'enabled');
+
+  // Duplicate check — the sheet flow tolerates re-runs because it only fills
+  // blanks, but a form submit APPENDS, so it must refuse instead. Compare the
+  // stable identifiers, normalized the way the sheet stores them.
+  var normUrl = normalizeChannelUrl(rawUrl).replace(/\/+$/, '').toLowerCase();
+  for (var i = 1; i < rows.length; i++) {
+    var row = rows[i];
+    var dup =
+      (info.channel_id && String(row[idCol] || '').trim() === info.channel_id) ||
+      (String(row[feedCol] || '').trim() === info.feed_url) ||
+      (normUrl && normalizeChannelUrl(row[urlCol]).replace(/\/+$/, '').toLowerCase() === normUrl);
+    if (dup) {
+      var existing = String(row[nameCol] || row[urlCol] || ('row ' + (i + 1)));
+      return { status: 'error', message: 'Already in the list as "' + existing + '"' };
+    }
+  }
+
+  var newRow = [];
+  for (var c = 0; c < headers.length; c++) newRow.push('');
+  newRow[urlCol]     = normalizeChannelUrl(rawUrl);
+  newRow[nameCol]    = info.channel_name || '';
+  newRow[idCol]      = info.channel_id || '';
+  newRow[feedCol]    = info.feed_url;
+  newRow[avatarCol]  = info.avatar || '';
+  newRow[enabledCol] = true;
+  sheet.appendRow(newRow);
+
+  log('INFO', 'handleAddChannel', 'Added ' + (info.channel_name || normUrl) +
+    ' (' + (info.media_type === 'video' ? 'youtube' : 'article') + ')');
+
+  // Best-effort: the row is saved either way; the 4h cycle covers a failure.
+  try { scheduleRefresh(); } catch (e) { /* logged inside scheduleRefresh */ }
+
+  return {
+    status: 'ok',
+    channel: {
+      channel_name: info.channel_name || '',
+      platform: info.media_type === 'video' ? 'youtube' : 'article',
+      feed_url: info.feed_url,
+      avatar: info.avatar || ''
+    }
+  };
 }
 
 // ============================================================

@@ -1550,6 +1550,80 @@ body.fullscreen-mode {
   margin: 0 auto;
 }
 
+/* ============================================================
+   ADD-CHANNEL PAGE (operator-only, add-channel.html)
+   ============================================================ */
+
+.add-channel {
+  padding: var(--sp-6) var(--sp-4);
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.add-channel__title {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--text-primary);
+  margin-bottom: var(--sp-2);
+}
+
+.add-channel__intro {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-normal);
+  margin-bottom: var(--sp-6);
+}
+
+.add-channel__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.add-channel__label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  margin-top: var(--sp-3);
+}
+
+.add-channel__input {
+  width: 100%;
+  padding: var(--sp-3);
+  font-family: var(--font-family);
+  font-size: var(--fs-base);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.add-channel__input::placeholder {
+  color: var(--text-muted);
+}
+
+.add-channel__submit {
+  margin-top: var(--sp-5);
+  align-self: flex-start;
+}
+
+.add-channel__result {
+  margin-top: var(--sp-5);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--text-secondary);
+}
+
+.add-channel__result--ok {
+  color: var(--accent);
+}
+
+.add-channel__result--error {
+  color: var(--danger, #e5484d);
+}
+
 .legal-page__title {
   font-size: var(--fs-xl);
   font-weight: var(--fw-bold);

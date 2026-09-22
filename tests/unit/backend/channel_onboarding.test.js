@@ -95,11 +95,11 @@ function ok200(text) {
   return { getResponseCode: () => 200, getContentText: () => text, getAllHeaders: () => ({}) };
 }
 
-function load(channelRows, { adminToken } = {}) {
-  const metaRows = [['key', 'value'], ['log_level', 'ERROR']];
-  if (adminToken) metaRows.push(['admin_token', adminToken]);
+function load(channelRows, opts = {}) {
+  const metaRows = (opts.metaRows || [['key', 'value'], ['log_level', 'ERROR']]).map((r) => r.slice());
+  if (opts.adminToken) metaRows.push(['admin_token', opts.adminToken]);
   const sheets = {
-    CHANNELS_ID: makeSheet([CHANNEL_HEADERS, ...channelRows]),
+    CHANNELS_ID: opts.channelsSheet || makeSheet([CHANNEL_HEADERS, ...channelRows]),
     META_ID: makeSheet(metaRows),
   };
   const calls = [];
@@ -129,14 +129,14 @@ function load(channelRows, { adminToken } = {}) {
       createTextOutput: (text) => { responses.push(JSON.parse(text)); return { setMimeType: () => ({}) }; },
       MimeType: { JSON: 'json' },
     },
-    ScriptApp: {},
+    ScriptApp: opts.scriptApp || {},
     XmlService: undefined,
   };
   const patched = SRC
     .replace(/CHANNELS:\s*'[^']+'/, "CHANNELS: 'CHANNELS_ID'")
     .replace(/META:\s*'[^']+'/, "META: 'META_ID'");
 
-  const names = ['enrichChannels', 'resolveChannelFromUrl', 'doPost'];
+  const names = ['enrichChannels', 'resolveChannelFromUrl', 'scheduledFetchAllFeeds', 'runScheduledEnrichment', 'handleAddChannel', 'doPost'];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
   return { ...factory(...Object.values(globals)), sheets, calls, responses };
 }
@@ -327,5 +327,137 @@ describe('resolveChannelFromUrl — direct resolver', () => {
     expect(r.ok).toBe(true);
     expect(r.channel_id).toBe(YT_CHANNEL_ID);
     expect(r.feed_url).toBe('https://www.youtube.com/feeds/videos.xml?channel_id=' + YT_CHANNEL_ID);
+  });
+});
+
+describe('scheduledFetchAllFeeds — self-serve channel adds go live without the editor', () => {
+  // A recent fetch_in_progress marker makes fetchAllFeeds no-op, so these tests
+  // exercise the enrichment leg of the scheduled run without the real crawl.
+  const CRAWL_BUSY_META = () => [
+    ['key', 'value'],
+    ['log_level', 'ERROR'],
+    ['fetch_in_progress', new Date().toISOString()],
+  ];
+
+  it('enriches a freshly pasted URL row before the crawl', () => {
+    const be = load(
+      [['', '', '', '', '', 'https://news.example', '', '', '', '']],
+      { metaRows: CRAWL_BUSY_META() },
+    );
+    be.scheduledFetchAllFeeds();
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(cell(grid, 1, 'feed_url')).toBe('https://news.example/rss.xml');
+    expect(cell(grid, 1, 'channel_name')).toBe('News & Co');
+    expect(cell(grid, 1, 'enabled')).toBe(true);
+  });
+
+  it('a failing enrichment is contained and never blocks the run', () => {
+    const brokenChannels = {
+      getDataRange: () => { throw new Error('CHANNELS unavailable'); },
+    };
+    const be = load([], { channelsSheet: brokenChannels, metaRows: CRAWL_BUSY_META() });
+    expect(be.runScheduledEnrichment()).toBeNull();       // swallowed, reported as failed
+    expect(() => be.scheduledFetchAllFeeds()).not.toThrow(); // crawl leg still reached
+  });
+});
+
+describe('handleAddChannel — the password-protected add-channel form endpoint', () => {
+  const ADMIN_META = () => [
+    ['key', 'value'],
+    ['log_level', 'ERROR'],
+    ['admin_token', 'sekret-admin-token'],
+    ['add_channel_password', 'sekret-add-password'],
+    // Recent marker keeps scheduleRefresh from wanting a real trigger.
+    ['fetch_in_progress', new Date().toISOString()],
+  ];
+
+  it('resolves a YouTube URL and appends a fully-enriched, enabled row', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://www.youtube.com/@WatchGuy' });
+
+    expect(res.status).toBe('ok');
+    expect(res.channel).toEqual({
+      channel_name: 'Watch Guy',
+      platform: 'youtube',
+      feed_url: 'https://www.youtube.com/feeds/videos.xml?channel_id=' + YT_CHANNEL_ID,
+      avatar: 'https://yt3.googleusercontent.com/abc=s900-c-k-c0x00ffffff-no-rj',
+    });
+    const grid = be.sheets.CHANNELS_ID._grid;
+    expect(grid).toHaveLength(2); // headers + the new row
+    expect(cell(grid, 1, 'channel_id')).toBe(YT_CHANNEL_ID);
+    expect(cell(grid, 1, 'url')).toBe('https://www.youtube.com/@WatchGuy');
+    expect(cell(grid, 1, 'enabled')).toBe(true);
+  });
+
+  it('schedules an async crawl after a successful add', () => {
+    const created = [];
+    const scriptApp = {
+      getProjectTriggers: () => [],
+      newTrigger: (name) => ({ timeBased: () => ({ after: () => ({ create: () => created.push(name) }) }) }),
+    };
+    // No fetch_in_progress marker — the refresh path must actually install.
+    const be = load([], {
+      metaRows: [['key', 'value'], ['log_level', 'ERROR'], ['admin_token', 't']],
+      scriptApp,
+    });
+    be.handleAddChannel({ url: 'https://news.example' });
+    expect(created).toEqual(['kickoffRefresh']);
+  });
+
+  it('refuses a duplicate (same channel id via a different URL form)', () => {
+    const be = load([
+      ['Watch Guy', '', '', '', '', 'https://youtube.com/c/watchguy', YT_CHANNEL_ID, 'https://www.youtube.com/feeds/videos.xml?channel_id=' + YT_CHANNEL_ID, true, ''],
+    ], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://www.youtube.com/@WatchGuy' });
+    expect(res.status).toBe('error');
+    expect(res.message).toMatch(/Already in the list as "Watch Guy"/);
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(2); // nothing appended
+  });
+
+  it('refuses a duplicate site URL despite trailing-slash/protocol differences', () => {
+    const be = load([
+      ['News & Co', '', '', '', '', 'http://news.example/', '', 'https://other.feed/rss', true, ''],
+    ], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://news.example' });
+    expect(res.status).toBe('error');
+    expect(res.message).toMatch(/Already in the list/);
+  });
+
+  it('reports a resolvable error for a URL with no discoverable feed', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    const res = be.handleAddChannel({ url: 'https://nofeed.example' });
+    expect(res.status).toBe('error');
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1); // nothing appended
+  });
+
+  it('doPost refuses a wrong password without touching the sheet', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: 'wrong' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Wrong password' });
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1);
+    expect(be.calls).toHaveLength(0); // not even resolved — auth comes first
+  });
+
+  it('doPost adds the channel with the add-channel password', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: 'sekret-add-password' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'ok' });
+    expect(cell(be.sheets.CHANNELS_ID._grid, 1, 'feed_url')).toBe('https://news.example/rss.xml');
+  });
+
+  it('the admin token does NOT unlock the form (separate secrets on purpose)', () => {
+    const be = load([], { metaRows: ADMIN_META() });
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: 'sekret-admin-token' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Wrong password' });
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1);
+  });
+
+  it('fails closed when no add_channel_password row is configured', () => {
+    const be = load([], {
+      metaRows: [['key', 'value'], ['log_level', 'ERROR'], ['admin_token', 'sekret-admin-token']],
+    });
+    be.doPost(postEvent({ action: 'addChannel', url: 'https://news.example', token: '' }));
+    expect(be.responses.at(-1)).toMatchObject({ status: 'error', message: 'Wrong password' });
+    expect(be.sheets.CHANNELS_ID._grid).toHaveLength(1);
   });
 });

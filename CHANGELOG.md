@@ -21,6 +21,18 @@ that component's heading.
 
 ## Frontend
 
+### 1.23.0 — 2026-09-22
+- **Password-protected add-channel page.** `add-channel.html` is a small
+  operator form: paste a YouTube channel, site homepage, or RSS feed link,
+  enter the add-channel password, and the backend resolves and appends the
+  channel, then kicks off a crawl so its content appears within minutes
+  (backend 1.18.0's `addChannel` action). The password is checked
+  server-side — the repo is public, so the page holds no secret — travels
+  only in the POST body, and is never persisted by the page. Success shows
+  the resolved name and platform; errors (wrong password, duplicate, no
+  feed found) surface as-is. Noindexed; meant to be shared as a link + the
+  `add_channel_password` META value. (Andrew's add-channels request.)
+
 ### 1.22.0 — 2026-09-22
 - **Channels tab shows each creator's platform.** Every channel card now
   carries a platform-colored ring around the avatar (red = YouTube, hairline
@@ -560,6 +572,25 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.18.0 — 2026-09-22
+- **`addChannel` action — one-shot channel adds for the add-channel page.**
+  POST `{ "action": "addChannel", "url": …, "token": … }` resolves the URL
+  through the same SSRF-guarded resolver the sheet flow uses, refuses
+  duplicates (by channel id, feed URL, or normalized site URL — a form
+  submit appends, so unlike the fill-blanks sheet flow it must refuse),
+  appends one fully-enriched enabled row, and schedules the async crawl so
+  the channel goes live within minutes. Gated by a NEW dedicated secret,
+  the `add_channel_password` META row: deliberately separate from
+  `admin_token`, so the form's password can be shared with a co-editor
+  without also granting refresh/logs. Constant-time check, fails closed
+  while the row is absent.
+- **Scheduled crawls enrich first.** `scheduledFetchAllFeeds` now runs a
+  contained enrichment pass before crawling, so a URL pasted into CHANNELS
+  by a sheet editor goes live on the next 4-hour cycle with no editor
+  access and no manual `enrichChannels` run. Enrichment failures are logged
+  and swallowed — they never cost the crawl — and the pass is one sheet
+  read when there is nothing to fill.
 
 ### 1.17.0 — 2026-09-22
 - **Admin `enrich` action.** POST `{ "action": "enrich", "token": … }` runs

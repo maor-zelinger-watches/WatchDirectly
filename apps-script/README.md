@@ -38,7 +38,10 @@ Each "sheet" is a **separate Google Spreadsheet**. There are six:
      `hodinkee.com/articles/rss.xml`); the feed's own title becomes the name.
    - Optionally set `tier` and `category` yourself — those are editorial and
      can't be guessed from the link.
-3. Run the **`enrichChannels`** function (see [Editor functions](#things-you-do-in-the-apps-script-editor) below).
+3. **That's it.** The next scheduled refresh (within 4 hours) enriches the row
+   and the channel goes live. In a hurry? Run the **`enrichChannels`** function
+   yourself (see [Editor functions](#things-you-do-in-the-apps-script-editor)
+   below), then force a refresh.
 
 It visits the link and fills in the rest automatically:
 - **YouTube** → `channel_id`, `feed_url`, `channel_name`, `avatar` (and the
@@ -51,6 +54,26 @@ It visits the link and fills in the rest automatically:
 It also flips the channel **on** (`enabled` → TRUE) so it starts being crawled.
 You can paste several rows and run once. It **only fills blank cells**, so
 re-running is always safe and never overwrites your edits.
+
+### 🤝 Letting a co-editor add channels (no script access needed)
+
+Two ways, both without touching the Apps Script editor:
+
+- **The add-channel page (easiest):** `add-channel.html` on the live site is a
+  small password-protected form — paste the link, enter the add-channel
+  password (the `add_channel_password` value in META), done. It fills in
+  everything, refuses duplicates, and kicks off a crawl so the content shows
+  up within minutes. The password is deliberately separate from `admin_token`,
+  so you can share the page URL and password with whoever should be able to
+  add channels without also handing them the admin powers. Until you add that
+  row to META, the page refuses everyone.
+- **The spreadsheet:** share the **CHANNELS** spreadsheet with their Google
+  account as **Editor** (Share → their email — the spreadsheet only, not the
+  script). They paste URLs into the `url` column exactly as above, and the
+  next scheduled refresh enriches and enables the rows automatically.
+
+Either way, enrichment **only fills blank cells**, so nothing curated by hand
+is ever overwritten.
 
 ### ⏸️ Pause or remove a channel
 
@@ -79,7 +102,7 @@ authorize permissions once.
 
 | Function | What it does | When to run it |
 |---|---|---|
-| **`enrichChannels`** | Fills in missing info for channels you added by URL (see above) | Every time you add channel URLs to the sheet |
+| **`enrichChannels`** | Fills in missing info for channels you added by URL (see above) | Optional — only to make a freshly pasted URL live immediately; the every-4-hours refresh runs it automatically |
 | **`setupScheduledRefresh`** | Installs the automatic every-4-hours refresh | **Once**, after first deploying (or if the trigger was removed) |
 | **`runSessionSelfTest`** | Checks the login/session signing is healthy | Rarely — only when debugging sign-in issues |
 
@@ -141,7 +164,9 @@ with `refresh` to crawl the new channels immediately.
 ## Things that happen automatically (no action needed)
 
 - **Every 4 hours:** all enabled channels are crawled for new content (once
-  `setupScheduledRefresh` has been run once).
+  `setupScheduledRefresh` has been run once). Right before each crawl, any new
+  CHANNELS row holding just a pasted `url` is enriched and enabled, so it's
+  included in that same crawl.
 - **On demand:** if a visitor loads the site and the data is stale, a refresh is
   kicked off in the background — the visitor still sees cached content instantly.
 - **Retention:** videos older than 60 days are moved to an Archive tab so the
@@ -159,6 +184,7 @@ Each row is a `key` in column A and its `value` in column B.
 | Key | What it controls | Example |
 |---|---|---|
 | `admin_token` | Secret that unlocks the admin actions above. **Keep private.** If unset, admin actions are fully disabled. | `a-long-random-string` |
+| `add_channel_password` | Password for the `add-channel.html` page. Separate from `admin_token` on purpose — shareable with a co-editor without granting admin actions. If unset, the page is disabled. | `a-different-random-string` |
 | `youtube_api_key` | YouTube Data API key. Enables live/premiere detection and fresh view counts. Without it, the app still works from plain RSS. | `AIza…` |
 | `refresh_interval_hours` | How stale (in hours) data can get before a refresh is triggered | `4` |
 | `log_level` | How much detail to log: `DEBUG`, `INFO`, `WARN`, or `ERROR` | `ERROR` |
@@ -173,7 +199,8 @@ Each row is a `key` in column A and its `value` in column B.
 
 | Goal | Do this |
 |---|---|
-| Add a YouTube channel or news site | Paste its URL into CHANNELS → run `enrichChannels` |
+| Add a YouTube channel or news site | Use the `add-channel.html` page (`add_channel_password` from META) — or paste its URL into CHANNELS, live on the next refresh (≤4h) |
+| Let someone else add channels | Give them the `add-channel.html` link + the add-channel password, or share the CHANNELS spreadsheet as Editor |
 | Stop pulling from a channel | Set its `enabled` cell to `FALSE` |
 | See new content right now | `?action=refresh&token=…` |
 | Ban a commenter | Add their email to the BLOCKED sheet |
