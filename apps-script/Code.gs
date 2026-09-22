@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.22.0';
+const VERSION = '1.23.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -171,6 +171,56 @@ const TOKEN_NEG_CACHE_SECONDS = 60;
 const SESSION_TTL_DAYS = 30;
 const SESSION_TOKEN_PREFIX = 'wds1.';
 
+// ------------------------------------------------------------
+// Request signing (SEC-Sybil, phased rollout)
+// ------------------------------------------------------------
+// Every write POST from the frontend carries a timestamped HMAC (`ts` + `sig`
+// in the body) so the write endpoints can reject requests that don't originate
+// from a client that ran our signing code. This is a SPEED BUMP, not an
+// authorization boundary: the frontend is a static site with no build step, so
+// REQUEST_SIGNING_SECRET necessarily ships in js/config.js and is readable in
+// View Source. What it buys us:
+//   - drive-by curl/bot abuse that never bothers to read the JS is rejected;
+//   - a stale replayed request is rejected once it falls outside the skew window.
+// What it does NOT stop: an attacker who reads config.js and replicates the
+// signing (the real Sybil case). The durable defenses for that are the Google
+// Sign-In gate already on these endpoints plus server-side account-age /
+// vote-anomaly checks (a separate, secret-free change). Keep this honest in
+// code so nobody mistakes it for real auth.
+//
+// The secret is duplicated, verbatim, as CONFIG.REQUEST_SIGNING_SECRET in
+// js/config.js — keep the two in sync. Rotating it invalidates in-flight
+// requests from older cached frontends, so rotate only alongside a frontend
+// deploy (and, if `require_signature` is on, a brief soft window).
+const REQUEST_SIGNING_SECRET = '34d720bfa37ac54ff4a75065950ebd0017404951a73f89a97ada58da56271b62';
+
+// Accept a signed request whose timestamp is within this much of server time.
+// Wide enough to tolerate client clock skew and in-flight latency; narrow
+// enough that a captured signature stops working the same session. Replay
+// INSIDE the window is possible and accepted — acceptable because the Google
+// token underneath still authorizes the actual user/action.
+const SIGNATURE_MAX_SKEW_MS = 5 * 60 * 1000;
+
+// The POST actions the frontend signs (everything a normal signed-in user does).
+// Admin actions (addChannel/logs/enrich/refresh) are omitted: they carry their
+// own shared-secret/token gate and are low-volume operator calls, so requiring a
+// request signature on them would only complicate manual operator tooling
+// without adding a defense their token gate doesn't already provide. The
+// unauthenticated `clientError` telemetry endpoint is likewise omitted (it has
+// its own budgeted rate limits).
+const SIGNED_ACTIONS = {
+  comment: true, vote: true, star: true, bookmark: true, emailConsent: true,
+  myVotes: true, myStars: true, myBookmarks: true, session: true, bootstrap: true,
+};
+
+// Meta toggle gating ENFORCEMENT. While absent/anything-but-'true', a missing or
+// bad signature is logged but the request still proceeds (soft launch), so a
+// backend deploy can precede the frontend and older cached clients keep working.
+// Flip the `require_signature` Meta row to 'true' once signing frontends have
+// rolled out and old ones have aged past their cache TTL; from then a signed
+// action with a missing/invalid/stale signature is rejected.
+const REQUIRE_SIGNATURE_META_KEY = 'require_signature';
+
 const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
 // Cache per execution
@@ -282,14 +332,14 @@ function doGet(e) {
       case 'getChannels':
         return jsonResponse(handleGetChannels());
       case 'refresh':
-        // Side-effectful: kicks off a full crawl that spends UrlFetch and
-        // YouTube Data API quota. Admin-only — the scheduled trigger and the
-        // stale-feed auto-refresh cover the routine case; this is a manual
-        // override, not an endpoint anonymous callers may spin.
-        if (!isAdmin(e.parameter.token)) {
-          return jsonResponse({ status: 'error', message: 'Unauthorized' });
-        }
-        return jsonResponse(handleRefresh());
+        // Moved to POST (see doPost). A GET carried the admin token in the
+        // query string, where it leaks into browser history, referrer headers,
+        // proxy logs, and Apps Script's own execution/access logs — the exact
+        // reason `logs`/`enrich`/`addChannel` are POST-only. Kept here as an
+        // explicit 405-style rejection so an old bookmark fails loudly (and
+        // never with the token still in the URL doing anything) instead of
+        // silently hitting the "Unknown action" default.
+        return jsonResponse({ status: 'error', message: 'refresh is POST-only' });
       case 'version':
         return jsonResponse({ status: 'ok' });
       default:
@@ -306,6 +356,13 @@ function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
     var action = data.action || '';
+
+    // Request-signature gate (SEC-Sybil). No-op for unsigned/admin actions and,
+    // during soft launch, for a bad signature too; only rejects once the Meta
+    // `require_signature` toggle is on. Placed before the switch so every signed
+    // action is covered uniformly.
+    var sigError = enforceRequestSignature(data);
+    if (sigError) return jsonResponse(sigError);
 
     switch (action) {
       case 'comment':
@@ -352,6 +409,15 @@ function doPost(e) {
           return jsonResponse({ status: 'error', message: 'Unauthorized' });
         }
         return jsonResponse(handleEnrich());
+      case 'refresh':
+        // Admin-only manual crawl override, over POST so the admin token
+        // travels in the body and never in a URL/query log (mirrors `logs`
+        // and `enrich`). The scheduled trigger and stale-feed auto-refresh
+        // cover the routine case; this is the operator's manual kick.
+        if (!isAdmin(data.token)) {
+          return jsonResponse({ status: 'error', message: 'Unauthorized' });
+        }
+        return jsonResponse(handleRefresh());
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
@@ -4828,6 +4894,79 @@ function verifySessionToken(token) {
     log('ERROR', 'verifySessionToken', error.message);
     return null;
   }
+}
+
+/**
+ * The canonical string a request signature covers: the action and the client
+ * timestamp, newline-joined. Binds a signature to one action and one moment, so
+ * it can't be lifted onto a different action or replayed past the skew window.
+ * MUST match the frontend's canonicalization in js/api.js.
+ */
+function requestSigningBase(action, ts) {
+  return String(action) + '\n' + String(ts);
+}
+
+/** base64url(HMAC-SHA256(base, REQUEST_SIGNING_SECRET)). */
+function computeRequestSignature(action, ts) {
+  var sig = Utilities.computeHmacSha256Signature(
+    requestSigningBase(action, ts), REQUEST_SIGNING_SECRET);
+  return Utilities.base64EncodeWebSafe(sig);
+}
+
+/**
+ * Verifies the timestamped HMAC on a write POST. Returns true when the body
+ * carries a fresh `ts` (within SIGNATURE_MAX_SKEW_MS of now) and a `sig` that
+ * matches computeRequestSignature for this action. Constant-time signature
+ * compare. Never throws — a malformed ts/sig is just "not valid".
+ *
+ * NOT an authorization check on its own (the secret is public; see the
+ * REQUEST_SIGNING_SECRET note). It only certifies the caller ran our signing
+ * code recently; the Google-token check in each handler still authorizes.
+ *
+ * @param {Object} data - Parsed POST body ({ action, ts, sig, ... })
+ * @returns {boolean}
+ */
+function isRequestSignatureValid(data) {
+  try {
+    if (!data || !data.sig || !data.ts) return false;
+    var ts = parseInt(data.ts, 10);
+    if (!isFinite(ts)) return false;
+    if (Math.abs(Date.now() - ts * 1000) > SIGNATURE_MAX_SKEW_MS) return false;
+    return constantTimeEquals(String(data.sig), computeRequestSignature(data.action, data.ts));
+  } catch (e) {
+    return false;
+  }
+}
+
+/** True while the operator has flipped enforcement on in the Meta sheet. */
+function isSignatureRequired() {
+  return String(getMeta(REQUIRE_SIGNATURE_META_KEY)).toLowerCase() === 'true';
+}
+
+/**
+ * Signature gate for doPost. For a signed action: verifies the request HMAC and,
+ * when enforcement is on (Meta `require_signature` = 'true'), returns an error
+ * response to short-circuit the handler on a missing/invalid/stale signature.
+ * While enforcement is OFF (the rollout default), a failure is only logged and
+ * null is returned so the request proceeds — this is what lets the backend ship
+ * before the signing frontend without breaking older cached clients.
+ *
+ * @param {Object} data - Parsed POST body
+ * @returns {Object|null} An error response to return immediately, or null to proceed.
+ */
+function enforceRequestSignature(data) {
+  var action = data && data.action;
+  if (!action || !SIGNED_ACTIONS[action]) return null; // unsigned action — nothing to check
+  if (isRequestSignatureValid(data)) return null;
+  if (isSignatureRequired()) {
+    log('WARN', 'signature', 'Rejected unsigned/invalid ' + action);
+    return { status: 'error', message: 'Invalid or missing request signature' };
+  }
+  // Soft-launch: record that this client didn't send a valid signature, but let
+  // it through. The count in the logs is the readiness signal for flipping the
+  // Meta toggle on.
+  log('INFO', 'signature', 'Unsigned/invalid ' + action + ' (soft — allowed)');
+  return null;
 }
 
 /** Length-then-content comparison with no early-out on the content byte loop. */

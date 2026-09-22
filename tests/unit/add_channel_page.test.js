@@ -34,7 +34,14 @@ async function submit(url, password) {
   document.getElementById('admin-password').value = password;
   document.getElementById('add-channel-form')
     .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-  // Let the async submit handler settle (fetch microtasks).
+  // Let the async submit handler settle. The handler is fire-and-forget
+  // (dispatchEvent doesn't return its promise), so we flush event-loop ticks
+  // until fetch has fired — post() now awaits async request signing
+  // (crypto.subtle) BEFORE fetch, so a single tick can miss it — then one more
+  // tick for the response .then chain.
+  for (let i = 0; i < 20 && (!global.fetch.mock || global.fetch.mock.calls.length === 0); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 

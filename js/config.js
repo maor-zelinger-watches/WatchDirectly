@@ -7,13 +7,21 @@
  */
 
 export const CONFIG = {
-  APP_VERSION: '1.27.0',      // frontend version (npm semver) — bump on every
+  APP_VERSION: '1.28.0',      // frontend version (npm semver) — bump on every
                               // user-visible change; shown in the header and
                               // logged at boot. Backend has its own VERSION
                               // in apps-script/Code.gs; package.json tracks
                               // the repo/tooling. See CHANGELOG.md.
   APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwyt7c8SWw9y0TnKq4RhcV7yLjS1JkXnNThYInpj-EnNYbA3ecgwVSX4gBIACNKHCqu0A/exec',
   GOOGLE_CLIENT_ID: '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com',
+  // Shared secret used to HMAC-sign write requests (SEC-Sybil). This is NOT
+  // secret in any real sense — a static site ships it to every visitor, so it's
+  // visible in View Source. It's a speed bump against drive-by/curl abuse and
+  // stale replay, layered on top of the real Google Sign-In auth; it is not an
+  // authorization boundary. Duplicated verbatim as REQUEST_SIGNING_SECRET in
+  // apps-script/Code.gs — keep the two in sync, and rotate both together
+  // (frontend + backend) so in-flight requests from cached clients don't break.
+  REQUEST_SIGNING_SECRET: '34d720bfa37ac54ff4a75065950ebd0017404951a73f89a97ada58da56271b62',
   PAGE_SIZE: 10,
   TOP_WEEK_VIEWS_PER_VOTE: 5000, // Top This Week ranking weight: every this
                               // many views counts as one upvote in the score

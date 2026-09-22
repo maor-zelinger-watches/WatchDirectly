@@ -9,6 +9,45 @@
  */
 
 import { dedupeVideos } from './feed.js';
+import { CONFIG } from './config.js';
+
+/**
+ * base64url (with padding, matching Apps Script's Utilities.base64EncodeWebSafe)
+ * of an ArrayBuffer.
+ */
+function toBase64Url(buffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+/**
+ * Signs a write request: returns { ts, sig } to add to the POST body, where sig
+ * is base64url(HMAC-SHA256(`${action}\n${ts}`, REQUEST_SIGNING_SECRET)). The
+ * canonicalization MUST match requestSigningBase in apps-script/Code.gs.
+ *
+ * This is a speed bump, not auth (the secret ships to every visitor — see
+ * config.js). Best-effort: if Web Crypto is unavailable (an insecure context or
+ * a test runtime without crypto.subtle), we return null and send the request
+ * unsigned. The backend's soft-launch window accepts that; once enforcement is
+ * on, only a context that can sign can write — which every real https client is.
+ */
+async function signRequest(action) {
+  const ts = Math.floor(Date.now() / 1000);
+  try {
+    const subtle = (typeof crypto !== 'undefined' && crypto.subtle) ? crypto.subtle : null;
+    if (!subtle) return null;
+    const enc = new TextEncoder();
+    const key = await subtle.importKey(
+      'raw', enc.encode(CONFIG.REQUEST_SIGNING_SECRET),
+      { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const sigBuf = await subtle.sign('HMAC', key, enc.encode(`${action}\n${ts}`));
+    return { ts, sig: toBase64Url(sigBuf) };
+  } catch (e) {
+    return null; // best-effort — send unsigned rather than block the action
+  }
+}
 
 /**
  * Creates an API client bound to a specific Apps Script URL.
@@ -50,13 +89,20 @@ export function createApiClient(baseUrl) {
    * @returns {Promise<Object>} Parsed JSON response
    */
   async function post(body) {
+    // Sign the request (SEC-Sybil). Adds { ts, sig } to the body when Web Crypto
+    // is available; the backend verifies signed actions and, once enforcement is
+    // on, rejects unsigned/stale ones. Unsigned actions (the backend ignores the
+    // fields it doesn't check) and best-effort failures are harmless.
+    const signed = await signRequest(body && body.action);
+    const signedBody = signed ? { ...body, ts: signed.ts, sig: signed.sig } : body;
+
     const response = await fetch(baseUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'text/plain;charset=utf-8',
         'Accept': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(signedBody),
     });
 
     if (!response.ok) {
