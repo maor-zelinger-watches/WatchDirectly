@@ -41,9 +41,12 @@ Each "sheet" is a **separate Google Spreadsheet**. There are six:
 3. Run the **`enrichChannels`** function (see [Editor functions](#things-you-do-in-the-apps-script-editor) below).
 
 It visits the link and fills in the rest automatically:
-- **YouTube** → `channel_id`, `feed_url`, `channel_name`, `avatar`.
-- **News/blog** → `feed_url` and `channel_name`; the icon is pulled from the
-  site's favicon automatically, so `avatar` stays blank.
+- **YouTube** → `channel_id`, `feed_url`, `channel_name`, `avatar` (and the
+  canonical channel `url` if you pasted a feed URL).
+- **News/blog** → `feed_url`, `channel_name`, the site `url` (from the feed,
+  if you pasted a feed URL), and `avatar`: the site's apple-touch-icon when it
+  has one, else the image the feed itself declares, else blank — a blank
+  avatar falls back to the site's favicon automatically when served.
 
 It also flips the channel **on** (`enabled` → TRUE) so it starts being crawled.
 You can paste several rows and run once. It **only fills blank cells**, so

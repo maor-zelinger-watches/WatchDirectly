@@ -37,7 +37,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.15.1';
+const VERSION = '1.16.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -608,12 +608,14 @@ function handleGetChannels() {
 
   var headers = data[0];
   var enabledCol = headers.indexOf('enabled');
+  var feedUrlCol = headers.indexOf('feed_url');
   var channels = [];
 
   // BE14: publish ONLY the fields the frontend renders — the Channels-tab card
   // (channel_name, url, avatar) plus the search host-map (host). Copying every
   // column (the old behavior) leaked any operator-added column — notes, contact,
   // a per-channel key — into this anonymous response the moment it was created.
+  // `platform` below is computed, not copied: feed_url itself stays private.
   var PUBLIC_FIELDS = ['channel_name', 'host', 'url', 'avatar'];
 
   for (var i = 1; i < data.length; i++) {
@@ -627,11 +629,18 @@ function handleGetChannels() {
       if (PUBLIC_FIELDS.indexOf(headers[j]) !== -1) channel[headers[j]] = row[j];
     }
 
-    if (!channel.avatar && channel.url) {
-      var domain = extractDomain(channel.url);
-      if (domain && !/(^|\.)youtube\.com$/i.test(domain) && domain !== 'youtu.be') {
-        channel.avatar = 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=128';
-      }
+    // Platform for the Channels-tab badge/filter. The public url is the
+    // authority, but rows onboarded from a pasted feed URL can have url blank —
+    // fall back to feed_url (crawled, so always present). A source either has
+    // a YouTube link or it's an article site, so nothing ships unclassified.
+    var feedUrl = feedUrlCol === -1 ? '' : String(row[feedUrlCol] || '');
+    var srcUrl = String(channel.url || '') || feedUrl;
+    var domain = extractDomain(srcUrl);
+    var isYouTube = /(^|\.)youtube\.com$/i.test(domain) || domain === 'youtu.be';
+    channel.platform = isYouTube ? 'youtube' : 'article';
+
+    if (!channel.avatar && domain && !isYouTube) {
+      channel.avatar = 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=128';
     }
 
     channels.push(channel);
@@ -1698,13 +1707,17 @@ var CHANNEL_FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 
 /**
  * Editor-run entry point. Scans the CHANNELS sheet and, for every row that has
- * a `url` but is still missing derivable metadata, fetches the page and fills
- * the blanks in place:
+ * a `url` (or, failing that, a `feed_url`) but is still missing derivable
+ * metadata, fetches the page and fills the blanks in place:
  *   - YouTube channel URLs (/@handle, /channel/UC…, /c/…, /user/…, or the RSS
- *     feed URL itself) → channel_id, feed_url, channel_name, avatar.
+ *     feed URL itself) → channel_id, feed_url, channel_name, avatar, and the
+ *     canonical /channel/UC… url for url-less rows.
  *   - News / blog / any RSS site → feed_url (discovered <link rel=alternate> or
- *     a probed common feed path) and channel_name. The avatar is left blank;
- *     handleGetChannels renders the site favicon at read time.
+ *     a probed common feed path), channel_name, the site url (from the feed's
+ *     channel-level <link>, for url-less rows), and an avatar: the site's
+ *     apple-touch-icon, falling back to the feed's own <image>/<logo>. When
+ *     neither exists the avatar stays blank and handleGetChannels renders the
+ *     site favicon at read time.
  * A blank `enabled` is defaulted to TRUE once the row has a feed, so a freshly
  * added channel is actually crawled and shown. Existing non-blank cells are
  * NEVER overwritten, so this is safe to re-run and won't clobber curated
@@ -1746,7 +1759,10 @@ function enrichChannels() {
 
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
-    var rawUrl = row[urlCol];
+    // Resolve from the public url, or from feed_url when url is blank (rows
+    // where the operator filled feed_url by hand) — the resolver can then fill
+    // the url column back from the feed's own channel-level <link>.
+    var rawUrl = !isBlankCell(row[urlCol]) ? row[urlCol] : row[feedCol];
     if (isBlankCell(rawUrl)) continue;
     var url = String(rawUrl).trim();
 
@@ -1755,7 +1771,8 @@ function enrichChannels() {
 
     // A network resolve is only worth it when something it can supply is blank.
     var needResolve = isBlankCell(row[nameCol]) || isBlankCell(row[feedCol]) ||
-      (isYt && (isBlankCell(row[idCol]) || isBlankCell(row[avatarCol])));
+      isBlankCell(row[urlCol]) || isBlankCell(row[avatarCol]) ||
+      (isYt && isBlankCell(row[idCol]));
     var needEnable = isBlankCell(row[enabledCol]);
     if (!needResolve && !needEnable) continue;
 
@@ -1769,6 +1786,7 @@ function enrichChannels() {
       rowFilled += fillIfBlank_(sheet, sheetRow, row, feedCol,   info.feed_url);
       rowFilled += fillIfBlank_(sheet, sheetRow, row, idCol,     info.channel_id);
       rowFilled += fillIfBlank_(sheet, sheetRow, row, avatarCol, info.avatar);
+      rowFilled += fillIfBlank_(sheet, sheetRow, row, urlCol,    info.url);
     }
     // Enable only once the row actually has a feed to crawl — enabling a row
     // with no feed_url would just log a warning every crawl.
@@ -1830,7 +1848,8 @@ function ensureChannelColumn(sheet, headers, name) {
  *
  * @param {string} url
  * @returns {{ok:boolean, media_type?:string, channel_name?:string,
- *   channel_id?:string, feed_url?:string, avatar?:string, error?:string}}
+ *   channel_id?:string, feed_url?:string, avatar?:string, url?:string,
+ *   error?:string}}
  */
 function resolveChannelFromUrl(url) {
   var clean = normalizeChannelUrl(url);
@@ -1886,7 +1905,10 @@ function resolveYouTubeChannel(url) {
     channel_id: channelId,
     feed_url: 'https://www.youtube.com/feeds/videos.xml?channel_id=' + channelId,
     channel_name: name,
-    avatar: avatar
+    avatar: avatar,
+    // Canonical channel URL, so a row onboarded from a pasted feed URL still
+    // gets a public url (platform badge + card link depend on it).
+    url: 'https://www.youtube.com/channel/' + channelId
   };
 }
 
@@ -1905,10 +1927,12 @@ function extractYouTubeChannelId(html) {
 }
 
 /**
- * Resolves a news/blog/generic site URL to an RSS/Atom feed and a display name.
- * First reads the homepage's declared feed <link>; if none is declared, probes
- * a short list of conventional feed paths. Avatar is intentionally left blank —
- * handleGetChannels renders the favicon for feed-only channels.
+ * Resolves a news/blog/generic site URL to an RSS/Atom feed, a display name,
+ * and an avatar. First reads the homepage's declared feed <link>; if none is
+ * declared, probes a short list of conventional feed paths. The avatar chain:
+ * the site's apple-touch-icon (large, square, designed for exactly this),
+ * falling back to the feed's own channel-level <image>/<logo>, falling back to
+ * blank — handleGetChannels then renders the favicon at read time.
  */
 function resolveSiteFeed(url) {
   var html = fetchHtmlSafely(url);
@@ -1918,8 +1942,14 @@ function resolveSiteFeed(url) {
   // nothing, and the origin-path probe below can 404 its way to a false
   // "no feed found" even though the answer was in our hands the whole time.
   if (html && bodyLooksLikeFeed(html)) {
-    return { ok: true, media_type: 'article', channel_id: '', avatar: '',
-      feed_url: url, channel_name: cleanChannelTitle(extractFeedTitle(html)) };
+    // The feed's channel-level <link> names the site homepage — that gives the
+    // row a public url AND a page to scrape an apple-touch-icon from.
+    var siteUrl = extractFeedSiteLink(html);
+    var siteHtml = siteUrl ? fetchHtmlSafely(siteUrl) : '';
+    var feedAvatar = (siteHtml ? discoverAppleTouchIcon(siteHtml, siteUrl) : '') ||
+      extractFeedImage(html);
+    return { ok: true, media_type: 'article', channel_id: '', avatar: feedAvatar,
+      feed_url: url, url: siteUrl, channel_name: cleanChannelTitle(extractFeedTitle(html)) };
   }
 
   var name = '';
@@ -1938,8 +1968,67 @@ function resolveSiteFeed(url) {
       error: 'No RSS/Atom feed found for ' + url +
              ' — locate the site’s feed URL and paste it into feed_url manually' };
   }
-  return { ok: true, media_type: 'article', channel_id: '', avatar: '',
+
+  var avatar = (html ? discoverAppleTouchIcon(html, url) : '') ||
+    extractFeedImage(fetchHtmlSafely(feedUrl));
+  return { ok: true, media_type: 'article', channel_id: '', avatar: avatar,
     feed_url: feedUrl, channel_name: name };
+}
+
+/**
+ * Finds the site's apple-touch-icon in page HTML: <link rel="apple-touch-icon"
+ * (or -precomposed)>, largest declared `sizes` first. Publishers ship these for
+ * iOS home screens, so they're big (typically 180×180), square, and look right
+ * in the Channels tab's circular figure — unlike a 16px favicon.
+ */
+function discoverAppleTouchIcon(html, baseUrl) {
+  var linkRe = /<link\b[^>]*>/gi;
+  var best = '', bestSize = -1;
+  var tag;
+  while ((tag = linkRe.exec(html)) !== null) {
+    var t = tag[0];
+    var rel = (t.match(/rel=["']([^"']+)["']/i) || [])[1] || '';
+    if (!/(^|\s)apple-touch-icon(-precomposed)?(\s|$)/i.test(rel)) continue;
+    var href = (t.match(/href=["']([^"']+)["']/i) || [])[1];
+    if (!href) continue;
+    var abs = resolveRelativeUrl(href.replace(/&amp;/g, '&'), baseUrl);
+    if (!abs || !isSafeUrl(abs)) continue;
+    var size = parseInt((t.match(/sizes=["'](\d+)x\d+/i) || [])[1] || '0', 10);
+    if (size > bestSize) { bestSize = size; best = abs; }
+  }
+  return best;
+}
+
+/**
+ * The feed's own channel-level image: RSS 2.0 <image><url>, or Atom
+ * <logo>/<icon>. Only the header (everything before the first item/entry) is
+ * searched, so an article's inline media can't masquerade as the site logo.
+ */
+function extractFeedImage(xml) {
+  if (!xml) return '';
+  var head = String(xml).split(/<item[\s>]|<entry[\s>]/i)[0];
+  var m = head.match(/<image>[\s\S]*?<url>\s*([^<]+?)\s*<\/url>[\s\S]*?<\/image>/i) ||
+          head.match(/<logo>\s*([^<]+?)\s*<\/logo>/i) ||
+          head.match(/<icon>\s*([^<]+?)\s*<\/icon>/i);
+  if (!m) return '';
+  var u = m[1].trim().replace(/&amp;/g, '&').replace(/^http:\/\//i, 'https://');
+  return isSafeUrl(u) ? u : '';
+}
+
+/**
+ * The site homepage a feed belongs to: RSS 2.0's channel-level text <link>, or
+ * Atom's rel="alternate" link. Header-only, same as extractFeedImage — an
+ * item's <link> is an article, not the site.
+ */
+function extractFeedSiteLink(xml) {
+  if (!xml) return '';
+  var head = String(xml).split(/<item[\s>]|<entry[\s>]/i)[0];
+  var m = head.match(/<link>\s*(https?:\/\/[^<\s]+?)\s*<\/link>/i) ||
+          head.match(/<link\b[^>]*rel=["']alternate["'][^>]*href=["']([^"']+)["']/i) ||
+          head.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*rel=["']alternate["']/i);
+  if (!m) return '';
+  var u = normalizeChannelUrl(m[1].replace(/&amp;/g, '&'));
+  return isSafeUrl(u) ? u : '';
 }
 
 /**

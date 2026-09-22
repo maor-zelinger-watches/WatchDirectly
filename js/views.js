@@ -323,7 +323,7 @@ function applyCreators(creators) {
 /** Cheap identity of the creator list — re-render only when this changes. */
 function creatorsSignature(creators) {
   return (creators || [])
-    .map(c => `${c.channel_name}|${c.url || ''}|${c.avatar || ''}|${c.host || ''}`)
+    .map(c => `${c.channel_name}|${c.url || ''}|${c.avatar || ''}|${c.host || ''}|${c.platform || ''}`)
     .sort()
     .join('\n');
 }
@@ -389,6 +389,10 @@ export function setupFeedControls() {
   // Content-type chips are a fixed set — render them right away, no fetch needed.
   renderTypeChips(chipsContainer);
 
+  // Channels-tab platform chips are fixed too; their container stays hidden
+  // until the Channels view shows it (update()).
+  renderPlatformChips(document.getElementById('platform-chips'));
+
   // Warm the creator list so the host map (search matching) and the Channels
   // tab are ready before they're needed. Host matching is an enhancement —
   // search still works without it — so a failure is swallowed here.
@@ -439,6 +443,10 @@ export function update() {
   }
   const controls = document.getElementById('feed-controls');
   if (controls) controls.style.display = isChannels ? 'none' : '';
+  // The platform chips are the Channels tab's own controls row — the mirror
+  // image of the video controls above.
+  const channelsControls = document.getElementById('channels-controls');
+  if (channelsControls) channelsControls.style.display = isChannels ? '' : 'none';
 
   if (state.view === 'top') {
     renderTop();
@@ -1003,6 +1011,58 @@ function syncTypeChips(container) {
     const value = chip.dataset.type;
     const active = value ? selected.has(value) : selected.size === 0;
     chip.classList.toggle('chip--active', active);
+  });
+}
+
+// Channels-tab platform chips. Exclusive select — with only two platforms,
+// multi-select collapses to "All" anyway. Values match channelPlatform()
+// (feed.js) and the data-platform attribute on channel cards.
+const PLATFORM_CHIPS = [
+  { value: '', label: 'All' },
+  { value: 'youtube', label: 'YouTube' },
+  { value: 'article', label: 'Articles' },
+];
+const ALL_PLATFORM_VALUES = PLATFORM_CHIPS.filter(c => c.value).map(c => c.value);
+
+function renderPlatformChips(container) {
+  if (!container) return;
+
+  container.innerHTML = PLATFORM_CHIPS.map(({ value, label }) =>
+    `<button type="button" class="chip" data-platform="${sanitizeHtml(value)}">${sanitizeHtml(label)}</button>`
+  ).join('');
+
+  container.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      state.channelsPlatform = chip.dataset.platform;
+      syncPlatformChips(container);
+      // Pure CSS visibility flip, same trick as the content-type chips —
+      // cards carry data-platform, so no re-render is needed.
+      applyPlatformVisibility();
+    });
+  });
+
+  syncPlatformChips(container);
+  applyPlatformVisibility();
+}
+
+/**
+ * Reflects state.channelsPlatform onto the feed container as one
+ * feed--hide-platform-<value> class per hidden platform. The CSS rules are
+ * scoped to .feed--channels, so these classes are inert on every other view.
+ */
+function applyPlatformVisibility() {
+  const container = document.getElementById('feed-container');
+  if (!container) return;
+  const selected = state.channelsPlatform;
+  for (const value of ALL_PLATFORM_VALUES) {
+    container.classList.toggle(`feed--hide-platform-${value}`, !!selected && selected !== value);
+  }
+}
+
+/** Reflects state.channelsPlatform onto the platform chip active classes. */
+function syncPlatformChips(container) {
+  container.querySelectorAll('.chip').forEach(chip => {
+    chip.classList.toggle('chip--active', chip.dataset.platform === state.channelsPlatform);
   });
 }
 
