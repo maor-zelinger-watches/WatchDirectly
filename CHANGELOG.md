@@ -664,6 +664,22 @@ that component's heading.
 
 ## Backend
 
+### 1.21.0 — 2026-09-22
+- **CUSTOMERS becomes the single user-data spreadsheet.** The Votes, Stars,
+  and Bookmarks tabs move out of the Comments spreadsheet (a pre-CUSTOMERS
+  shortcut) and into CUSTOMERS, next to the Customers identity/consent tab —
+  exporting or deleting everything about a user is now one spreadsheet, and
+  COMMENTS goes back to holding just comments. The move is self-migrating:
+  the first access after deploy creates the missing tab under the script
+  lock and copies the legacy rows across, all-or-nothing (a failed copy
+  deletes the half-made tab and retries next access) and id-deduped (a
+  retry can never duplicate a vote). Legacy tabs are left in COMMENTS for
+  manual cleanup once verified. `getCustomersSheet` now addresses its tab
+  by NAME instead of "first tab" — with sibling tabs in the file, a dragged
+  tab would have silently pointed consent writes at the wrong grid.
+  Operator note: sharing the CUSTOMERS file now shares activity too — hand
+  off a mailing list by exporting the Customers tab, not sharing the file.
+
 ### 1.20.0 — 2026-09-22
 - **Email-consent machinery (CUSTOMERS spreadsheet).** POST
   `{ "action": "emailConsent", "consent": true|false, "token": … }` records
