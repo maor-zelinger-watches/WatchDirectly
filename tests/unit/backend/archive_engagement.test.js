@@ -63,7 +63,9 @@ function loadBackend({ liveSheet, archiveSheet, votesSheet }) {
     insertSheet: () => votesSheet,
   };
   const blank = { getSheets: () => [makeSheet([['key', 'value']])], getSheetByName: () => null };
-  const byId = { VIDEOS_ID: videosSpreadsheet, COMMENTS_ID: commentsSpreadsheet };
+  // The Votes tab lives in the CUSTOMERS spreadsheet (user-data store);
+  // COMMENTS keeps resolving for the legacy-migration read.
+  const byId = { VIDEOS_ID: videosSpreadsheet, COMMENTS_ID: commentsSpreadsheet, CUSTOMERS_ID: commentsSpreadsheet };
 
   const globals = {
     SpreadsheetApp: { openById: (id) => byId[id] || blank },
@@ -75,7 +77,8 @@ function loadBackend({ liveSheet, archiveSheet, votesSheet }) {
 
   const patched = SRC
     .replace(/VIDEOS:\s*'[^']+'/, "VIDEOS: 'VIDEOS_ID'")
-    .replace(/COMMENTS:\s*'[^']+'/, "COMMENTS: 'COMMENTS_ID'");
+    .replace(/COMMENTS:\s*'[^']+'/, "COMMENTS: 'COMMENTS_ID'")
+    .replace(/CUSTOMERS:\s*'[^']+'/, "CUSTOMERS: 'CUSTOMERS_ID'");
 
   const names = ['updateVoteCount', 'updateCommentCount'];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
