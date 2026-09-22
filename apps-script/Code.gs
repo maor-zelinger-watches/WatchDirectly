@@ -87,7 +87,7 @@ const TOP_WEEK_CACHE_COUNT = 50;
 const TOP_WEEK_CACHE_KEY = 'top_week_v1';
 const TOP_WEEK_CACHE_SECONDS = 300;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
-// Per-user minimum spacing between vote/star toggles (SEC3/BE5). Each toggle takes
+// Per-user minimum spacing between vote/star/bookmark toggles (SEC3/BE5). Each toggle takes
 // the global script lock through a sheet mutation, so an account toggling in a
 // tight loop serializes every other write and churns the caches. A short
 // CacheService-backed window (keyed by email) throttles that without a Meta write.
@@ -310,6 +310,10 @@ function doPost(e) {
         return jsonResponse(handleStar(data));
       case 'myStars':
         return jsonResponse(handleMyStars(data));
+      case 'bookmark':
+        return jsonResponse(handleBookmark(data));
+      case 'myBookmarks':
+        return jsonResponse(handleMyBookmarks(data));
       case 'bootstrap':
         return jsonResponse(handleBootstrap(data));
       case 'session':
@@ -4046,10 +4050,11 @@ function readUserStarChannels(email) {
 
 /**
  * One round trip for everything the client needs about the signed-in user on
- * load: their upvoted video ids AND starred channels. Replaces the separate
- * myVotes + myStars POSTs fired back-to-back at sign-in — each re-verified the
- * ID token over the network and, because Apps Script serializes a user's
- * requests, queued nose-to-tail. Here the token is verified ONCE.
+ * load: their upvoted video ids, starred channels AND bookmarked items.
+ * Replaces the separate per-feature POSTs fired back-to-back at sign-in —
+ * each re-verified the ID token over the network and, because Apps Script
+ * serializes a user's requests, queued nose-to-tail. Here the token is
+ * verified ONCE. `video_ids` carries the votes, `bookmark_ids` the bookmarks.
  */
 function handleBootstrap(data) {
   var token = data.token;
@@ -4066,7 +4071,141 @@ function handleBootstrap(data) {
     status: 'ok',
     video_ids: readUserVoteIds(user.email),
     channels: readUserStarChannels(user.email),
+    bookmark_ids: readUserBookmarkIds(user.email),
   };
+}
+
+// ============================================================
+// BOOKMARKS — saved items, one per Google account per video
+// ============================================================
+
+/**
+ * Gets (or creates) the "Bookmarks" tab inside the Comments spreadsheet,
+ * following the same pattern as the Votes and Stars tabs.
+ * @returns {Sheet}
+ */
+function getBookmarksSheet() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS);
+  var sheet = ss.getSheetByName('Bookmarks');
+  if (!sheet) {
+    sheet = ss.insertSheet('Bookmarks');
+    sheet.appendRow(['bookmark_id', 'video_id', 'user_email', 'created_at']);
+  }
+  return sheet;
+}
+
+/**
+ * Toggles a user's bookmark on an item (video or article).
+ * If the user has already bookmarked the item, the bookmark is removed.
+ * Mirrors handleVote minus the count bookkeeping — bookmarks are private,
+ * so no aggregate is stored on the video row.
+ */
+function handleBookmark(data) {
+  var videoId = data.videoId;
+  var token = data.token;
+
+  if (!videoId || !token) {
+    return { status: 'error', message: 'videoId and token are required' };
+  }
+
+  if (!isValidId(videoId)) {
+    return { status: 'error', message: 'Invalid videoId' };
+  }
+
+  var user = authenticateUser(token);
+  if (!user) {
+    log('ERROR', 'bookmark', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+
+  // Same pre-lock throttle as handleVote/handleStar: cheap but lockful.
+  if (isActionRateLimited('bookmark', user.email, VOTE_STAR_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
+  // Serialize read-find-mutate so concurrent toggles can't double-insert
+  // or delete a row that shifted under a stale index.
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
+
+  try {
+    var sheet = getBookmarksSheet();
+    var rows = sheet.getDataRange().getValues();
+    var headers = rows[0];
+    var videoIdCol = headers.indexOf('video_id');
+    var emailCol = headers.indexOf('user_email');
+
+    // Find this user's existing bookmark on this item.
+    var existingRow = -1;
+    for (var i = 1; i < rows.length; i++) {
+      if (rows[i][videoIdCol] === videoId && rows[i][emailCol] === user.email) {
+        existingRow = i + 1; // 1-based sheet row
+        break;
+      }
+    }
+
+    var bookmarked;
+    if (existingRow !== -1) {
+      sheet.deleteRow(existingRow);
+      bookmarked = false;
+    } else {
+      // Write as plain text so Sheets can't coerce videoId/email into a live
+      // formula — same reserve-then-format pair as handleVote/handleStar.
+      var bookmarkId = 'b_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
+      var newRowNum = sheet.getLastRow() + 1;
+      var range = sheet.getRange(newRowNum, 1, 1, 4);
+      range.setNumberFormat('@');
+      range.setValues([[bookmarkId, videoId, user.email, new Date().toISOString()]]);
+      bookmarked = true;
+    }
+
+    return { status: 'ok', bookmarked: bookmarked };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Returns the video ids the signed-in user has bookmarked, so the client can
+ * mark bookmark buttons and build the Bookmarks feed. Keyed `bookmark_ids`
+ * (not `video_ids`) so the payload shape matches the bootstrap batch, where
+ * `video_ids` already carries the user's votes.
+ */
+function handleMyBookmarks(data) {
+  var token = data.token;
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = authenticateUser(token);
+  if (!user) {
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  return { status: 'ok', bookmark_ids: readUserBookmarkIds(user.email) };
+}
+
+/** Video ids the given user has bookmarked. Shared by myBookmarks and bootstrap. */
+function readUserBookmarkIds(email) {
+  var sheet = getBookmarksSheet();
+  var rows = sheet.getDataRange().getValues();
+  var headers = rows[0];
+  var videoIdCol = headers.indexOf('video_id');
+  var emailCol = headers.indexOf('user_email');
+
+  var ids = [];
+  for (var i = 1; i < rows.length; i++) {
+    if (rows[i][emailCol] === email) ids.push(String(rows[i][videoIdCol]));
+  }
+  return ids;
 }
 
 // ============================================================

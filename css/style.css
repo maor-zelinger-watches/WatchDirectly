@@ -375,14 +375,23 @@ img {
    VIEW TABS (Latest / Top This Week)
    ============================================================ */
 
+/* Five tabs no longer fit a phone row — the row scrolls horizontally
+   (scrollbar hidden) instead of wrapping or shrinking the labels. */
 .feed-tabs {
   display: flex;
   gap: var(--sp-1);
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.feed-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .feed-tab {
   position: relative;
+  flex-shrink: 0;
   padding: var(--sp-3) var(--sp-4);
   font-size: var(--fs-base);
   font-weight: var(--fw-semibold);
@@ -648,6 +657,11 @@ img {
   white-space: nowrap;
 }
 
+/* Flat channel-type icon (play lozenge / newspaper) inline with the name */
+.media-card__channel .icon {
+  vertical-align: -2.5px;
+}
+
 /* The fixed-width meta parts never wrap or shrink */
 .media-card__time,
 .media-card__views {
@@ -758,9 +772,9 @@ img {
 
 /* Platform mark — pinned to the card's top-left corner as the exact mirror
    of the favourite star (same 30px centered box, same corner inset): the
-   YouTube play lozenge (inline SVG) or the 📰 emoji for article sites.
-   Decorative (aria-hidden); the figure link's aria-label carries the
-   platform for screen readers. */
+   YouTube play lozenge or the flat newspaper icon for article sites (both
+   inline SVGs carrying their own size). Decorative (aria-hidden); the
+   figure link's aria-label carries the platform for screen readers. */
 .channel-card__platform {
   position: absolute;
   top: var(--sp-2);
@@ -771,11 +785,16 @@ img {
   min-width: 30px;
   min-height: 30px;
   line-height: 1;
-  font-size: 18px; /* sizes the 📰 emoji; the SVG carries its own size */
 }
 
 .channel-card__platform svg {
   display: block;
+}
+
+/* The newspaper mark draws in currentColor — grey to match the article
+   avatar ring, next to the always-red YouTube lozenge. */
+.channel-card__platform--article {
+  color: var(--text-secondary);
 }
 
 /* Avatar ring — red for YouTube channels, hairline grey for article sites.
@@ -910,6 +929,7 @@ img {
 .media-card__comments-toggle {
   display: flex;
   align-items: center;
+  gap: var(--sp-1);
   width: 100%;
   padding: var(--sp-3) var(--sp-4);
   font-size: var(--fs-sm);
@@ -933,9 +953,10 @@ img {
   justify-content: flex-start;
 }
 
-/* Expand-to-fullscreen and share buttons, bottom right of every card */
+/* Bookmark, share, and expand-to-fullscreen buttons, bottom right of every card */
 .media-card__expand,
-.media-card__share {
+.media-card__share,
+.media-card__bookmark {
   display: flex;
   align-items: center;
   padding: var(--sp-3) var(--sp-4);
@@ -946,9 +967,20 @@ img {
 }
 
 .media-card__expand:hover,
-.media-card__share:hover {
+.media-card__share:hover,
+.media-card__bookmark:hover {
   color: var(--accent);
   background: var(--accent-dim);
+}
+
+/* Saved state: the outline bookmark fills with the accent — the same
+   color-flip language as the ☆ → ★ favourite star. */
+.media-card__bookmark--active {
+  color: var(--accent);
+}
+
+.media-card__bookmark--active .icon--bookmark path {
+  fill: currentColor;
 }
 
 /* Mount point for a deep-linked (?v=) card that isn't in the feed. Shares
@@ -1752,6 +1784,8 @@ body.fullscreen-mode {
   transition: transform 0.3s ease;
 }
 
+/* No preview image: the flat newspaper icon centered on the dark tile
+   (the SVG carries its own size and draws in currentColor). */
 .article-card__placeholder {
   position: absolute;
   top: 0;
@@ -1761,7 +1795,6 @@ body.fullscreen-mode {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 3rem;
   color: var(--text-muted);
 }
 

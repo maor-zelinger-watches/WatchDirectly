@@ -40,6 +40,7 @@ beforeEach(() => {
   document.body.innerHTML = '<div id="feed-container"></div>';
   state.myVotes = new Set();
   state.myStars = new Set();
+  state.myBookmarks = new Set();
   state.fullscreenVideoId = null;
 });
 
@@ -55,6 +56,23 @@ describe('buildCard / cardTimeMs (FE17)', () => {
     el.className = 'media-card';
     el.dataset.publishedAt = '2026-02-02T00:00:00Z';
     expect(cardTimeMs(el)).toBe(new Date('2026-02-02T00:00:00Z').getTime());
+  });
+});
+
+describe('buildCard — bookmark button wiring', () => {
+  it('pre-marks the bookmark when the video is already in state.myBookmarks', () => {
+    state.myBookmarks = new Set(['x']);
+    const card = buildCard(vid('x'));
+    const btn = card.querySelector('.media-card__bookmark');
+    expect(btn.classList.contains('media-card__bookmark--active')).toBe(true);
+    expect(btn.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('leaves the bookmark unmarked for a video the user has not saved', () => {
+    const card = buildCard(vid('x'));
+    const btn = card.querySelector('.media-card__bookmark');
+    expect(btn.classList.contains('media-card__bookmark--active')).toBe(false);
+    expect(btn.getAttribute('aria-pressed')).toBe('false');
   });
 });
 

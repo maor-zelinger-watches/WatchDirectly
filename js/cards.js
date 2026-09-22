@@ -12,6 +12,7 @@ import { state } from './state.js';
 import { toggleComments } from './comments-ui.js';
 import { toggleVote } from './votes.js';
 import { toggleStar, markStarButton } from './stars.js';
+import { toggleBookmark, markBookmarkButton } from './bookmarks.js';
 import { toggleFullscreen } from './fullscreen.js';
 import { shareVideo } from './share.js';
 import { observeLazyIframe } from './lazy-iframe.js';
@@ -61,6 +62,17 @@ export function buildCard(video) {
     starBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleStar(video.channel_name);
+    });
+  }
+
+  const bookmarkBtn = card.querySelector('.media-card__bookmark');
+  if (bookmarkBtn) {
+    if (state.myBookmarks.has(bookmarkBtn.dataset.videoId)) {
+      markBookmarkButton(bookmarkBtn, true);
+    }
+    bookmarkBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleBookmark(bookmarkBtn.dataset.videoId);
     });
   }
 

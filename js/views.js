@@ -2,9 +2,9 @@
  * views.js — View routing: tabs, search, and category filtering.
  *
  * Owns which list the feed container shows — the chronological Latest
- * feed, the Top This Week ranking, the Starred feed, or filtered search
- * results — and the search index that powers filtering across the whole
- * catalog. The paginated Latest feed itself (loading, prefetch,
+ * feed, the Top This Week ranking, the Starred feed, the Bookmarks feed,
+ * or filtered search results — and the search index that powers filtering
+ * across the whole catalog. The paginated Latest feed itself (loading, prefetch,
  * revalidation) lives in app.js; this module only re-renders lists that
  * are already in memory.
  */
@@ -452,6 +452,8 @@ export function update() {
     renderTop();
   } else if (state.view === 'starred') {
     renderStarred();
+  } else if (state.view === 'bookmarks') {
+    renderBookmarks();
   } else if (isChannels) {
     renderChannels();
   } else {
@@ -869,6 +871,87 @@ async function renderStarred() {
   }
 
   throttledRender.cancel(); // drop any pending partial render before the final one
+  renderFrom(index, true);
+}
+
+/**
+ * Renders the Bookmarks feed: every item the signed-in user has bookmarked,
+ * newest first, honoring any active search filter. The stars pattern applied
+ * to items: uses the full search index so bookmarks reach the whole catalog,
+ * painting from the seeded/cached index instantly and reconciling as fresh
+ * chunks land (same stale-while-revalidate flow as renderStarred).
+ */
+async function renderBookmarks() {
+  const container = document.getElementById('feed-container');
+  const sentinel = document.getElementById('load-more-container');
+  const empty = document.getElementById('feed-empty');
+  const searching = document.getElementById('feed-searching');
+  if (!container) return;
+
+  sentinel.style.display = 'none';
+
+  if (!isSignedIn()) {
+    container.innerHTML = '';
+    state.expandedComments.clear();
+    if (searching) searching.style.display = 'none';
+    empty.querySelector('p').textContent = 'Sign in to see the videos and articles you bookmarked.';
+    empty.style.display = '';
+    return;
+  }
+
+  const token = ++state.filterRenderToken;
+  let painted = false;
+
+  const renderFrom = (index, final) => {
+    if (token !== state.filterRenderToken || state.view !== 'bookmarks') return;
+    let list = sortVideos((index || []).filter(v => state.myBookmarks.has(String(v.video_id))));
+    if (isFilterActive()) list = filterVideos(list, activeFilter()).slice(0, CONFIG.SEARCH_RENDER_LIMIT);
+
+    const prevNote = container.querySelector('.feed-truncation-note');
+    if (prevNote) prevNote.remove();
+    reconcileList(container, list);
+    syncExpandedComments(new Set(list.map(v => String(v.video_id))));
+    painted = true;
+
+    empty.querySelector('p').textContent = state.myBookmarks.size === 0
+      ? 'No bookmarks yet. Tap the bookmark on any video or article to save it for later.'
+      : (isFilterActive()
+        ? 'No videos match your search.'
+        : 'Your bookmarked items are no longer available.');
+    // Don't flash the empty state while the catalog is still streaming in — a
+    // bookmarked item may simply not be in the partial index yet. The "no
+    // bookmarks" copy is safe immediately (it doesn't depend on the index).
+    const noItems = list.length === 0;
+    const stillBuilding = !final && !state.searchIndexComplete;
+    empty.style.display = (noItems && (final || state.myBookmarks.size === 0)) ? '' : 'none';
+    if (searching) searching.style.display = (noItems && stillBuilding && state.myBookmarks.size > 0) ? '' : 'none';
+    if (final) prefetchComments(list.slice(0, CONFIG.PAGE_SIZE));
+  };
+
+  const throttledRender = throttleToFrame((idx) => renderFrom(idx, false));
+
+  const indexPromise = ensureSearchIndex(partial => throttledRender(partial));
+  if (!painted) renderFrom(state.searchIndex || [], false);
+
+  let index;
+  try {
+    index = await indexPromise;
+  } catch (error) {
+    throttledRender.cancel();
+    if (token !== state.filterRenderToken || state.view !== 'bookmarks') return;
+    console.error('Failed to load bookmarks feed:', error);
+    showToast('Bookmarks are unavailable right now. Please try again.', 'error');
+    if (!(state.searchIndex && state.searchIndex.length)) {
+      container.innerHTML = '';
+      state.expandedComments.clear();
+      if (searching) searching.style.display = 'none';
+      empty.querySelector('p').textContent = 'Bookmarks are unavailable right now. Please try again.';
+      empty.style.display = '';
+    }
+    return;
+  }
+
+  throttledRender.cancel();
   renderFrom(index, true);
 }
 
