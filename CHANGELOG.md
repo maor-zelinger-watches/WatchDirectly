@@ -21,6 +21,31 @@ that component's heading.
 
 ## Frontend
 
+### 1.24.0 — 2026-09-22
+- **Bookmarking.** Every video and article card carries a bookmark button in
+  its action bar (between comments and share): outline when unsaved, filled
+  volt when saved — the same color-flip language as the ☆ → ★ favorite star,
+  whose machinery it reuses wholesale. Toggles are optimistic with an
+  in-flight guard (one gesture, one POST), persist per signed-in user
+  (backend 1.19.0's `bookmark` action) with localStorage for instant paint
+  on reload, and reconcile through the sign-in bootstrap — a bookmark
+  toggled mid-flight beats the older snapshot. Signed-out taps get the
+  standard "Please sign in to bookmark" info toast. A new **Bookmarks** tab
+  (between Favorites and Channels) lists saved items newest-first off the
+  full search index — same stale-while-revalidate flow as Favorites — and
+  composes with search and the type chips; its empty state invites the
+  action. Five tabs no longer fit a phone row, so the tab row now scrolls
+  horizontally with the scrollbar hidden. (Andrew's bookmarking request —
+  the last of the four except email consent.)
+- **Flat icon set.** Every colored emoji icon is now a flat monochrome SVG
+  drawn in `currentColor` (new `js/icons.js`), matching the ☆/▲/⛶ glyphs:
+  the comments bubble (was 💬), share link (was 🔗), the channel platform
+  mark in card meta (was 🎬/📰), the article placeholder tile, and the
+  Channels-tab article corner mark. Flat icons inherit each button's
+  normal/hover/active colors, which colored emoji never could. Comment-count
+  updates now go through one helper so `textContent` writes can't wipe the
+  inline icon.
+
 ### 1.23.0 — 2026-09-22
 - **Password-protected add-channel page.** `add-channel.html` is a small
   operator form: paste a YouTube channel, site homepage, or RSS feed link,
@@ -572,6 +597,21 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.19.0 — 2026-09-22
+- **Bookmark actions.** POST `{ "action": "bookmark", "videoId": …,
+  "token": … }` toggles the signed-in user's bookmark on an item, mirroring
+  the vote/star contract exactly: same token verification, block list, 2s
+  per-user rate limit, script lock, SEC4 id gate, and `'@'`-formatted text
+  writes (formula injection). Rows live in a new `Bookmarks` tab of the
+  Comments spreadsheet (auto-created, like Votes/Stars); no aggregate count
+  is kept — bookmarks are private. `myBookmarks` returns the caller's saved
+  ids, keyed `bookmark_ids` to match the batch below.
+- **Bootstrap includes bookmarks.** The sign-in `bootstrap` batch now also
+  returns `bookmark_ids` alongside votes and starred channels — still one
+  request, one token verification. Older frontends ignore the extra key;
+  the 1.24.0 frontend treats its absence (an older backend) as "no data"
+  rather than clearing the local cache.
 
 ### 1.18.0 — 2026-09-22
 - **`addChannel` action — one-shot channel adds for the add-channel page.**
