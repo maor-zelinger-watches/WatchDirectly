@@ -91,8 +91,25 @@ health_check() {
       if [[ -n "$want_version" && "$got" != "$want_version" ]]; then
         echo "   $label attempt $attempt: serving v$got, expected v$want_version (propagating…)"
       else
-        echo "✅ $label healthy — HTTP 200, JSON feed, version ${got:-?}"
-        rm -f "$body"; return 0
+        # POST pipeline check. Every user write (vote, comment, star, bookmark)
+        # goes POST → 302 → googleusercontent echo, a path that can break
+        # independently of GET — and this check was GET-only, so a broken POST
+        # pipeline used to pass both gates. Assert the POST path serves JSON
+        # carrying the same version. NOTE: no `-X POST` here — that forces curl
+        # to re-POST the echo redirect and Google answers with an "unable to
+        # open the file" HTML page (a curl artifact, not a real failure);
+        # `--data` alone POSTs, then follows the 302 as GET, like a browser.
+        local pbody="/tmp/wd_hc_post_$$_${label}.txt" phttp pgot
+        phttp=$(curl -s -L -m 30 -o "$pbody" -w '%{http_code}' \
+          -H 'Content-Type: text/plain;charset=utf-8' --data '{"action":"version"}' \
+          "$exec_url" 2>/dev/null || echo "000")
+        pgot=$(grep -oE '"version":"[^"]*"' "$pbody" 2>/dev/null | head -1 | sed 's/.*"version":"//; s/"$//')
+        rm -f "$pbody"
+        if [[ "$phttp" == "200" && -n "$pgot" && ( -z "$want_version" || "$pgot" == "$want_version" ) ]]; then
+          echo "✅ $label healthy — HTTP 200, JSON feed + JSON POST, version ${got:-?}"
+          rm -f "$body"; return 0
+        fi
+        echo "   $label attempt $attempt: GET healthy but POST pipeline not serving JSON (http=$phttp, version=${pgot:-none})"
       fi
     else
       echo "   $label attempt $attempt: not healthy yet (http=$http)"

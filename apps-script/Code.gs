@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.24.0';
+const VERSION = '1.24.1';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -138,9 +138,20 @@ const VOTE_TRUST_TENURE_META_KEY = 'vote_trust_tenure_hours';
 const VOTE_ANOMALY_WINDOW_SECONDS = 3600;
 const VOTE_ANOMALY_BURST_THRESHOLD = 8;
 // Cache TTL for a resolved first_seen_at (epoch ms), keyed by email hash. Once an
-// account is seen its first_seen never changes, so this is safe to cache for a
-// while; it saves a CUSTOMERS scan on every vote from an active voter.
-const FIRST_SEEN_CACHE_SECONDS = 1800;
+// account is seen its first_seen never changes, so it's cached for CacheService's
+// maximum (6h). It is written at BOOTSTRAP (sign-in already has the row in hand)
+// as well as on a vote-time miss, so the common vote path is a cache hit and
+// never rescans CUSTOMERS — the tenure gate adds ~nothing to a vote's latency.
+const FIRST_SEEN_CACHE_SECONDS = 21600;
+// When the tenure clock started. `first_seen_at` was introduced with the
+// CUSTOMERS sheet (Backend 1.20.0/1.21.0, shipped 2026-09-22), so every account
+// that existed before then was stamped at that moment — its "tenure" is time
+// since the column appeared, not time since it joined. Until one full trust
+// window has elapsed past this point, EVERY pre-existing account reads as
+// low-tenure and enforcement would gate the whole user base. So enforcement is
+// inert before CLOCK_START + trust window regardless of the Meta toggle
+// (isVoteTrustEnforced). Conservative (later than the true first stamp) is safe.
+const VOTE_TRUST_CLOCK_START_ISO = '2026-09-22T16:12:05Z';
 
 // Grace window applied to a premiere/live entry's expiry. A scheduled premiere
 // that never airs, or a stream that never ends, stops being surfaced once its
@@ -272,6 +283,10 @@ let _cachedSessionSecret = null;
 // per channel for youtube_api_key), and a full getDataRange() scan per call got
 // slower as rows accrued. setMeta keeps this in sync on write.
 let _cachedMeta = null;
+// The CUSTOMERS spreadsheet handle, opened once per execution. A vote opens it
+// for the voter's tenure (Customers tab) AND for the Votes tab; openById is the
+// expensive part, so the second open is served from here.
+let _cachedCustomersSS = null;
 
 
 // ============================================================
@@ -3824,7 +3839,7 @@ function updateCommentCount(videoId) {
  * @returns {Sheet}
  */
 function getUserDataTab(name, headers) {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.CUSTOMERS);
+  var ss = getCustomersSpreadsheet();
   var sheet = ss.getSheetByName(name);
   if (sheet) return sheet;
 
@@ -3902,6 +3917,42 @@ function isVoteTrustEnabled() {
   return String(getMeta(VOTE_TRUST_ENABLED_META_KEY)).toLowerCase() === 'true';
 }
 
+/**
+ * Whether the tenure gate actually enforces at `nowMs`: the Meta toggle must be
+ * on AND one full trust window must have elapsed since the tenure clock started
+ * (see VOTE_TRUST_CLOCK_START_ISO). Before that, every pre-existing account is
+ * "low-tenure" only because the column is new, and enforcing would gate everyone
+ * — so the toggle is inert. Takes the time as a parameter so the guard is
+ * testable at fixed instants.
+ * @param {number} nowMs
+ * @returns {boolean}
+ */
+function isVoteTrustEnforced(nowMs) {
+  if (!isVoteTrustEnabled()) return false;
+  var clockStart = Date.parse(VOTE_TRUST_CLOCK_START_ISO);
+  return nowMs >= clockStart + trustTenureMs();
+}
+
+/**
+ * Caches an account's first_seen (ISO string or epoch ms) under its email hash
+ * for FIRST_SEEN_CACHE_SECONDS. Called at bootstrap (readOrCreateCustomer) and on
+ * a vote-time lookup, so a subsequent vote resolves tenure from cache with no
+ * CUSTOMERS scan. Ignores blank/unparseable values; never throws.
+ */
+function rememberFirstSeen(email, value) {
+  var ms = (typeof value === 'number') ? value : Date.parse(value);
+  if (!isFinite(ms)) return;
+  try {
+    CacheService.getScriptCache().put('fseen_' + tokenHash(email), String(ms), FIRST_SEEN_CACHE_SECONDS);
+  } catch (e) { /* best-effort */ }
+}
+
+/** The CUSTOMERS spreadsheet, opened once per execution (see _cachedCustomersSS). */
+function getCustomersSpreadsheet() {
+  if (!_cachedCustomersSS) _cachedCustomersSS = SpreadsheetApp.openById(SPREADSHEET_IDS.CUSTOMERS);
+  return _cachedCustomersSS;
+}
+
 /** The trust window in ms — Meta `vote_trust_tenure_hours` overrides the default. */
 function trustTenureMs() {
   var override = parseFloat(getMeta(VOTE_TRUST_TENURE_META_KEY));
@@ -3946,7 +3997,7 @@ function voterFirstSeenMs(email, name) {
       if (rows[i][cols.email] === email) {
         var ms = Date.parse(rows[i][cols.first_seen_at]);
         if (isNaN(ms)) return 0; // blank/unparseable → trusted (don't punish legacy rows)
-        if (cache && key) { try { cache.put(key, String(ms), FIRST_SEEN_CACHE_SECONDS); } catch (e) {} }
+        rememberFirstSeen(email, ms);
         return ms;
       }
     }
@@ -3968,7 +4019,7 @@ function voterFirstSeenMs(email, name) {
       lock.releaseLock();
     }
     var nowMs = Date.parse(nowIso);
-    if (cache && key) { try { cache.put(key, String(nowMs), FIRST_SEEN_CACHE_SECONDS); } catch (e) {} }
+    rememberFirstSeen(email, nowMs);
     return nowMs;
   } catch (e) {
     log('ERROR', 'voteTrust', 'first_seen lookup failed (fail-open): ' + e.message);
@@ -4032,9 +4083,10 @@ function handleVote(data) {
   // Resolve voter tenure BEFORE the lock (voterFirstSeenMs may take the lock
   // itself to record a first sighting — LockService is not reentrant). `trusted`
   // means the account has been seen for at least the trust window; `enforce` is
-  // the Meta master switch. While enforcement is off we still compute tenure and
-  // flag anomalies (observe-only), but every vote counts.
-  var enforce = isVoteTrustEnabled();
+  // the Meta master switch, held inert until the tenure clock has run one full
+  // window (isVoteTrustEnforced). While not enforcing we still compute tenure
+  // (a cache hit after bootstrap) and flag anomalies, but every vote counts.
+  var enforce = isVoteTrustEnforced(Date.now());
   var trusted = (Date.now() - voterFirstSeenMs(user.email, user.name)) >= trustTenureMs();
 
   // Serialize the read-find-mutate-recount so concurrent toggles from the
@@ -4100,9 +4152,12 @@ function handleVote(data) {
 
       // Anomaly signal: a low-tenure new vote. Logged and velocity-tracked in
       // BOTH modes so the observe window shows what enforcement would catch.
+      // WARN, not INFO: log() drops anything below the Meta log_level, and the
+      // default is ERROR — so an operator observing the rollout sets log_level
+      // to WARN and sees exactly these lines (INFO would never be written).
       if (!trusted) {
         recordVoteAnomaly(videoId);
-        log(enforce ? 'WARN' : 'INFO', 'voteTrust',
+        log('WARN', 'voteTrust',
           (enforce ? 'Gated' : 'Would gate') + ' low-tenure vote on ' + videoId);
       }
     }
@@ -4470,7 +4525,7 @@ var CUSTOMER_HEADER_ALIASES = {
  * @returns {Sheet}
  */
 function getCustomersSheet() {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.CUSTOMERS);
+  var ss = getCustomersSpreadsheet();
   var sheet = ss.getSheetByName('Customers');
   if (!sheet) {
     var tabs = ss.getSheets();
@@ -4586,7 +4641,12 @@ function readOrCreateCustomer(email, name) {
 
   var rows = sheet.getDataRange().getValues();
   for (var i = 1; i < rows.length; i++) {
-    if (rows[i][cols.email] === email) return normalizeConsent(rows[i][cols.marketing_consent]);
+    if (rows[i][cols.email] === email) {
+      // Bootstrap has the row in hand: cache first_seen now so the user's
+      // votes resolve tenure from cache instead of rescanning CUSTOMERS.
+      rememberFirstSeen(email, rows[i][cols.first_seen_at]);
+      return normalizeConsent(rows[i][cols.marketing_consent]);
+    }
   }
 
   var lock = LockService.getScriptLock();
@@ -4599,14 +4659,19 @@ function readOrCreateCustomer(email, name) {
     // Re-check under the lock: a parallel bootstrap may have inserted it.
     var again = sheet.getDataRange().getValues();
     for (var j = 1; j < again.length; j++) {
-      if (again[j][cols.email] === email) return normalizeConsent(again[j][cols.marketing_consent]);
+      if (again[j][cols.email] === email) {
+        rememberFirstSeen(email, again[j][cols.first_seen_at]);
+        return normalizeConsent(again[j][cols.marketing_consent]);
+      }
     }
+    var firstSeenIso = new Date().toISOString();
     appendCustomerRow(sheet, cols, {
       email: email,
       name: name,
-      firstSeenAt: new Date().toISOString(),
+      firstSeenAt: firstSeenIso,
       source: 'google_signin',
     });
+    rememberFirstSeen(email, firstSeenIso);
     return null;
   } finally {
     lock.releaseLock();
@@ -5152,8 +5217,9 @@ function enforceRequestSignature(data) {
   }
   // Soft-launch: record that this client didn't send a valid signature, but let
   // it through. The count in the logs is the readiness signal for flipping the
-  // Meta toggle on.
-  log('INFO', 'signature', 'Unsigned/invalid ' + action + ' (soft — allowed)');
+  // Meta toggle on. WARN so it is visible at log_level=WARN (the default ERROR
+  // level drops INFO, which would have hidden this signal entirely).
+  log('WARN', 'signature', 'Unsigned/invalid ' + action + ' (soft — allowed)');
   return null;
 }
 
