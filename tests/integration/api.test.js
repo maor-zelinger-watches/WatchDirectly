@@ -82,7 +82,8 @@ describe('API Client', () => {
     localStorageMock.clear();
     fetchMock = vi.fn();
     global.fetch = fetchMock;
-    api = createApiClient(MOCK_APPS_SCRIPT_URL);
+    // Zero backoff: the retry tests below exercise the schedule, not the clock.
+    api = createApiClient(MOCK_APPS_SCRIPT_URL, { retryDelaysMs: [0, 0] });
   });
 
   afterEach(() => {
@@ -129,10 +130,11 @@ describe('API Client', () => {
       );
     });
 
-    it('throws on network error', async () => {
-      fetchMock.mockRejectedValueOnce(new Error('Network error'));
+    it('throws on network error (after exhausting the retries)', async () => {
+      fetchMock.mockRejectedValue(new Error('Network error'));
 
       await expect(api.fetchFeed(1)).rejects.toThrow('Network error');
+      expect(fetchMock).toHaveBeenCalledTimes(3);
     });
 
     it('throws on non-ok response', async () => {
@@ -444,6 +446,110 @@ describe('API Client', () => {
       await expect(
         api.postComment('v1', '', 'spam', 'token')
       ).rejects.toThrow('User is blocked');
+    });
+  });
+
+  /**
+   * Transient failures on Google's side (reproduced against production
+   * 2026-09-23): /exec runs the script, then 302s to a one-shot
+   * googleusercontent "echo" URL that serves the result — and that hop
+   * intermittently answers a 404 HTML page instead of our JSON, in bursts,
+   * with the script healthy. Users saw "API error: 404" on Top This Week
+   * pagination and on votes. Reads retry; a write only retries when it never
+   * reached the script; a write whose RESULT was lost is flagged, not resent.
+   */
+  describe('transient backend failures (echo-hop 404)', () => {
+    const EXEC_URL = MOCK_APPS_SCRIPT_URL;
+    const ECHO_URL = 'https://script.googleusercontent.com/macros/echo?user_content_key=abc&lib=x';
+    const HTML_404 = '<!DOCTYPE html><html lang="he" dir="rtl"><head><title>הדף לא נמצא</title></head></html>';
+
+    /** A real-Response-shaped stub: text() is what api.js reads. */
+    const res = ({ status = 200, url = ECHO_URL, body }) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: status === 404 ? 'Not Found' : status === 302 ? 'Found' : status === 200 ? 'OK' : 'Error',
+      url,
+      text: () => Promise.resolve(typeof body === 'string' ? body : JSON.stringify(body)),
+    });
+    const okFeed = () => res({ body: mockFeedResponse });
+
+    it('a GET whose echo hop 404s is retried and succeeds on the next attempt', async () => {
+      fetchMock
+        .mockResolvedValueOnce(res({ status: 404, body: HTML_404 }))
+        .mockResolvedValueOnce(okFeed());
+
+      const data = await api.fetchTopWeek(10, '5|2026-09-20T11:00:05.000Z|NKtJ7kKBFG0');
+      expect(data.videos).toHaveLength(2);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a GET gives up after the retry schedule is exhausted (3 attempts) and reports the status', async () => {
+      fetchMock.mockResolvedValue(res({ status: 404, body: HTML_404 }));
+
+      await expect(api.fetchFeed(2)).rejects.toThrow('API error: 404');
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('a 200 that carries an HTML page instead of JSON is treated as transient, not parsed', async () => {
+      fetchMock
+        .mockResolvedValueOnce(res({ status: 200, body: HTML_404 }))
+        .mockResolvedValueOnce(okFeed());
+
+      await expect(api.fetchFeed(1)).resolves.toMatchObject({ status: 'ok' });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a Location-less 302 that carries the JSON result IS the result (no retry)', async () => {
+      fetchMock.mockResolvedValueOnce(res({ status: 302, url: EXEC_URL, body: { status: 'ok', voted: true, vote_count: 4 } }));
+
+      const data = await api.vote('v1', 'tok');
+      expect(data).toMatchObject({ voted: true, vote_count: 4 });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('a network error on a GET is retried', async () => {
+      fetchMock
+        .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+        .mockResolvedValueOnce(okFeed());
+
+      await expect(api.fetchFeed(1)).resolves.toMatchObject({ status: 'ok' });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a POST that failed at /exec itself (never ran) is retried', async () => {
+      fetchMock
+        .mockResolvedValueOnce(res({ status: 404, url: EXEC_URL, body: HTML_404 }))
+        .mockResolvedValueOnce(res({ body: { status: 'ok', voted: true, vote_count: 4 } }));
+
+      const data = await api.vote('v1', 'tok');
+      expect(data.voted).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('a POST whose echo hop 404s ran on the server: NOT resent, flagged resultLost', async () => {
+      fetchMock.mockResolvedValueOnce(res({ status: 404, url: ECHO_URL, body: HTML_404 }));
+
+      let caught;
+      try { await api.vote('v1', 'tok'); } catch (e) { caught = e; }
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught.resultLost).toBe(true);
+      expect(caught.transient).toBeUndefined();
+      expect(caught.status).toBe(404);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // a second POST would toggle it back
+    });
+
+    it('a network error on a POST is not retried (unknown whether it ran)', async () => {
+      fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+
+      await expect(api.vote('v1', 'tok')).rejects.toThrow('Failed to fetch');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('an app-level error reply is final — never retried', async () => {
+      fetchMock.mockResolvedValueOnce(res({ body: { status: 'error', message: 'Invalid authentication token' } }));
+
+      await expect(api.vote('v1', 'bad')).rejects.toThrow('Invalid authentication token');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });
 });

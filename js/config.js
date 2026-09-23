@@ -29,6 +29,10 @@ export const CONFIG = {
                               // TOP_WEEK_VIEWS_PER_VOTE in apps-script/Code.gs
                               // — keep the two in sync.
   COMMENT_BATCH_SIZE: 10,     // ids per commentsBatch request (backend caps at 20)
+  API_RETRY_DELAYS_MS: [400, 1200], // backoff before each retry of a request that
+                              // failed transiently on Google's side (the /exec →
+                              // googleusercontent echo hop intermittently 404s;
+                              // see api.js requestOnce). One entry per retry.
   SEARCH_CHUNK_SIZE: 100,     // page size for building the search index; the
                               // catalog is fetched in parallel chunks of this
                               // size so results paint as each chunk lands.
