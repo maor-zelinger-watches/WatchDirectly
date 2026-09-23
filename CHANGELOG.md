@@ -711,6 +711,31 @@ that component's heading.
 
 ## Backend
 
+### 1.24.1 — 2026-09-23
+- **Vote-trust rollout fixes (found investigating an upvote report).** Three
+  defects in 1.24.0's rollout, none in the counting logic itself:
+  - **Enforcement is now inert until the tenure clock has run one full window.**
+    `first_seen_at` only appeared with the CUSTOMERS sheet on 2026-09-22, so
+    every pre-existing account was stamped then — its "tenure" is time since
+    the column, not since it joined. Flipping `vote_trust_enabled` before one
+    trust window had elapsed would have gated the *entire* user base: every
+    upvote's count would tick up optimistically and snap back. The toggle is
+    now held inert until `VOTE_TRUST_CLOCK_START_ISO` + the window
+    (`isVoteTrustEnforced`), regardless of the Meta value.
+  - **The observability signals actually get written.** `log()` drops anything
+    below the Meta `log_level`, whose default is ERROR — but the "would gate /
+    gated low-tenure vote" lines were INFO and the anomaly/signature-soft
+    lines were WARN, so the "watch the logs, then flip the toggle" step was
+    impossible at the default level: nothing was ever written. All rollout
+    signals are now WARN; **set Meta `log_level` to `WARN` during the observe
+    window** to see them.
+  - **The tenure lookup no longer rescans CUSTOMERS on a vote.** The voter's
+    `first_seen_at` is cached (6h) at bootstrap, where sign-in already has the
+    row in hand, so a vote resolves tenure from cache; the CUSTOMERS spreadsheet
+    handle is also opened once per execution instead of once for the Customers
+    tab and again for the Votes tab. Removes the ~1–2s the gate had added to a
+    user's first vote.
+
 ### 1.24.0 — 2026-09-22
 - **Vote-trust gate: low-tenure accounts can't inflate the ranking (SEC-Sybil,
   phased).** The residual anti-Sybil risk after request signing (whose secret is
@@ -1273,6 +1298,18 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.5 — 2026-09-23
+- **The backend deploy gate now health-checks the POST pipeline too.** Every
+  user write (vote, comment, star, bookmark) goes POST → 302 → googleusercontent
+  echo, a path that can break independently of GET — yet `deploy-backend.sh`
+  only ever curled `?action=feed`, so a broken POST pipeline would have passed
+  both the staging and prod gates. After the GET check, it now POSTs to `/exec`
+  and asserts a JSON reply carrying the deployed version. Written with `--data`
+  and deliberately without `-X POST`: forcing the method makes curl re-POST the
+  echo redirect, which Google answers with an "unable to open the file" HTML page
+  — a curl artifact (browsers follow the 302 as GET) that would false-fail the
+  gate.
 
 ### 1.2.4 — 2026-08-27
 - **The release gate's header now tells the truth about deploys.** The
