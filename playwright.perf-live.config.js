@@ -13,6 +13,9 @@ import { defineConfig } from '@playwright/test';
  *                   another worktree to measure that build with the same specs,
  *                   e.g. a checkout of main for a before/after comparison.
  *   PERF_LIVE_PORT  port to serve on (default 3199 — clear of e2e's 3099).
+ *   PERF_LIVE_STORAGE  'idb' | 'legacy': pins the storage-engine flag
+ *                   (js/flags.js) for every page, so one checkout can be
+ *                   measured in both modes. Unset = the build's default.
  *
  * Projects: chromium, firefox, webkit (WebKit is Safari's engine). Install the
  * last two once with `npx playwright install firefox webkit`, then pick with

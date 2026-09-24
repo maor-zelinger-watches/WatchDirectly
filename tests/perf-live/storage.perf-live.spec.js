@@ -19,7 +19,7 @@
 import { test, expect } from '@playwright/test';
 import {
   SNAPSHOT_KEYS, visibleCard, snapshotInfo, persistedRows, expectPersisted, holdBackend,
-  recordIndexRequests, appState, report,
+  recordIndexRequests, appState, report, applyStorageFlag,
 } from './helpers.js';
 
 // Budgets. Cold numbers include production latency (Apps Script cold starts
@@ -32,6 +32,8 @@ const PERSIST_MS = 15_000;
 const WARM_INDEX_REQUESTS_MAX = 2;  // a warm top-up stops at the first known page
 
 test.describe('storage — live backend', () => {
+  test.beforeEach(async ({ page }) => applyStorageFlag(page));
+
   test('cold first paint (baseline, nothing persisted)', async ({ page }) => {
     await page.goto('/', { waitUntil: 'commit' });
     await expect(visibleCard(page)).toBeVisible({ timeout: COLD_FIRST_CARD_MS });
@@ -173,7 +175,7 @@ test.describe('storage — live backend', () => {
         const key = '__wd_bench__';
         const median = (xs) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)] : null);
         const out = { rows: videos.length, jsonChars: JSON.stringify(payload).length, engines: {} };
-        for (const name of ['idb', 'cache', 'local']) {
+        for (const name of Object.keys(storage.engines)) {
           const engine = storage.engines[name];
           const r = { writeMs: [], readMs: [], error: null };
           try {

@@ -3,9 +3,11 @@
  *
  * Run the SAME spec against two builds and compare the numbers:
  *
- *   PERF_LIVE_LABEL=main   PERF_LIVE_ROOT=<main checkout> npm run test:perf-live -- compare --repeat-each=3
- *   PERF_LIVE_LABEL=branch                                npm run test:perf-live -- compare --repeat-each=3
+ *   PERF_LIVE_STORAGE=legacy npm run test:perf-live -- compare --repeat-each=3
+ *   PERF_LIVE_STORAGE=idb    npm run test:perf-live -- compare --repeat-each=3
  *   node tests/perf-live/summarize.mjs <results.json> …
+ *
+ * (Or compare two checkouts: PERF_LIVE_LABEL=<name> PERF_LIVE_ROOT=<dir>.)
  *
  * One repetition = one returning visitor, against production data:
  *   session 1  cold visit: first paint, full search-index build, what persisted
@@ -22,9 +24,12 @@
 import { test, expect } from '@playwright/test';
 import {
   SNAPSHOT_KEYS, snapshotInfo, isPersisted, persistedRows, holdBackend, recordIndexRequests, appState, report,
+  applyStorageFlag, STORAGE_MODE,
 } from './helpers.js';
 
-const LABEL = process.env.PERF_LIVE_LABEL || 'unlabeled';
+// With PERF_LIVE_STORAGE set, one checkout benchmarks itself in each mode —
+// the label defaults to the mode, so the summary compares idb vs legacy.
+const LABEL = process.env.PERF_LIVE_LABEL || STORAGE_MODE || 'unlabeled';
 const COLD_MS = 45_000;
 const INDEX_BUILD_MS = 300_000;
 const SEARCH_MS = 300_000;
@@ -141,6 +146,7 @@ const blocking = (tasks, from, to) => {
 
 test('before/after: a returning visitor', async ({ page }, testInfo) => {
   test.setTimeout(900_000);
+  await applyStorageFlag(page);
   await instrument(page);
   const m = { build: LABEL, browser: testInfo.project.name, repeat: testInfo.repeatEachIndex };
 

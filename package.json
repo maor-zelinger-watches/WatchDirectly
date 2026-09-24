@@ -8,6 +8,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test --project=mobile-chrome --project=desktop-chrome",
     "test:perf": "playwright test --project=perf --workers=1",
+    "test:storage:webkit": "playwright test --project=webkit-storage --workers=1",
     "test:smoke": "playwright test --project=smoke --workers=1",
     "test:perf-live": "playwright test --config=playwright.perf-live.config.js",
     "test:all": "vitest run && npm run test:e2e && npm run test:smoke && npm run test:perf",

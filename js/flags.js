@@ -15,9 +15,11 @@
  * ?storage=idb | ?storage=legacy sets the flag, and ?storage=default removes
  * it — for browsers without devtools (iOS Safari). It's applied while this
  * module evaluates, which is before any cache read: cache.js imports this
- * module, and boot only starts once every module has evaluated. The param is
- * left in the URL; share.js may strip the query string later, and the flag is
- * already persisted by then.
+ * module, and boot only starts once every module has evaluated. It's a one-shot
+ * action: once applied, the param is removed from the address bar (other
+ * params such as a shared ?v= link, and the hash, are kept). Left in place, a
+ * reload or bookmark of that URL would re-assert it and silently undo a later
+ * flip — the opposite of what a rollback needs.
  *
  * Never throws: blocked storage reads as "no flag" (the default applies) and a
  * blocked write is reported as false.
@@ -62,17 +64,29 @@ export function setStorageEngineFlag(value) {
   }
 }
 
-/** Applies ?storage=… from the page URL. Unknown values are ignored. */
+/**
+ * Applies ?storage=… from the page URL, then removes that one param from the
+ * address bar. Unknown values change nothing (but are removed all the same).
+ */
 function applyUrlParam() {
   if (typeof location === 'undefined' || !location.search) return;
-  let value;
+  let url;
   try {
-    value = new URLSearchParams(location.search).get(STORAGE_URL_PARAM);
+    url = new URL(location.href);
   } catch (e) {
     return;
   }
+  if (!url.searchParams.has(STORAGE_URL_PARAM)) return;
+  const value = url.searchParams.get(STORAGE_URL_PARAM);
   if (value === 'default') setStorageEngineFlag(null);
   else if (STORAGE_ENGINES.includes(value)) setStorageEngineFlag(value);
+
+  url.searchParams.delete(STORAGE_URL_PARAM);
+  try {
+    history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  } catch (e) {
+    /* the flag is set either way; the param just stays visible */
+  }
 }
 
 let current = null;

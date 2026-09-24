@@ -19,6 +19,20 @@ export const SNAPSHOT_KEYS = {
 // The backend's hosts: the /exec endpoint and the echo hop it redirects to.
 const BACKEND = /^https:\/\/script\.(google|googleusercontent)\.com\//;
 
+/**
+ * The storage mode this run pins, from PERF_LIVE_STORAGE ('idb' | 'legacy'), or
+ * null to leave the flag alone (the build's default applies).
+ */
+export const STORAGE_MODE = ['idb', 'legacy'].includes(process.env.PERF_LIVE_STORAGE)
+  ? process.env.PERF_LIVE_STORAGE
+  : null;
+
+/** Pins the storage-engine flag (js/flags.js) for every load of `page`. */
+export async function applyStorageFlag(page) {
+  if (!STORAGE_MODE) return;
+  await page.addInitScript((mode) => localStorage.setItem('wd_storage_engine', mode), STORAGE_MODE);
+}
+
 /** The first card a user can actually see (Shorts are hidden by the default chips). */
 export const visibleCard = (page) => page.locator('#feed-container .media-card:visible').first();
 

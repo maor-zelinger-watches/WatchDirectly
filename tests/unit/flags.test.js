@@ -140,10 +140,28 @@ describe('?storage= URL parameter', () => {
   });
 
   it('coexists with a shared deep link (?v=…&storage=…)', () => {
-    history.replaceState(null, '', '/?v=abc12345678&storage=idb');
+    history.replaceState(null, '', '/?v=abc12345678&storage=idb#top');
     flagsTest.applyUrlParam();
     expect(lsStore[KEY]).toBe('idb');
-    expect(new URLSearchParams(location.search).get('v')).toBe('abc12345678'); // untouched
+    expect(location.search).toBe('?v=abc12345678'); // v kept, storage removed
+    expect(location.hash).toBe('#top');
+  });
+
+  it('is one-shot: removed from the URL so a reload cannot undo a later flip', () => {
+    history.replaceState(null, '', '/?storage=idb');
+    flagsTest.applyUrlParam();
+    expect(location.search).toBe('');
+    setStorageEngineFlag('legacy');   // e.g. another tab rolls this browser back
+    flagsTest.applyUrlParam();        // this tab reloads the same (now clean) URL
+    expect(lsStore[KEY]).toBe('legacy');
+  });
+
+  it('removes an unknown value from the URL without touching the flag', () => {
+    lsStore[KEY] = 'idb';
+    history.replaceState(null, '', '/?storage=bogus&v=x');
+    flagsTest.applyUrlParam();
+    expect(lsStore[KEY]).toBe('idb');
+    expect(location.search).toBe('?v=x');
   });
 
   it('does nothing without a query string', () => {

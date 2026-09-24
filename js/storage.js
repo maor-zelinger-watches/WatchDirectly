@@ -67,7 +67,11 @@ const raw = {
   idb: {
     async probe() {
       if (typeof indexedDB === 'undefined') return false;
-      await idbGet('__probe__', idb()); // opens (and on first use creates) the DB
+      // Open the database (creating it on first use) and start a transaction on
+      // our store — which throws if the store is missing — but issue no read:
+      // on a slow disk each IndexedDB request is a full round trip, and a probe
+      // read would add one to every cold boot for nothing.
+      await idb()('readonly', () => undefined);
       return true;
     },
     async get(key) {

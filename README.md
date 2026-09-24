@@ -47,6 +47,45 @@ npm run test:perf    # performance suite (Playwright)
 npm run test:all     # all of the above
 ```
 
+Run by hand, never by CI or the deploy gate:
+
+```sh
+npm run test:storage:webkit  # storage-flag e2e + perf specs on WebKit (Safari's engine);
+                             # needs `npx playwright install webkit` once
+npm run test:perf-live       # against the PRODUCTION backend; see
+                             # playwright.perf-live.config.js (PERF_LIVE_STORAGE=idb|legacy)
+```
+
+## Storage engine flag
+
+The large cache snapshots (feed, search index, Top This Week, channels) can
+live in **localStorage** (`legacy`, the default — what production has always
+run) or **IndexedDB** (`idb`). The choice is per browser, via
+[`js/flags.js`](js/flags.js):
+
+| How | Effect |
+|---|---|
+| open `?storage=idb` | this browser uses IndexedDB from the next load on |
+| open `?storage=legacy` | back to localStorage |
+| open `?storage=default` | follow `STORAGE_ENGINE_DEFAULT` in [`js/config.js`](js/config.js) |
+| devtools: `localStorage.setItem('wd_storage_engine', 'idb')` | same as `?storage=idb` |
+
+- The URL form works on phones without devtools, and is removed from the
+  address bar once applied, so a reload or bookmark can't re-assert it later.
+- The engine is fixed for a page load; a flip applies on the next load.
+- The console prints `storage engine: idb (flag)` / `legacy (default)` at boot.
+- `legacy` never opens IndexedDB, so it's a safe kill switch. Going
+  `idb` → `legacy` costs one cold load (IndexedDB's copy is ignored, not moved
+  back); going `legacy` → `idb` moves the localStorage copy over.
+- Rolling IndexedDB out to everyone = `STORAGE_ENGINE_DEFAULT: 'idb'`. Browsers
+  that set the flag explicitly keep their choice.
+
+Why it exists: Safari counts localStorage at 2 bytes per character once any
+character is outside Latin-1, which halves its effective cap to ~2.6M
+characters. The full search index is around that size and growing. When it
+doesn't fit, it silently isn't saved, and a returning visitor's search re-walks
+the whole catalog.
+
 ## Shipping
 
 Nothing ships by hand — releases go through the **deploy skill**, which bumps
