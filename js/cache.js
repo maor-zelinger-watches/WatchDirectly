@@ -12,8 +12,10 @@
  *   degrade to "no cache" (the app re-fetches), not a crash.
  *
  * Two tiers:
- * - Large snapshots live in IndexedDB (storage.js), are ASYNC, and fall back
- *   to Cache Storage, then localStorage, only where IndexedDB won't open:
+ * - Large snapshots are ASYNC and live in the engine the storage-engine flag
+ *   picks for this page load (js/flags.js): localStorage in 'legacy' mode (the
+ *   default), IndexedDB in 'idb' mode, falling back to localStorage when
+ *   IndexedDB won't open or stalls (storage.js):
  *   - wd_feed_cache   — the feed the user scrolled {videos, total} (stale-while-revalidate)
  *   - wd_search_index — full catalog for search {videos} (stale-while-revalidate)
  *   - wd_top_cache    — Top This Week first-page snapshot {videos, total, cursor}
@@ -24,9 +26,11 @@
  *   - wd_my_stars     — starred channel names, instant paint before server reconcile
  *   - wd_my_bookmarks — bookmarked video ids, instant paint before server reconcile
  *   - wd_filter_types — persisted content-type chip selection ([] = "All")
- * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.)
+ * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.
+ * 'wd_storage_engine' is the engine flag, owned by flags.js — never a cache, so
+ * no cache clear may touch it.)
  *
- * Why the snapshots moved: localStorage's per-origin cap varies by browser,
+ * Why IndexedDB exists: localStorage's per-origin cap varies by browser,
  * and in WebKit (Safari's engine) the full search index — 3.4M characters on
  * production in Sep 2026 — exceeded it. write() swallows the quota error by
  * design, so the index silently never persisted there and every returning
@@ -35,6 +39,7 @@
  */
 
 import { pickEngine } from './storage.js';
+import { storageEngine } from './flags.js';
 
 export const CACHE_KEYS = {
   FEED: 'wd_feed_cache',
@@ -105,30 +110,31 @@ function isFresh(data) {
 }
 
 
-// --- snapshot storage (IndexedDB / Cache Storage, async) --------------
+// --- snapshot storage (IndexedDB or localStorage, async) -------------
 
-// Where each large snapshot lives, most preferred first. The first engine that
-// works in this browser wins (storage.js pickEngine). IndexedDB for all four:
-// measured against production data (tests/perf-live) it read and wrote the
-// full search index faster than Cache Storage in both Chromium and WebKit, and
-// in WebKit under Playwright, Cache Storage writes were lost across a reload
-// (ephemeral profile) or never visible at all (persistent profile) while its
-// probe still succeeded. Cache Storage stays only as the fallback for a browser
-// that won't open IndexedDB; localStorage is always last, so a browser with
-// neither behaves exactly as it did before the move.
-const PREFERENCE = ['idb', 'cache', 'local'];
-export const ENGINE_PREFERENCE = {
-  [CACHE_KEYS.FEED]: PREFERENCE,
-  [CACHE_KEYS.TOP]: PREFERENCE,
-  [CACHE_KEYS.CHANNELS]: PREFERENCE,
-  [CACHE_KEYS.SEARCH_INDEX]: PREFERENCE,
-};
+// Which engines each mode may use, most preferred first (storage.js
+// pickEngine). The mode is the per-browser flag in js/flags.js, read once per
+// page load.
+//
+//   legacy — localStorage only: exactly the storage that shipped before the
+//            IndexedDB engine. IndexedDB is never probed, opened or created,
+//            which is what makes this mode a safe kill switch.
+//   idb    — IndexedDB, falling back to localStorage for the rest of the page
+//            load when IndexedDB won't open or stalls (storage.js).
+export const LEGACY_PREFERENCE = Object.freeze(['local']);
+export const IDB_PREFERENCE = Object.freeze(['idb', 'local']);
+
+/** The engine preference for this page load's storage mode. */
+export function enginePreference() {
+  return storageEngine().engine === 'idb' ? IDB_PREFERENCE : LEGACY_PREFERENCE;
+}
 
 // Per-key operation queue. Saves are fire-and-forget, so two in flight for the
 // same key (a page save, then a vote's coalesced save) could otherwise land out
 // of order and persist the older snapshot. Chaining every read, write and
 // clear of a key keeps them in call order: last call wins, and a load always
-// sees the writes issued before it.
+// sees the writes issued before it. Every engine call is time-bounded
+// (storage.js), so one stuck call can't wedge the queue behind it.
 const queues = new Map();
 
 function serialize(key, op) {
@@ -143,18 +149,11 @@ export const __test__ = {
 };
 
 const CORRUPT = Symbol('corrupt');
+const TIMED_OUT = Symbol('timed-out');
 
-/**
- * Reads and drops the localStorage copy an older build (or a test seed) left
- * behind. Always removed on sight: freeing its share of the quota is the point
- * of moving.
- */
-function takeLegacy(key) {
-  const raw = read(key);
-  if (raw === null) return null;
-  remove(key);
+function parseLegacy(text) {
   try {
-    return JSON.parse(raw);
+    return JSON.parse(text);
   } catch (e) {
     return CORRUPT;
   }
@@ -163,9 +162,17 @@ function takeLegacy(key) {
 /**
  * Loads one snapshot and runs it through `normalize`, which returns the value
  * to hand back or null when the payload is stale or invalid. Anything that
- * doesn't normalize is deleted so the next load starts clean. A snapshot still
- * sitting in localStorage from before the move is adopted when the engine has
- * nothing, and written through so it's found there next time.
+ * doesn't normalize is deleted so the next load starts clean.
+ *
+ * When the engine in use is IndexedDB, a copy found in localStorage is always
+ * the NEWER one: this mode deletes it on every load and save of the key, so it
+ * can only be there because legacy mode (after a flag flip, or in another tab)
+ * or an older build wrote it since. It wins, is written through to IndexedDB,
+ * and is removed from localStorage only once that write has landed — a failed
+ * migration keeps the copy for the next load instead of losing it.
+ *
+ * A read that times out is "no snapshot this load", never corruption: nothing
+ * is deleted over it.
  *
  * @param {string} key
  * @param {function(Object): (any|null)} normalize
@@ -173,27 +180,40 @@ function takeLegacy(key) {
  */
 function loadSnapshot(key, normalize) {
   return serialize(key, async () => {
-    const engine = await pickEngine(ENGINE_PREFERENCE[key]);
+    const engine = await pickEngine(enginePreference());
     if (!engine) return null;
-    // When localStorage IS the engine in use, its copy is the live one.
-    const legacy = engine.name === 'local' ? null : takeLegacy(key);
+
+    if (engine.name !== 'local') {
+      const text = read(key);
+      if (text !== null) {
+        const legacy = parseLegacy(text);
+        const result = legacy === CORRUPT ? null : normalize(legacy);
+        if (result !== null) {
+          try {
+            await engine.set(key, legacy);
+            remove(key);
+          } catch (e) {
+            /* keep the localStorage copy — the next load retries */
+          }
+          return result;
+        }
+        remove(key); // corrupt or stale — nothing worth keeping
+      }
+    }
 
     let data;
     try {
       data = await engine.get(key);
     } catch (e) {
-      data = CORRUPT;
+      data = e && e.name === 'StorageTimeoutError' ? TIMED_OUT : CORRUPT;
     }
-    const fromLegacy = data === null && legacy !== null;
-    if (fromLegacy) data = legacy;
-    if (data === null) return null;
+    if (data === null || data === TIMED_OUT) return null;
 
     const result = data === CORRUPT ? null : normalize(data);
     if (result === null) {
-      if (!fromLegacy) await engine.del(key).catch(() => {});
+      await engine.del(key).catch(() => {});
       return null;
     }
-    if (fromLegacy) await engine.set(key, data).catch(() => {});
     return result;
   }).catch(() => null);
 }
@@ -201,7 +221,7 @@ function loadSnapshot(key, normalize) {
 /** Persists one snapshot. Resolves true once written, false on any failure. */
 function saveSnapshot(key, value) {
   return serialize(key, async () => {
-    const engine = await pickEngine(ENGINE_PREFERENCE[key]);
+    const engine = await pickEngine(enginePreference());
     if (!engine) return false;
     await engine.set(key, value);
     if (engine.name !== 'local') remove(key); // never leave a stale copy behind
@@ -209,12 +229,15 @@ function saveSnapshot(key, value) {
   }).catch(() => false);
 }
 
-/** Deletes one snapshot from its engine and from localStorage. */
+/**
+ * Deletes one snapshot from localStorage and, in idb mode, from IndexedDB.
+ * Legacy mode never touches IndexedDB, not even to delete.
+ */
 function removeSnapshot(key) {
   return serialize(key, async () => {
     remove(key);
-    const engine = await pickEngine(ENGINE_PREFERENCE[key]);
-    if (engine) await engine.del(key);
+    const engine = await pickEngine(enginePreference());
+    if (engine && engine.name !== 'local') await engine.del(key);
   }).catch(() => {});
 }
 

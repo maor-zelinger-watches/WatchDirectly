@@ -15,6 +15,7 @@
  */
 
 import { CONFIG } from './config.js';
+import { storageEngine } from './flags.js';
 import { state, isFilterActive, typeFilterActive, patchVideoEverywhere, epoch } from './state.js';
 import { api } from './api-client.js';
 import { isShort, mediaType, sortVideos, typeFilterVisible } from './feed.js';
@@ -88,6 +89,10 @@ function filterPaginationParked() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   console.info(`How You Watch frontend v${CONFIG.APP_VERSION}`);
+  // Which cache storage this load runs on, and whether a flag chose it — the
+  // first thing to check when a report involves stale or missing cached data.
+  const storage = storageEngine();
+  console.info(`storage engine: ${storage.engine} (${storage.source})`);
   const versionEl = document.getElementById('app-version');
   if (versionEl) versionEl.textContent = `v${CONFIG.APP_VERSION}`;
 
