@@ -160,6 +160,8 @@ test('before/after: a returning visitor', async ({ page }, testInfo) => {
   }
   m.backendFeedLatencyMs = await backendLatencyMs(page);
   const idx = await snapshotInfo(page, SNAPSHOT_KEYS.SEARCH_INDEX);
+  m.indexRows = await page.evaluate(async () => ((await import('/js/state.js')).state.searchIndex || []).length);
+  m.indexPersistedRows = (idx.idb || idx.cache || idx.local || {}).rows ?? 0;
   m.indexPersisted = !!(idx.local || idx.cache || idx.idb);
   m.indexStoredIn = idx.idb ? 'indexeddb' : idx.cache ? 'cache' : idx.local ? 'localStorage' : 'nowhere';
   m.localStorageChars = await page.evaluate(() => {

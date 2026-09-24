@@ -45,6 +45,8 @@ const metrics = [
     .map((k) => g.reduce((n, r) => n + (r[k] || 0), 0)).join(' / ')],
   ['cold first card (ms)', (g) => median(g.map((r) => r.coldFirstCardMs))],
   ['index build, cold (ms)', (g) => median(g.map((r) => r.indexBuildMs))],
+  ['index rows built (median)', (g) => median(g.map((r) => r.indexRows))],
+  ['index rows persisted (median)', (g) => median(g.map((r) => r.indexPersistedRows))],
   ['index persisted', (g) => `${g.filter((r) => r.indexPersisted).length}/${g.length} (${[...new Set(g.map((r) => r.indexStoredIn))].join(', ')})`],
   ['localStorage used (chars)', (g) => median(g.map((r) => r.localStorageChars))],
   ['warm feed first card (ms)', (g) => median(g.map((r) => r.warmFeedFirstCardMs))],
