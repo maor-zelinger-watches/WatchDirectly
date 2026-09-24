@@ -97,18 +97,16 @@ afterEach(async () => {
 const cacheEntry = (key) => cacheStorage.dump()[new URL(`/__wd_store__/${key}`, location.origin).href];
 
 describe('engine placement', () => {
-  it('prefers Cache Storage for page-shaped snapshots and IndexedDB for the index', () => {
-    expect(ENGINE_PREFERENCE[CACHE_KEYS.FEED][0]).toBe('cache');
-    expect(ENGINE_PREFERENCE[CACHE_KEYS.TOP][0]).toBe('cache');
-    expect(ENGINE_PREFERENCE[CACHE_KEYS.CHANNELS][0]).toBe('cache');
-    expect(ENGINE_PREFERENCE[CACHE_KEYS.SEARCH_INDEX][0]).toBe('idb');
-    // localStorage is always the last resort.
-    for (const pref of Object.values(ENGINE_PREFERENCE)) expect(pref.at(-1)).toBe('local');
+  it('prefers IndexedDB for every snapshot, then Cache Storage, then localStorage', () => {
+    for (const key of [CACHE_KEYS.FEED, CACHE_KEYS.TOP, CACHE_KEYS.CHANNELS, CACHE_KEYS.SEARCH_INDEX]) {
+      expect(ENGINE_PREFERENCE[key]).toEqual(['idb', 'cache', 'local']);
+    }
   });
 
-  it('writes the feed to Cache Storage and never touches localStorage', async () => {
+  it('writes the feed to IndexedDB and never touches localStorage or Cache Storage', async () => {
     await saveFeedCache(VIDEOS, 42);
-    expect(cacheEntry(CACHE_KEYS.FEED)).toMatchObject({ videos: VIDEOS, total: 42, version: CACHE_VERSION });
+    expect(await engines.idb.get(CACHE_KEYS.FEED)).toMatchObject({ videos: VIDEOS, total: 42, version: CACHE_VERSION });
+    expect(cacheEntry(CACHE_KEYS.FEED)).toBeUndefined();
     expect(localStorageMock.setItem).not.toHaveBeenCalled();
     expect(await loadFeedCache()).toEqual({ videos: VIDEOS, total: 42 });
   });
@@ -121,25 +119,38 @@ describe('engine placement', () => {
     expect(await loadSearchIndex()).toEqual(VIDEOS);
   });
 
-  it('round-trips the Top snapshot through Cache Storage', async () => {
+  it('round-trips the Top snapshot through IndexedDB', async () => {
     await saveTopCache(VIDEOS, 30, 'cur|1');
-    expect(cacheEntry(CACHE_KEYS.TOP)).toMatchObject({ total: 30, cursor: 'cur|1' });
+    expect(await engines.idb.get(CACHE_KEYS.TOP)).toMatchObject({ total: 30, cursor: 'cur|1' });
     expect(await loadTopCache()).toEqual({ videos: VIDEOS, total: 30, cursor: 'cur|1' });
+  });
+
+  it('uses Cache Storage when IndexedDB is missing', async () => {
+    delete globalThis.indexedDB;
+    await saveTopCache(VIDEOS, 30, '');
+    expect(cacheEntry(CACHE_KEYS.TOP)).toMatchObject({ total: 30 });
+    expect(await loadTopCache()).toEqual({ videos: VIDEOS, total: 30, cursor: '' });
   });
 });
 
 describe('fallback chain', () => {
-  it('falls back to IndexedDB when Cache Storage is missing (insecure context)', async () => {
-    delete globalThis.caches;
-    expect((await pickEngine(ENGINE_PREFERENCE[CACHE_KEYS.FEED])).name).toBe('idb');
+  it('falls back to Cache Storage when IndexedDB is missing', async () => {
+    delete globalThis.indexedDB;
+    expect((await pickEngine(ENGINE_PREFERENCE[CACHE_KEYS.FEED])).name).toBe('cache');
     await saveFeedCache(VIDEOS, 42);
-    expect(await engines.idb.get(CACHE_KEYS.FEED)).toMatchObject({ total: 42 });
+    expect(cacheEntry(CACHE_KEYS.FEED)).toMatchObject({ total: 42 });
     expect(await loadFeedCache()).toEqual({ videos: VIDEOS, total: 42 });
   });
 
-  it('falls back to IndexedDB when Cache Storage exists but refuses to open', async () => {
+  it('falls back to Cache Storage when IndexedDB exists but refuses to open', async () => {
+    globalThis.indexedDB = { open: () => { throw new DOMException('denied', 'InvalidStateError'); } };
+    expect((await pickEngine(ENGINE_PREFERENCE[CACHE_KEYS.FEED])).name).toBe('cache');
+  });
+
+  it('skips a Cache Storage that refuses to open (insecure context, private mode)', async () => {
+    delete globalThis.indexedDB;
     globalThis.caches = { open: () => Promise.reject(new DOMException('denied', 'SecurityError')) };
-    expect((await pickEngine(ENGINE_PREFERENCE[CACHE_KEYS.FEED])).name).toBe('idb');
+    expect((await pickEngine(ENGINE_PREFERENCE[CACHE_KEYS.FEED])).name).toBe('local');
   });
 
   it('falls back to localStorage when neither is available', async () => {
@@ -165,9 +176,9 @@ describe('one-time migration off localStorage', () => {
     lsStore[CACHE_KEYS.FEED] = JSON.stringify(envelope({ videos: VIDEOS, total: 42 }));
 
     expect(await loadFeedCache()).toEqual({ videos: VIDEOS, total: 42 });
-    expect(lsStore[CACHE_KEYS.FEED]).toBeUndefined();              // quota freed
-    expect(cacheEntry(CACHE_KEYS.FEED)).toMatchObject({ total: 42 }); // written through
-    expect(await loadFeedCache()).toEqual({ videos: VIDEOS, total: 42 }); // found there next time
+    expect(lsStore[CACHE_KEYS.FEED]).toBeUndefined();                                // quota freed
+    expect(await engines.idb.get(CACHE_KEYS.FEED)).toMatchObject({ total: 42 });     // written through
+    expect(await loadFeedCache()).toEqual({ videos: VIDEOS, total: 42 });            // found there next time
   });
 
   it('migrates the search index into IndexedDB', async () => {
@@ -188,14 +199,14 @@ describe('one-time migration off localStorage', () => {
     lsStore[CACHE_KEYS.FEED] = '{broken json!!!';
     expect(await loadFeedCache()).toBeNull();
     expect(lsStore[CACHE_KEYS.FEED]).toBeUndefined();
-    expect(cacheEntry(CACHE_KEYS.FEED)).toBeUndefined();
+    expect(await engines.idb.get(CACHE_KEYS.FEED)).toBeNull();
   });
 
   it('drops an expired legacy copy without adopting it', async () => {
     lsStore[CACHE_KEYS.FEED] = JSON.stringify(envelope({ videos: VIDEOS, total: 42 }, Date.now() - 25 * 3600e3));
     expect(await loadFeedCache()).toBeNull();
     expect(lsStore[CACHE_KEYS.FEED]).toBeUndefined();
-    expect(cacheEntry(CACHE_KEYS.FEED)).toBeUndefined();
+    expect(await engines.idb.get(CACHE_KEYS.FEED)).toBeNull();
   });
 
   it('prefers the engine copy over a leftover legacy one, and still frees localStorage', async () => {
@@ -214,6 +225,7 @@ describe('one-time migration off localStorage', () => {
 
 describe('per-key ordering', () => {
   it('lands fire-and-forget saves in call order even when the first write is slower', async () => {
+    delete globalThis.indexedDB; // run on Cache Storage, whose fake can stall a put
     let release;
     cacheStorage.putGate = new Promise((r) => { release = r; }); // stalls the FIRST put
 
@@ -244,12 +256,13 @@ describe('what gets persisted', () => {
 
   it('strips them from the feed snapshot too', async () => {
     await saveFeedCache([{ ...VIDEOS[0], _searchFields: { titleTokens: ['x'] } }], 1);
-    expect('_searchFields' in cacheEntry(CACHE_KEYS.FEED).videos[0]).toBe(false);
+    expect('_searchFields' in (await engines.idb.get(CACHE_KEYS.FEED)).videos[0]).toBe(false);
   });
 });
 
 describe('failure tolerance', () => {
   it('a failing write resolves false instead of rejecting', async () => {
+    delete globalThis.indexedDB; // exercise the Cache Storage engine's failure path
     cacheStorage.open = async () => ({
       match: async () => undefined,
       put: async () => { throw new DOMException('quota', 'QuotaExceededError'); },
@@ -262,6 +275,7 @@ describe('failure tolerance', () => {
   });
 
   it('an engine read that throws self-heals to absent', async () => {
+    delete globalThis.indexedDB;
     await saveFeedCache(VIDEOS, 42);
     const open = cacheStorage.open.bind(cacheStorage);
     cacheStorage.open = async (name) => {

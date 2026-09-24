@@ -12,8 +12,8 @@
  *   degrade to "no cache" (the app re-fetches), not a crash.
  *
  * Two tiers:
- * - Large snapshots live in IndexedDB or Cache Storage (storage.js), are
- *   ASYNC, and fall back to localStorage only where neither works:
+ * - Large snapshots live in IndexedDB (storage.js), are ASYNC, and fall back
+ *   to Cache Storage, then localStorage, only where IndexedDB won't open:
  *   - wd_feed_cache   — the feed the user scrolled {videos, total} (stale-while-revalidate)
  *   - wd_search_index — full catalog for search {videos} (stale-while-revalidate)
  *   - wd_top_cache    — Top This Week first-page snapshot {videos, total, cursor}
@@ -26,10 +26,12 @@
  *   - wd_filter_types — persisted content-type chip selection ([] = "All")
  * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.)
  *
- * Why the snapshots moved: localStorage is capped at ~5 MiB counted in UTF-16,
- * and the full search index alone had grown to about that. write() swallows
- * the quota error by design, so the index silently stopped persisting and
- * every session rebuilt it from ~40 requests.
+ * Why the snapshots moved: localStorage's per-origin cap varies by browser,
+ * and in WebKit (Safari's engine) the full search index — 3.4M characters on
+ * production in Sep 2026 — exceeded it. write() swallows the quota error by
+ * design, so the index silently never persisted there and every returning
+ * session re-walked the whole catalog (43 requests). IndexedDB stores it by
+ * structured clone, under a quota that's a share of the disk.
  */
 
 import { pickEngine } from './storage.js';
@@ -106,15 +108,20 @@ function isFresh(data) {
 // --- snapshot storage (IndexedDB / Cache Storage, async) --------------
 
 // Where each large snapshot lives, most preferred first. The first engine that
-// works in this browser wins (storage.js pickEngine). Page-shaped snapshots go
-// to Cache Storage; the multi-MB search index goes to IndexedDB, which stores it
-// by structured clone. localStorage is always last, so a browser with neither
-// behaves exactly as it did before the move.
+// works in this browser wins (storage.js pickEngine). IndexedDB for all four:
+// measured against production data (tests/perf-live) it read and wrote the
+// full search index faster than Cache Storage in both Chromium and WebKit, and
+// in WebKit under Playwright, Cache Storage writes were lost across a reload
+// (ephemeral profile) or never visible at all (persistent profile) while its
+// probe still succeeded. Cache Storage stays only as the fallback for a browser
+// that won't open IndexedDB; localStorage is always last, so a browser with
+// neither behaves exactly as it did before the move.
+const PREFERENCE = ['idb', 'cache', 'local'];
 export const ENGINE_PREFERENCE = {
-  [CACHE_KEYS.FEED]: ['cache', 'idb', 'local'],
-  [CACHE_KEYS.TOP]: ['cache', 'idb', 'local'],
-  [CACHE_KEYS.CHANNELS]: ['cache', 'idb', 'local'],
-  [CACHE_KEYS.SEARCH_INDEX]: ['idb', 'cache', 'local'],
+  [CACHE_KEYS.FEED]: PREFERENCE,
+  [CACHE_KEYS.TOP]: PREFERENCE,
+  [CACHE_KEYS.CHANNELS]: PREFERENCE,
+  [CACHE_KEYS.SEARCH_INDEX]: PREFERENCE,
 };
 
 // Per-key operation queue. Saves are fire-and-forget, so two in flight for the

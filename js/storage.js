@@ -10,11 +10,13 @@
  *           structured clone, and the quota is a share of the disk.
  *   cache — Cache Storage used as a key/value store, with NO service worker:
  *           each key is a synthetic same-origin Request whose value is a JSON
- *           Response. Same quota pool as IndexedDB.
- *   local — localStorage. Synchronous, and capped at ~5 MiB counted in UTF-16,
- *           which the full search index already brushes against. Kept only as
- *           the last-resort fallback, so no browser ends up worse off than
- *           before the move.
+ *           Response. Same quota pool as IndexedDB. Only a fallback: in WebKit
+ *           under Playwright its writes didn't survive a reload even though
+ *           caches.open() succeeded, so the probe can't vouch for it.
+ *   local — localStorage. Synchronous, with a per-origin cap of 5-10 MiB that
+ *           varies by browser: WebKit refused the full search index outright.
+ *           Kept only as the last-resort fallback, so no browser ends up worse
+ *           off than before the move.
  *
  * pickEngine(preference) probes each candidate once (memoized per page load)
  * and returns the first that actually works: Cache Storage exists only in a
