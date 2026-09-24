@@ -9,6 +9,7 @@
     "test:e2e": "playwright test --project=mobile-chrome --project=desktop-chrome",
     "test:perf": "playwright test --project=perf --workers=1",
     "test:smoke": "playwright test --project=smoke --workers=1",
+    "test:perf-live": "playwright test --config=playwright.perf-live.config.js",
     "test:all": "vitest run && npm run test:e2e && npm run test:smoke && npm run test:perf",
     "serve": "npx serve . -l 3000",
     "deploy:backend": "./scripts/deploy-backend.sh",
@@ -25,6 +26,7 @@
   "devDependencies": {
     "@google/clasp": "^3.3.0",
     "@playwright/test": "^1.59.1",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
     "serve": "^14.2.6",
     "vitest": "^4.1.5"

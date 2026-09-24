@@ -487,8 +487,10 @@ async function appendCards(videos) {
  */
 async function showCachedFeed() {
   // Validation and corruption handling live in cache.js — an invalid
-  // payload comes back as null and has already been cleared.
-  const cached = loadFeedCache();
+  // payload comes back as null and has already been cleared. The read is
+  // async (Cache Storage / IndexedDB); nothing paints or paginates the feed
+  // until boot's await on this resolves, so there's no race to guard here.
+  const cached = await loadFeedCache();
   if (!cached) return false;
 
   state.videos = cached.videos;
