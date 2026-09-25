@@ -566,10 +566,8 @@ describe('scheduleRefresh — the missing script.scriptapp scope is logged once,
   /** Loads the backend with a ScriptApp whose trigger calls throw `message`. */
   function loadThrowing(message) {
     return load([], {
-      // WARN, not DEBUG: log() resolves its threshold with
-      // `LOG_LEVELS[configLevel] || LOG_LEVELS.ERROR`, and LOG_LEVELS.DEBUG is
-      // 0 — falsy — so a DEBUG setting silently filters at ERROR instead. WARN
-      // lets both levels this suite asserts on through.
+      // WARN: the lowest level that still lets both levels this suite asserts
+      // on (WARN and ERROR) through, without DEBUG/INFO noise in the sheet.
       metaRows: [['key', 'value'], ['log_level', 'WARN']],
       scriptApp: { getProjectTriggers: () => { throw new Error(message); } },
     });

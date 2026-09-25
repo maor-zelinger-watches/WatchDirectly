@@ -711,6 +711,28 @@ that component's heading.
 
 ## Backend
 
+### 1.25.0 — 2026-09-25
+- **A channel added from the add-channel page has content immediately.**
+  `handleAddChannel` used to call `scheduleRefresh()` to crawl the new channel
+  "within minutes", but that path has never worked on this deployment:
+  installing a trigger needs the `script.scriptapp` OAuth scope, which the
+  ANONYMOUS web app deliberately doesn't carry (adding it 403'd the live
+  `/exec` — 1.14.3, reverted in 1.14.4). Every `ScriptApp` call threw, the add
+  path swallowed it, and a new channel sat empty until the 4-hour trigger. It
+  now crawls just that one feed inline: `fetchAllFeeds` / `crawlAllFeeds` take
+  an optional `feed_url` and skip every other channel. A single-feed crawl
+  shares the one-crawl-at-a-time marker, and leaves `last_fetch`, the crawl
+  resume index and retention pruning alone — whole-catalog bookkeeping that
+  belongs to the full crawl. The response gains `new_items`. If a full crawl
+  is already running, the row is still saved and the 4-hour cycle picks it up.
+- **`scheduleRefresh`'s missing-scope failure is logged once an hour, not once
+  per visitor.** `handleFeed` calls it on every request while the feed is
+  stale, so one stale window wrote one ERROR per request (dozens a minute).
+  The missing `script.scriptapp` scope is this deployment's permanent state,
+  so it's now reported as a single WARN per hour; it's matched on the scope
+  URL because the rest of the message arrives localized (Hebrew). Every other
+  `scheduleRefresh` failure still gets its own ERROR.
+
 ### 1.24.2 — 2026-09-24
 - **`log_level = DEBUG` no longer silences the logs it is supposed to open up.**
   `log()` resolved its threshold with `LOG_LEVELS[configLevel] ||
