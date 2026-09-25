@@ -16,7 +16,7 @@
 
 import { state, epoch } from './state.js';
 import { api } from './api-client.js';
-import { isSignedIn, ensureToken } from './auth.js';
+import { isSignedIn, getToken, isTokenExpired, refreshToken, ensureToken } from './auth.js';
 import { loadBookmarkedIds, saveBookmarkedIds, clearBookmarkedIds } from './cache.js';
 import { showToast } from './toast.js';
 import { cssEscape } from './utils.js';
@@ -90,6 +90,17 @@ export async function toggleBookmark(videoId) {
     saveBookmarksToStorage();
     onBookmarksChanged();
   } catch (error) {
+    if (error.resultLost && isSignedIn()) {
+      // The toggle ran server-side; only Google's result hop failed (api.js
+      // `resultLost`). Keep the optimistic flip and confirm it from the
+      // server's own list rather than re-sending (double toggle) or rolling
+      // back (the opposite of what the server now holds).
+      console.warn('Bookmark result lost in transit — reconciling from bootstrap');
+      saveBookmarksToStorage();
+      onBookmarksChanged();
+      loadMyBookmarks().catch(() => { /* best-effort; the next sign-in bootstrap reconciles */ });
+      return;
+    }
     console.error('Failed to bookmark:', error);
     // Rollback — unless the failure signed the user out, in which case
     // clearBookmarkMarkings already put the UI in the right state.
@@ -107,6 +118,20 @@ export async function toggleBookmark(videoId) {
     // Release the guard on every path so the next genuine click is honored.
     bookmarksInFlight.delete(videoId);
   }
+}
+
+/**
+ * Re-fetches the signed-in user's bookmarks and marks their buttons. There is
+ * no standalone myBookmarks action — the batched bootstrap request is the
+ * only server source — so this rides that (its votes/stars payload is ignored).
+ * Used to confirm a toggle whose result was lost in transit.
+ */
+export async function loadMyBookmarks() {
+  if (!isSignedIn()) return;
+  let token = getToken();
+  if (isTokenExpired()) token = await refreshToken();
+  if (!token) return; // can't reconcile right now; the cache stays best-effort
+  await reconcileMyBookmarks(api.fetchBootstrap(token));
 }
 
 /**

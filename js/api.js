@@ -49,13 +49,119 @@ async function signRequest(action) {
   }
 }
 
+// Backoff between attempts at a request that failed transiently (see
+// requestOnce). Two retries: the observed failures are single-request blips
+// inside otherwise healthy windows, so the second attempt almost always lands.
+const DEFAULT_RETRY_DELAYS_MS = [400, 1200];
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** True for the googleusercontent "echo" URL /exec redirects to with its result. */
+function isEchoUrl(url) {
+  return typeof url === 'string' && url.includes('/macros/echo');
+}
+
+/**
+ * Reads a response body as parsed JSON, or null when it isn't JSON at all (the
+ * HTML error page Google serves instead of our result). Real Responses expose
+ * text(); a bare `{ json }` stub (tests) falls back to json().
+ */
+async function readJsonBody(response) {
+  try {
+    if (typeof response.text === 'function') {
+      const text = await response.text();
+      return text ? JSON.parse(text) : null;
+    }
+    if (typeof response.json === 'function') return await response.json();
+  } catch (e) {
+    /* not JSON */
+  }
+  return null;
+}
+
 /**
  * Creates an API client bound to a specific Apps Script URL.
- * 
+ *
  * @param {string} baseUrl - The deployed Google Apps Script web app URL
+ * @param {{retryDelaysMs?: number[]}} [options] - Backoff schedule for transient
+ *   failures (one entry per retry). Tests pass zeros; production uses the default.
  * @returns {Object} API client with fetchFeed, fetchComments, postComment methods
  */
-export function createApiClient(baseUrl) {
+export function createApiClient(baseUrl, options = {}) {
+  const retryDelaysMs = Array.isArray(options.retryDelaysMs)
+    ? options.retryDelaysMs
+    : DEFAULT_RETRY_DELAYS_MS;
+
+  /**
+   * One attempt at a request, classifying every failure.
+   *
+   * An Apps Script web app answers through a redirect: /exec runs the script,
+   * then 302s to a one-shot googleusercontent "echo" URL that serves the result.
+   * That second hop intermittently fails on Google's side — a 404 "page not
+   * found" HTML page instead of our JSON, in bursts, with the script itself
+   * healthy — and occasionally /exec answers a 302 that carries the JSON body
+   * and no Location. Surfaced to users as "API error: 404" on feed pages and
+   * votes. So:
+   *   - Any body that parses as a JSON result with a `status` IS the result,
+   *     whatever the HTTP status (the Location-less 302 case).
+   *   - Otherwise the failure is `transient` (safe to retry) when the request
+   *     is idempotent, or when it never reached the script — the response came
+   *     straight from /exec, not the echo hop, so nothing executed.
+   *   - A non-idempotent request whose failure came from the echo hop DID
+   *     execute; only its result was lost. That is `resultLost`, never retried
+   *     (a toggle would double-fire) — callers reconcile from the server instead.
+   *
+   * @param {string} url
+   * @param {RequestInit} init
+   * @param {boolean} idempotent - GETs; a POST that ran twice would double-apply
+   */
+  async function requestOnce(url, init, idempotent) {
+    let response;
+    try {
+      response = await fetch(url, init);
+    } catch (error) {
+      // No response at all. A GET is safe to repeat; a POST may or may not
+      // have run, so it keeps the existing rollback path (not retried).
+      if (idempotent) error.transient = true;
+      throw error;
+    }
+
+    const data = await readJsonBody(response);
+    if (data && typeof data === 'object' && 'status' in data) {
+      // Apps Script returns 200 even for app-level errors
+      if (data.status === 'error') {
+        throw new Error(data.message || 'Unknown error');
+      }
+      return data;
+    }
+
+    const error = new Error(response.ok
+      ? 'API error: unexpected response'
+      : `API error: ${response.status} ${response.statusText || ''}`.trim());
+    error.status = response.status;
+    if (idempotent || !isEchoUrl(response.url)) error.transient = true;
+    else error.resultLost = true;
+    throw error;
+  }
+
+  /**
+   * Runs requestOnce, retrying transient failures on the backoff schedule.
+   * Warns (not console.error) per retry so the error reporter isn't spammed
+   * by blips that the next attempt absorbs.
+   */
+  async function requestWithRetry(url, init, idempotent) {
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await requestOnce(url, init, idempotent);
+      } catch (error) {
+        if (!error.transient || attempt >= retryDelaysMs.length) throw error;
+        const delay = retryDelaysMs[attempt++];
+        console.warn(`Transient API failure (${error.message}) — retry ${attempt}/${retryDelaysMs.length} in ${delay}ms`);
+        await sleep(delay);
+      }
+    }
+  }
 
   /**
    * Makes a GET request to the Apps Script backend.
@@ -64,23 +170,10 @@ export function createApiClient(baseUrl) {
    */
   async function get(params) {
     const url = `${baseUrl}?${params}`;
-    const response = await fetch(url, {
+    return requestWithRetry(url, {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
-    });
-
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-
-    // Apps Script returns 200 even for app-level errors
-    if (data.status === 'error') {
-      throw new Error(data.message || 'Unknown error');
-    }
-
-    return data;
+    }, true);
   }
 
   /**
@@ -96,27 +189,14 @@ export function createApiClient(baseUrl) {
     const signed = await signRequest(body && body.action);
     const signedBody = signed ? { ...body, ts: signed.ts, sig: signed.sig } : body;
 
-    const response = await fetch(baseUrl, {
+    return requestWithRetry(baseUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'text/plain;charset=utf-8',
         'Accept': 'application/json',
       },
       body: JSON.stringify(signedBody),
-    });
-
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-
-    // Apps Script returns 200 even for app-level errors
-    if (data.status === 'error') {
-      throw new Error(data.message || 'Unknown error');
-    }
-
-    return data;
+    }, false);
   }
 
   return {

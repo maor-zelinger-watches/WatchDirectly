@@ -79,6 +79,18 @@ export async function toggleVote(videoId) {
     // The new count may move this video within the Top This Week ranking.
     onVotesChanged();
   } catch (error) {
+    if (error.resultLost && isSignedIn()) {
+      // The toggle reached the server and ran; only Google's result hop failed
+      // (api.js `resultLost`). Re-sending would toggle it back, and rolling back
+      // would show the opposite of what the server now holds. Keep the
+      // optimistic flip — the likeliest truth — persist its count, and confirm
+      // the voted flag from the server's own list in the background.
+      console.warn('Vote result lost in transit — reconciling from myVotes');
+      patchVideoEverywhere(videoId, { vote_count: optimisticCount });
+      onVotesChanged();
+      loadMyVotes().catch(() => { /* best-effort; the next sign-in bootstrap reconciles */ });
+      return;
+    }
     console.error('Failed to vote:', error);
     // Rollback — unless the failure signed the user out, in which case
     // clearVoteMarkings already put the UI in the right state.

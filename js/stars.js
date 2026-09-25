@@ -82,6 +82,17 @@ export async function toggleStar(channel) {
     saveStarsToStorage();
     onStarsChanged();
   } catch (error) {
+    if (error.resultLost && isSignedIn()) {
+      // The toggle ran server-side; only Google's result hop failed (api.js
+      // `resultLost`). Keep the optimistic flip and confirm it from the
+      // server's own list rather than re-sending (double toggle) or rolling
+      // back (the opposite of what the server now holds).
+      console.warn('Star result lost in transit — reconciling from myStars');
+      saveStarsToStorage();
+      onStarsChanged();
+      loadMyStars().catch(() => { /* best-effort; the next sign-in bootstrap reconciles */ });
+      return;
+    }
     console.error('Failed to star:', error);
     // Rollback — unless the failure signed the user out, in which case
     // clearStarMarkings already put the UI in the right state.
