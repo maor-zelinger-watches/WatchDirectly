@@ -21,6 +21,44 @@ that component's heading.
 
 ## Frontend
 
+### 1.29.0 — 2026-09-25
+- **Transient backend failures are retried instead of surfacing as "API error:
+  404".** `/exec` answers with a 302 to a one-shot googleusercontent "echo" URL,
+  and that hop intermittently returns a 404 page instead of the JSON — in
+  bursts, with the script itself healthy (reproduced against production
+  2026-09-23; 4 of ~20 requests in one burst). `api.js` now treats any body that
+  parses as a JSON result as the result, whatever the HTTP status; retries an
+  idempotent GET, or a POST that never reached the script, on
+  `CONFIG.API_RETRY_DELAYS_MS` (400 ms, 1.2 s); and marks a POST that failed
+  *at the echo hop* — so it did execute — as `resultLost`, never resending it
+  (a toggle would double-fire). Votes, stars and bookmarks keep their optimistic
+  flip on `resultLost` and confirm it from the server's own list
+  (myVotes / myStars / bootstrap) instead of rolling back with a toast.
+- **IndexedDB storage for the cache snapshots, behind a per-browser flag —
+  shipped OFF.** The feed, search index, Top This Week and channel snapshots can
+  now live in IndexedDB instead of localStorage, chosen per browser by
+  `localStorage.wd_storage_engine` (`idb` | `legacy`), or once via
+  `?storage=idb|legacy|default` (applied, then removed from the URL — it works
+  on iPhones, which have no devtools). The default is
+  `CONFIG.STORAGE_ENGINE_DEFAULT = 'legacy'`, so nobody changes storage with
+  this release; the boot log prints `storage engine: <engine> (<flag|default>)`.
+  Why it exists: Safari counts localStorage at 2 bytes per character once any
+  character is outside Latin-1 (production titles have em dashes and curly
+  quotes), halving its cap to ~2.6M characters — and the full search index
+  sits right around that. When it doesn't fit, the quota error is swallowed,
+  and every returning visitor's search re-walks the whole catalog (measured on
+  WebKit against production: 43 requests, ~36 s, vs 1 request / ~170 ms from
+  IndexedDB). `legacy` never opens IndexedDB, so it is a safe kill switch; in
+  `idb` mode every storage call is time-bounded, so an IndexedDB that never
+  answers (a known iOS failure) costs about a second and falls back to
+  localStorage instead of stalling boot. Rolling it out = flipping the default.
+- **What changes at the default (`legacy`), even with the flag off:** cache
+  snapshot reads and writes are now async, queued per key so they always land
+  in call order; the search index is persisted without its per-row token memo
+  (`_searchFields`), which roughly doubled it — that alone brings today's index
+  under Safari's cap, with ~10% headroom; and opening Top This Week and then
+  leaving before its snapshot loads no longer clears the tab you moved to.
+
 ### 1.28.2 — 2026-09-22
 - **Header badge reads "Beta" instead of "Alpha."** The `header__logo-icon`
   label next to the site title, on every page (home, add-channel, privacy,
@@ -1336,6 +1374,16 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.7 — 2026-09-25
+- **Storage test tooling.** `npm run test:storage:webkit` runs the
+  storage-engine flag's e2e and perf specs on WebKit (Safari's engine) via a new
+  `webkit-storage` Playwright project — explicit only; CI installs Chromium
+  alone, so no CI job or deploy gate runs it. `npm run test:perf-live`
+  (`playwright.perf-live.config.js`) serves a checkout against the PRODUCTION
+  backend for before/after storage measurements, with `PERF_LIVE_STORAGE=idb|legacy`
+  to measure one checkout in both modes; it's outside every gate too.
+  `fake-indexeddb` is a new devDependency for the storage unit tests.
 
 ### 1.2.6 — 2026-09-24
 - **`deploy-backend.sh` can be run from a git worktree again.** The success-hash
