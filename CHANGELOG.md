@@ -711,6 +711,22 @@ that component's heading.
 
 ## Backend
 
+### 1.24.2 — 2026-09-24
+- **`log_level = DEBUG` no longer silences the logs it is supposed to open up.**
+  `log()` resolved its threshold with `LOG_LEVELS[configLevel] ||
+  LOG_LEVELS.ERROR`, and `LOG_LEVELS.DEBUG` is `0` — falsy — so a Meta
+  `log_level` of `DEBUG` fell straight through to the ERROR fallback. Setting
+  the *most verbose* level wrote no DEBUG and no INFO line at all, which made
+  every `log('DEBUG', ...)` call in the crawl dead code in exactly the
+  configuration meant to surface it. The threshold is now resolved on the key's
+  presence (`hasOwnProperty`), so DEBUG means DEBUG; an unset or unrecognized
+  `log_level` still falls back to ERROR-only. WARN and ERROR were never
+  affected, so 1.24.1's "set `log_level` to `WARN` during the observe window"
+  vote-trust rollout step behaved as documented — it was only the DEBUG rung
+  that was unreachable. Covered by `tests/unit/backend/log_level.test.js`
+  against the real `Code.gs`: DEBUG writes all four levels, WARN drops INFO but
+  writes WARN+ERROR, and unset/garbage stays ERROR-only.
+
 ### 1.24.1 — 2026-09-23
 - **Vote-trust rollout fixes (found investigating an upvote report).** Three
   defects in 1.24.0's rollout, none in the counting logic itself:
@@ -1298,6 +1314,20 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.6 — 2026-09-24
+- **`deploy-backend.sh` can be run from a git worktree again.** The success-hash
+  path was the literal `.git/backend-deploy-hash`, but inside a worktree `.git`
+  is a *file*, not a directory — so the final `echo … > "$HASH_FILE"` died with
+  "not a directory" under `set -e`. That happens *after* prod has been pushed,
+  deployed and health-checked green, so a genuinely successful deploy exited
+  non-zero and never printed its `✅` line: indistinguishable from a failure, and
+  an invitation to re-run a deploy that had already landed. The path now resolves
+  via `git rev-parse --git-common-dir`, which is a real directory in both a
+  worktree and a normal checkout, and keeps the hash repo-global — what is live
+  in prod is a property of the project, not of whichever worktree shipped it.
+  Found deploying Backend 1.24.2 from a worktree, which is where this project's
+  work happens.
 
 ### 1.2.5 — 2026-09-23
 - **The backend deploy gate now health-checks the POST pipeline too.** Every

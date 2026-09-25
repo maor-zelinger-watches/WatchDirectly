@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.24.1';
+const VERSION = '1.24.2';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -5396,8 +5396,13 @@ function getLogLevel() {
 
 function log(level, source, message) {
   var configLevel = getLogLevel();
-  var levelValue = LOG_LEVELS[level] || 0;
-  var configValue = LOG_LEVELS[configLevel] || LOG_LEVELS.ERROR;
+  // Presence, not truthiness: LOG_LEVELS.DEBUG is 0, so `||` fallbacks here
+  // would read a configured DEBUG as "unset" and filter at ERROR instead,
+  // silently dropping every DEBUG/INFO line in the one configuration meant
+  // to surface them. An unset or unrecognized level still falls back:
+  // config → ERROR-only, and an unknown `level` argument → most verbose.
+  var levelValue = LOG_LEVELS.hasOwnProperty(level) ? LOG_LEVELS[level] : 0;
+  var configValue = LOG_LEVELS.hasOwnProperty(configLevel) ? LOG_LEVELS[configLevel] : LOG_LEVELS.ERROR;
 
   if (levelValue < configValue) return;
 

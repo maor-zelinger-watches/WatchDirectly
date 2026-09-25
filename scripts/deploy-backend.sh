@@ -17,7 +17,7 @@
 #      project's pushed HEAD manifest, so it can't clear a scope-re-auth state.)
 #
 # Idempotent: skips instantly when apps-script/ content is unchanged since the
-# last successful deploy (hash under .git/). FORCE_DEPLOY=1 bypasses the skip.
+# last successful deploy (hash under the common git dir). FORCE_DEPLOY=1 bypasses it.
 # ALLOW_SCOPE_CHANGE=1 overrides layer A once you've authorized the scope by hand.
 #
 # This is the ONLY backend-deploy path; the deploy skill invokes it explicitly,
@@ -29,7 +29,12 @@ set -euo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)"
 
 CLASP_DIR="apps-script"
-HASH_FILE=".git/backend-deploy-hash"
+# The COMMON git dir, not ".git": in a git worktree .git is a *file*, so the
+# literal path made the final success-hash write fail with "not a directory"
+# — after prod was already deployed and health-checked green, so the run
+# exited non-zero with no ✅ and looked like a failed deploy. --git-common-dir
+# also keeps the hash repo-global (what is live in prod is not per-worktree).
+HASH_FILE="$(git rev-parse --git-common-dir 2>/dev/null || echo .git)/backend-deploy-hash"
 
 # Staging (dev) project: scriptId in apps-script/.clasp.staging.json (clasp -P).
 # STAGING_DEPLOYMENT_ID is its stable web-app deployment; find it with:
