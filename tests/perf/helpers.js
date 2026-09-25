@@ -16,7 +16,25 @@
  * Budgets are deliberately generous relative to a warm local run (they must
  * pass on a loaded CI box too) while still being far below the "feels laggy"
  * threshold they guard.
+ *
+ * How a budget is expressed: ONLY as the timeout of a native, retrying
+ * assertion — never a Date.now() stopwatch. But not as the timeout of a
+ * locator assertion (`expect(locator).toBeVisible({ timeout: N })`) either:
+ * those re-check on a backoff (~0, 100, 350, 850, 1850, 2850 ms…), not
+ * continuously, and fail at the timeout without a final check — so the real
+ * budget is the last check BEFORE N. Measured (Playwright 1.59, Chromium,
+ * 2026-09-25): an element appearing at 800 ms passes a 1500 ms toBeVisible,
+ * but one appearing at 1000, 1200 or 1400 ms FAILS it. A "1500 ms" budget
+ * was really ~850, "600" ~350, "2000" ~1850 — stricter than written, and
+ * flaky near the edge. The expect*Within helpers below are expect.poll with a
+ * 25 ms interval: still a native assertion whose timeout IS the budget, just
+ * without the dead zone, so the number in the test is the number enforced.
+ * (toPass has the same backoff — pass `intervals: BUDGET_INTERVALS` to it.)
+ * Setup waits (`timeout: 10000` "page loaded" gates) aren't budgets and stay
+ * plain locator assertions.
  */
+
+import { expect } from '@playwright/test';
 
 // The tuning knobs the tests reason about, sourced from the single source of
 // truth so tuning a knob in js/config.js can't leave perf asserting stale values.
@@ -29,6 +47,49 @@ export const SEARCH_CHUNK_SIZE = CONFIG.SEARCH_CHUNK_SIZE;
 export const SEARCH_RENDER_LIMIT = CONFIG.SEARCH_RENDER_LIMIT;
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Re-check interval for latency budgets — fine enough that the budget is the timeout. */
+export const BUDGET_INTERVALS = [25];
+
+const within = (ms, what) => ({ timeout: ms, intervals: BUDGET_INTERVALS, message: `${what} within ${ms}ms` });
+
+// Non-waiting reads of a single element (null unless exactly one matches, the
+// same strictness as the locator assertions these replace), so each poll is
+// one quick sample rather than an auto-wait that could outlive the budget.
+const classOf = (locator) =>
+  locator.evaluateAll((els) => (els.length === 1 ? els[0].getAttribute('class') || '' : null));
+const textOf = (locator) =>
+  locator.evaluateAll((els) => (els.length === 1 ? els[0].textContent.replace(/\s+/g, ' ').trim() : null));
+
+/** Budget: `locator` is visible within `ms` (replaces toBeVisible({ timeout })). */
+export async function expectVisibleWithin(locator, ms) {
+  await expect.poll(() => locator.isVisible(), within(ms, 'visible')).toBe(true);
+}
+
+/** Budget: `locator` has a class matching `re` within `ms` (replaces toHaveClass({ timeout })). */
+export async function expectClassWithin(locator, re, ms) {
+  await expect.poll(() => classOf(locator), within(ms, `class ${re}`)).toMatch(re);
+}
+
+/** Budget: `locator` no longer has a class matching `re` within `ms` (replaces not.toHaveClass). */
+export async function expectNoClassWithin(locator, re, ms) {
+  await expect
+    .poll(async () => {
+      const cls = await classOf(locator);
+      return cls !== null && !re.test(cls);
+    }, within(ms, `no class ${re}`))
+    .toBe(true);
+}
+
+/** Budget: `locator` matches exactly `n` elements within `ms` (replaces toHaveCount({ timeout })). */
+export async function expectCountWithin(locator, n, ms) {
+  await expect.poll(() => locator.count(), within(ms, `count ${n}`)).toBe(n);
+}
+
+/** Budget: `locator`'s whitespace-normalized text is `text` within `ms` (replaces toHaveText({ timeout })). */
+export async function expectTextWithin(locator, text, ms) {
+  await expect.poll(() => textOf(locator), within(ms, `text "${text}"`)).toBe(text);
+}
 
 /**
  * Builds a deterministic catalog. `typeFor(i)` returns 'video' | 'article' |

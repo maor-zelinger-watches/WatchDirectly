@@ -10,7 +10,14 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { installMocks, makeItems, sleep } from './helpers.js';
+import {
+  installMocks,
+  makeItems,
+  sleep,
+  expectVisibleWithin,
+  expectClassWithin,
+  expectNoClassWithin,
+} from './helpers.js';
 
 const tab = (page, label) => page.locator('.feed-tab', { hasText: label });
 
@@ -26,14 +33,14 @@ test.describe('PERF · navigation', () => {
 
     // Latest -> Top must settle within budget (timeout IS the budget).
     await tab(page, 'Top This Week').click();
-    await expect(tab(page, 'Top This Week')).toHaveClass(/feed-tab--active/, { timeout: 2000 });
-    await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 2000 });
+    await expectClassWithin(tab(page, 'Top This Week'), /feed-tab--active/, 2000);
+    await expectVisibleWithin(page.locator('.media-card').first(), 2000);
     expect(control.topRequests).toBe(1); // fetched once
 
     // Returning to Latest comes from memory — fast, and scrolled back to top.
     await tab(page, 'Latest').click();
-    await expect(tab(page, 'Latest')).toHaveClass(/feed-tab--active/, { timeout: 1000 });
-    await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 1000 });
+    await expectClassWithin(tab(page, 'Latest'), /feed-tab--active/, 1000);
+    await expectVisibleWithin(page.locator('.media-card').first(), 1000);
     expect(control.topRequests).toBe(1); // Top not refetched on return
     const scrollY = await page.evaluate(() => window.scrollY);
     expect(scrollY).toBeLessThan(50);
@@ -56,8 +63,8 @@ test.describe('PERF · navigation', () => {
 
     // Enter fullscreen within budget (timeout IS the budget).
     await target.locator('.media-card__expand').click();
-    await expect(page.locator('body')).toHaveClass(/fullscreen-mode/, { timeout: 600 });
-    await expect(target).toHaveClass(/media-card--fullscreen/, { timeout: 600 });
+    await expectClassWithin(page.locator('body'), /fullscreen-mode/, 600);
+    await expectClassWithin(target, /media-card--fullscreen/, 600);
 
     // Fullscreen force-loads the embed so the video is ready immediately.
     // (Scoped to the embed — the fullscreen comments' auth prompt can inject
@@ -66,7 +73,7 @@ test.describe('PERF · navigation', () => {
 
     // Exit fullscreen within budget (timeout IS the budget).
     await page.keyboard.press('Escape');
-    await expect(page.locator('body')).not.toHaveClass(/fullscreen-mode/, { timeout: 500 });
+    await expectNoClassWithin(page.locator('body'), /fullscreen-mode/, 500);
 
     // Re-anchored to the same card (within a small tolerance).
     const topAfter = await target.evaluate((el) => el.getBoundingClientRect().top);
