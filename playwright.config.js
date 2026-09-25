@@ -72,6 +72,19 @@ export default defineConfig({
       use: { browserName: 'chromium', video: 'retain-on-failure' },
     },
     {
+      // The storage-engine flag's e2e + perf specs on WebKit — Safari's engine,
+      // where localStorage's cap bites first (it halves for non-Latin-1 text).
+      // Explicit only: npm run test:storage:webkit. CI installs Chromium alone,
+      // so no CI job or deploy gate runs this project.
+      name: 'webkit-storage',
+      testMatch: ['e2e/storage_flag.spec.js', 'perf/storage.perf.spec.js'],
+      retries: 0,
+      use: {
+        browserName: 'webkit',
+        viewport: { width: 1280, height: 720 },
+      },
+    },
+    {
       // Performance suite — desktop viewport, run serially (npm run test:perf).
       // Holds to the same 30s/test and 5s/action standards as e2e: if an
       // interaction can't act within 5s, that's a finding, not a config gap.

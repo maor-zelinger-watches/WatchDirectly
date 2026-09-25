@@ -56,6 +56,13 @@ export const CONFIG = {
                               // pulls — a near-empty type must not fetch the
                               // whole catalog in one burst; scrolling (or the
                               // next chip click) continues from where it left off
+  STORAGE_ENGINE_DEFAULT: 'legacy', // which engine persists the large cache
+                              // snapshots when a browser has no explicit
+                              // wd_storage_engine flag (js/flags.js):
+                              // 'legacy' = localStorage (the proven path),
+                              // 'idb' = IndexedDB. Rolling IndexedDB out to
+                              // everyone is flipping this one value; browsers
+                              // that set the flag explicitly keep their choice
   FILTER_ZERO_YIELD_MAX_PAGES: 5, // consecutive fetched pages that add NO card
                               // the active content-type chip leaves visible
                               // before the sentinel-retrigger parks. The chips

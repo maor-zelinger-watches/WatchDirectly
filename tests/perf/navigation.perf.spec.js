@@ -27,8 +27,12 @@ test.describe('PERF · navigation', () => {
     // Latest -> Top must settle within budget (timeout IS the budget).
     await tab(page, 'Top This Week').click();
     await expect(tab(page, 'Top This Week')).toHaveClass(/feed-tab--active/, { timeout: 2000 });
+    // The Top fetch is issued after the (async) snapshot read misses, not
+    // inside the click handler — and Latest's cards stay mounted until Top
+    // renders, so a visible card alone doesn't show Top settled. Wait for the
+    // fetch itself, inside the same budget.
+    await expect.poll(() => control.topRequests, { timeout: 2000 }).toBe(1); // fetched once
     await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 2000 });
-    expect(control.topRequests).toBe(1); // fetched once
 
     // Returning to Latest comes from memory — fast, and scrolled back to top.
     await tab(page, 'Latest').click();
