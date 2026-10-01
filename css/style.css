@@ -1648,6 +1648,61 @@ body.fullscreen-mode {
 }
 
 /* ============================================================
+   COOKIE CONSENT BANNER (js/analytics.js)
+   ============================================================ */
+
+/* Sits just above the fixed footer, non-modal so the feed stays usable while
+   undecided. Below the fullscreen overlay (300) so it never covers playback.
+   Reject and Accept are the same size, side by side — refusing is as easy as
+   accepting. */
+.cookie-banner {
+  position: fixed;
+  left: var(--sp-4);
+  right: var(--sp-4);
+  bottom: calc(var(--footer-height) + var(--sp-3));
+  z-index: 200;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3) var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+}
+
+.cookie-banner[hidden] {
+  display: none;
+}
+
+.cookie-banner__text {
+  flex: 1 1 280px;
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--text-secondary);
+}
+
+.cookie-banner__link {
+  color: var(--text-link);
+  white-space: nowrap;
+}
+
+.cookie-banner__actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+.cookie-banner__actions .btn {
+  min-width: 88px;
+  min-height: 36px;
+}
+
+/* ============================================================
    FEED CONTROLS
    ============================================================ */
 

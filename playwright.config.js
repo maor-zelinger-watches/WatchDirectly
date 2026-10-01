@@ -30,6 +30,17 @@ export default defineConfig({
 
   use: {
     baseURL: 'http://localhost:3099',
+    // Every context starts with the cookie banner already answered, so the
+    // fixed banner never sits over cards/buttons the specs click. The banner
+    // itself is covered by tests/unit/analytics.test.js and
+    // tests/e2e/cookie_banner.spec.js (which opts back out of this).
+    storageState: {
+      cookies: [],
+      origins: [{
+        origin: 'http://localhost:3099',
+        localStorage: [{ name: 'wd_analytics_consent', value: 'denied' }],
+      }],
+    },
     viewport: { width: 375, height: 812 }, // iPhone X — mobile-first
     actionTimeout: 5000,
     // Diagnostics kept cheap: full artifacts only when a test actually fails.
