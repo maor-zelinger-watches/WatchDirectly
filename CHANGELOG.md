@@ -21,6 +21,16 @@ that component's heading.
 
 ## Frontend
 
+### 1.30.1 — 2026-10-01
+- **Footer fits on phones again.** 1.30.0's extra "Cookies" link pushed the
+  footer row (three links + "© 2026 How You Watch" + version badge) past the
+  width of most phones. The copyright was ellipsized at every width up to
+  375px on the feed, and the nav row overflowed at 320px. Under 480px the
+  footer now uses tighter padding and gaps, so the full row fits from 375px up.
+  At 360px and below, the version badge hides (it's still logged to the
+  console at boot) rather than cutting the copyright. Checked at
+  320/340/360/375/390/414/480/768/1280px on the feed, privacy and terms pages.
+
 ### 1.30.0 — 2026-10-01
 - **Google Analytics (GA4, `G-LNXRS74XZ3`), opt-in behind a cookie consent
   banner.** Uses Google Consent Mode v2 in "basic" mode: every storage type
