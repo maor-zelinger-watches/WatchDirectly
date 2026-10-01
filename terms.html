@@ -6,8 +6,8 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' https://accounts.google.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://accounts.google.com https://www.youtube-nocookie.com https://www.youtube.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com https://oauth2.googleapis.com https://www.googletagmanager.com https://*.google-analytics.com https://*.analytics.google.com">
   <meta name="referrer" content="strict-origin-when-cross-origin">
 
-  <!-- Google Analytics (GA4). Setup lives in js/analytics.js — no inline script under the CSP. -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-LNXRS74XZ3"></script>
+  <!-- Google Analytics (GA4), opt-in: js/analytics.js shows the cookie banner and
+       loads gtag.js only after Accept. External file — no inline script under the CSP. -->
   <script src="js/analytics.js"></script>
   <title>Terms of Use — How You Watch</title>
   <meta name="description" content="Terms of Use for How You Watch, a curated watch content feed.">
@@ -88,6 +88,7 @@
       <nav class="footer__nav" id="footer-nav">
         <a href="terms.html" class="footer__nav-link footer__nav-link--active">Terms</a>
         <a href="privacy.html" class="footer__nav-link">Privacy</a>
+        <a href="/privacy.html#cookies" class="footer__nav-link" data-cookie-settings>Cookies</a>
       </nav>
       <div class="footer__meta">
         <span class="footer__copyright">© <span id="footer-year">2026</span> How You Watch</span>
