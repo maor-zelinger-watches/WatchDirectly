@@ -21,6 +21,26 @@ that component's heading.
 
 ## Frontend
 
+### 1.30.0 — 2026-10-01
+- **Google Analytics (GA4, `G-LNXRS74XZ3`), opt-in behind a cookie consent
+  banner.** Uses Google Consent Mode v2 in "basic" mode: every storage type
+  defaults to denied, and `gtag.js` is only injected after the visitor clicks
+  Accept, so nothing is requested from Google and no `_ga` cookie is set
+  before that. Reject and Accept are equal-size, side by side. The choice is
+  kept in `localStorage` (`wd_analytics_consent`), and a new "Cookies" footer
+  link on every public page reopens the banner. Withdrawing consent deletes the
+  `_ga` cookies. Setup lives in `js/analytics.js` rather than Google's inline
+  snippet, so the strict CSP (no `'unsafe-inline'`) holds. The CSP allowlists
+  `www.googletagmanager.com` plus the `*.google-analytics.com` /
+  `*.analytics.google.com` beacon hosts. Loaded on index, privacy, terms and
+  404; not on the operator-only add-channel page.
+- **Privacy policy updated.** It used to promise no analytics and no cookies.
+  It now describes the opt-in analytics, how to change the choice, and lists
+  Google Analytics as a third-party service.
+- E2E contexts start with consent pre-answered (`playwright.config.js`
+  `storageState`) so the fixed banner never covers what specs click.
+  `cookie_banner.spec.js` covers the banner itself on both viewports.
+
 ### 1.29.0 — 2026-09-25
 - **Transient backend failures are retried instead of surfacing as "API error:
   404".** `/exec` answers with a 302 to a one-shot googleusercontent "echo" URL,
@@ -1374,6 +1394,14 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.8 — 2026-10-01
+- **E2E contexts start with the cookie banner already answered.**
+  `playwright.config.js` sets a `storageState` that seeds
+  `wd_analytics_consent=denied` for the test origin. Without it, the fixed
+  consent banner (Frontend 1.30.0) intercepted clicks on cards near the bottom
+  of the viewport and broke unrelated specs. `cookie_banner.spec.js` opts back
+  out so it can test a true first visit.
 
 ### 1.2.7 — 2026-09-25
 - **Storage test tooling.** `npm run test:storage:webkit` runs the
