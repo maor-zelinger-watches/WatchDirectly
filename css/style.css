@@ -388,6 +388,32 @@ img {
   opacity: 0.7;
 }
 
+/* Phones: three nav links + "© 2026 How You Watch" + the version badge are
+   ~390px at the default spacing, so the copyright got ellipsized. Tighten the
+   spacing so the full row fits from ~360px up; on the narrowest phones drop
+   the version badge (it's also logged to the console at boot) rather than
+   cut the copyright. */
+@media (max-width: 480px) {
+  .footer__inner {
+    padding: 0 var(--sp-3);
+    gap: var(--sp-2);
+  }
+
+  .footer__nav {
+    gap: var(--sp-3);
+  }
+
+  .footer__meta {
+    gap: var(--sp-2);
+  }
+}
+
+@media (max-width: 360px) {
+  .footer__version {
+    display: none;
+  }
+}
+
 /* ============================================================
    MAIN LAYOUT
    ============================================================ */
