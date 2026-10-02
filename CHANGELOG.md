@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.31.0 — 2026-10-02
+- **IndexedDB is now the default cache storage for everyone.**
+  `STORAGE_ENGINE_DEFAULT` flips from `'legacy'` to `'idb'`, so the large
+  snapshots (feed, search index, Top This Week, channels) move from
+  localStorage to IndexedDB on each browser's next load. The existing
+  localStorage copy is migrated over, so this costs no cold load. Why: Safari
+  counts localStorage at 2 bytes/char once any character is outside Latin-1,
+  which caps it at ~2.6M chars. The search index is about that size and
+  growing, and when it doesn't fit it silently isn't saved. Browsers with an
+  explicit `wd_storage_engine` flag keep their choice. `?storage=legacy`
+  stays as the per-browser kill switch, and setting the default back to
+  `'legacy'` rolls it back for everyone. Tests now pin the idb default and
+  run legacy through the explicit flag.
+
 ### 1.30.1 — 2026-10-01
 - **Footer fits on phones again.** 1.30.0's extra "Cookies" link pushed the
   footer row (three links + "© 2026 How You Watch" + version badge) past the
