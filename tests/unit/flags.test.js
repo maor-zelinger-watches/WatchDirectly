@@ -2,7 +2,7 @@
  * Unit tests for js/flags.js — the per-browser storage-engine flag.
  *
  * The flag decides whether the large cache snapshots live in localStorage
- * ('legacy', the default) or IndexedDB ('idb'). What must hold: an absent,
+ * ('legacy') or IndexedDB ('idb', the default). What must hold: an absent,
  * junk, or unreadable flag always lands on the default; the answer is fixed
  * for the whole page load; ?storage= sets it on browsers without devtools.
  */
@@ -40,9 +40,9 @@ afterEach(() => {
 });
 
 describe('storage engine flag', () => {
-  it('ships defaulting to legacy (localStorage)', () => {
-    expect(CONFIG.STORAGE_ENGINE_DEFAULT).toBe('legacy');
-    expect(storageEngine()).toEqual({ engine: 'legacy', source: 'default' });
+  it('ships defaulting to idb (IndexedDB)', () => {
+    expect(CONFIG.STORAGE_ENGINE_DEFAULT).toBe('idb');
+    expect(storageEngine()).toEqual({ engine: 'idb', source: 'default' });
   });
 
   it('honors an explicit idb or legacy flag', () => {
@@ -55,20 +55,20 @@ describe('storage engine flag', () => {
 
   it.each(['', 'IDB', 'indexeddb', 'true', '1', ' idb', 'null'])('treats %j as no flag', (junk) => {
     lsStore[KEY] = junk;
-    expect(storageEngine()).toEqual({ engine: 'legacy', source: 'default' });
+    expect(storageEngine()).toEqual({ engine: 'idb', source: 'default' });
   });
 
   it('falls back to the default when localStorage throws on read', () => {
     localStorageMock.getItem.mockImplementation(() => { throw new DOMException('denied', 'SecurityError'); });
-    expect(storageEngine()).toEqual({ engine: 'legacy', source: 'default' });
+    expect(storageEngine()).toEqual({ engine: 'idb', source: 'default' });
   });
 
   it('follows a flipped default for browsers without a flag, but not for ones with one', () => {
-    CONFIG.STORAGE_ENGINE_DEFAULT = 'idb';
-    expect(storageEngine()).toEqual({ engine: 'idb', source: 'default' });
+    CONFIG.STORAGE_ENGINE_DEFAULT = 'legacy';
+    expect(storageEngine()).toEqual({ engine: 'legacy', source: 'default' });
     flagsTest.reset();
-    lsStore[KEY] = 'legacy';
-    expect(storageEngine()).toEqual({ engine: 'legacy', source: 'flag' });
+    lsStore[KEY] = 'idb';
+    expect(storageEngine()).toEqual({ engine: 'idb', source: 'flag' });
   });
 
   it('a nonsense default can never select an engine that does not exist', () => {

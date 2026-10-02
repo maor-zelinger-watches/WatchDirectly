@@ -2,10 +2,10 @@
  * Storage-engine flag — end to end (mocked backend).
  *
  * localStorage 'wd_storage_engine' picks where the big cache snapshots live:
- * 'legacy' (default) = localStorage, exactly as production runs today;
- * 'idb' = IndexedDB. These tests pin the contract a rollout depends on:
+ * 'legacy' = localStorage, the pre-1.31 production path;
+ * 'idb' (default) = IndexedDB. These tests pin the contract a rollout depends on:
  *
- *   - the default is legacy, and legacy never opens IndexedDB — not at boot,
+ *   - the default is idb, and legacy never opens IndexedDB — not at boot,
  *     not while searching, not on any tab (the kill switch);
  *   - ?storage= flips it and survives the next visit;
  *   - a flip is per page load: another tab flipping it doesn't change a
@@ -60,15 +60,26 @@ function engineLine(page) {
 }
 
 test.describe('storage engine flag', () => {
-  test('default is legacy: snapshots in localStorage, IndexedDB never opened all session', async ({ page }) => {
+  test('default is idb: with no flag the feed persists to IndexedDB, not localStorage', async ({ page }) => {
+    const line = engineLine(page);
+    await installMocks(page, { items: makeItems(60), clearStorage: false });
+    await page.goto('/');
+    await expect(cards(page).first()).toBeVisible();
+    expect(line[0]).toBe('storage engine: idb (default)');
+    await expect.poll(async () => (await idbSnapshot(page, FEED))?.videos?.length ?? 0).toBeGreaterThanOrEqual(10);
+    expect(await localSnapshot(page, FEED)).toBeNull();
+  });
+
+  test('legacy flag (kill switch): snapshots in localStorage, IndexedDB never opened all session', async ({ page }) => {
     const errors = collectPageErrors(page);
     const line = engineLine(page);
     await countStorageOpens(page);
     await installMocks(page, { items: makeItems(60), clearStorage: false });
+    await setStorageMode(page, 'legacy');
     await mockChannels(page);
     await page.goto('/');
     await expect(cards(page).first()).toBeVisible();
-    expect(line[0]).toBe('storage engine: legacy (default)');
+    expect(line[0]).toBe('storage engine: legacy (flag)');
 
     // Exercise every snapshot: feed (boot), channels (boot), search index, Top.
     await page.locator('#search-input').fill('Rolex');
@@ -101,20 +112,20 @@ test.describe('storage engine flag', () => {
     await expect(cards(page).first()).toBeVisible();
   });
 
-  test('?storage=idb persists across visits; ?storage=default clears it', async ({ page }) => {
+  test('?storage=legacy persists across visits; ?storage=default clears it', async ({ page }) => {
     const line = engineLine(page);
     await installMocks(page, { items: makeItems(30), clearStorage: false });
-    await page.goto('/?storage=idb');
+    await page.goto('/?storage=legacy');
     await expect(cards(page).first()).toBeVisible();
     await expect(page).toHaveURL(/\/$/); // applied, then removed from the address bar
     await page.goto('/'); // no param this time
     await expect(cards(page).first()).toBeVisible();
-    expect(line).toEqual(['storage engine: idb (flag)', 'storage engine: idb (flag)']);
+    expect(line).toEqual(['storage engine: legacy (flag)', 'storage engine: legacy (flag)']);
 
     await page.goto('/?storage=default');
     await expect(cards(page).first()).toBeVisible();
     expect(await page.evaluate((k) => localStorage.getItem(k), FLAG_KEY)).toBeNull();
-    expect(line.at(-1)).toBe('storage engine: legacy (default)');
+    expect(line.at(-1)).toBe('storage engine: idb (default)');
   });
 
   test('?storage= rides along with a shared deep link', async ({ page }) => {

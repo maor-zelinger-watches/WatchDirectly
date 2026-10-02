@@ -59,8 +59,8 @@ npm run test:perf-live       # against the PRODUCTION backend; see
 ## Storage engine flag
 
 The large cache snapshots (feed, search index, Top This Week, channels) can
-live in **localStorage** (`legacy`, the default — what production has always
-run) or **IndexedDB** (`idb`). The choice is per browser, via
+live in **IndexedDB** (`idb`, the default) or **localStorage** (`legacy`, the
+pre-1.31 path, kept as a per-browser kill switch). The choice is per browser, via
 [`js/flags.js`](js/flags.js):
 
 | How | Effect |
@@ -73,12 +73,13 @@ run) or **IndexedDB** (`idb`). The choice is per browser, via
 - The URL form works on phones without devtools, and is removed from the
   address bar once applied, so a reload or bookmark can't re-assert it later.
 - The engine is fixed for a page load; a flip applies on the next load.
-- The console prints `storage engine: idb (flag)` / `legacy (default)` at boot.
+- The console prints `storage engine: idb (default)` / `legacy (flag)` at boot.
 - `legacy` never opens IndexedDB, so it's a safe kill switch. Going
   `idb` → `legacy` costs one cold load (IndexedDB's copy is ignored, not moved
   back); going `legacy` → `idb` moves the localStorage copy over.
-- Rolling IndexedDB out to everyone = `STORAGE_ENGINE_DEFAULT: 'idb'`. Browsers
-  that set the flag explicitly keep their choice.
+- IndexedDB is on for everyone via `STORAGE_ENGINE_DEFAULT: 'idb'`. Rolling it
+  back for everyone = setting it to `'legacy'`. Browsers that set the flag
+  explicitly keep their choice either way.
 
 Why it exists: Safari counts localStorage at 2 bytes per character once any
 character is outside Latin-1, which halves its effective cap to ~2.6M
