@@ -921,6 +921,7 @@ function crawlAllFeeds(onlyFeedUrl) {
   // Get existing video IDs for deduplication
   var existingVideos = {};
   var existingRowById = {}; // video_id -> 1-based sheet row, for view-count refresh
+  var existingUrlById = {}; // video_id -> stored url, for the Shorts URL self-heal
   // Existing normalized URLs, keyed exactly as dedupeByUrl keys them
   // (trim().toLowerCase()). A feed that normally parses as XML but hits the
   // regex fallback once produces a DIFFERENT id for every item (parseRss2 hashes
@@ -983,6 +984,7 @@ function crawlAllFeeds(onlyFeedUrl) {
         existingRowById[videoData[i][videoIdCol]] = i + 1;
         if (urlCol0 !== -1 && videoData[i][urlCol0]) {
           existingUrls[String(videoData[i][urlCol0]).trim().toLowerCase()] = true;
+          existingUrlById[videoData[i][videoIdCol]] = String(videoData[i][urlCol0]);
         }
       }
     }
@@ -1034,6 +1036,8 @@ function crawlAllFeeds(onlyFeedUrl) {
   var pendingNewRows = [];              // rows to append in one batch
   var pendingViewCounts = {};           // 1-based row -> fresh view_count
   var pendingLiveState = {};            // 1-based row -> [live_status, scheduled_start, expires_at]
+  var pendingUrlFixes = {};             // 1-based row -> corrected url (watch?v= -> /shorts/)
+  var videoUrlCol = vHeaders.indexOf('url');
 
   // Resume from where the last budget-truncated crawl left off, wrapping around
   // the channel list, so a slow/dead channel near index 0 can't perpetually
@@ -1097,6 +1101,18 @@ function crawlAllFeeds(onlyFeedUrl) {
         var normUrl = video.url ? String(video.url).trim().toLowerCase() : '';
         var urlKnown = normUrl !== '' && existingUrls[normUrl];
         if (!existingVideos[video.video_id] && !urlKnown) {
+          // A Data-API-sourced item carries a synthesized watch URL because
+          // playlistItems.list has no Shorts flag, and the frontend files a
+          // Short purely by its /shorts/ URL. Ask YouTube once, here, for
+          // genuinely new items only — never the whole 15-item window per
+          // crawl. An inconclusive probe keeps the watch URL; the self-heal
+          // below corrects it the next time the RSS feed is reachable.
+          if (video.short_unknown && video.media_type === 'video'
+              && probeYouTubeShort(video.video_id) === true) {
+            video.url = 'https://www.youtube.com/shorts/' + video.video_id;
+            normUrl = video.url.toLowerCase();
+          }
+
           // Post-dedup enrichment: resolve og:image ONLY now that the id/url
           // dedup has confirmed this item is genuinely new. The parsers leave
           // preview_image '' for imageless articles precisely so this page fetch
@@ -1160,6 +1176,15 @@ function crawlAllFeeds(onlyFeedUrl) {
             pendingLiveState[existingRow] =
               [video.live_status, video.scheduled_start || '', video.expires_at || ''];
           }
+          // Self-heal: a Short first ingested through the Data API fallback
+          // (RSS blocked that crawl) was stored with a watch URL and so never
+          // files as a Short. When the RSS feed now says /shorts/ for the same
+          // id, upgrade the stored URL in place. Never the reverse — the Data
+          // API path emits watch URLs for everything, so a watch URL arriving
+          // for a stored Short carries no information.
+          if (videoUrlCol !== -1 && isShortsUrl(video.url) && !isShortsUrl(existingUrlById[video.video_id])) {
+            pendingUrlFixes[existingRow] = video.url;
+          }
         }
       }
 
@@ -1207,6 +1232,21 @@ function crawlAllFeeds(onlyFeedUrl) {
         vcVals[vcRow - 2][0] = pendingViewCounts[vcRows[vi]];
       }
       vcRange.setValues(vcVals);
+    }
+
+    // Shorts URL self-heal: same read-overlay-write as view counts. Text-format
+    // first so the url column can never be written as a live formula (BE9).
+    var ufRows = Object.keys(pendingUrlFixes);
+    if (ufRows.length > 0 && videoUrlCol !== -1) {
+      var ufRange = videosSheet.getRange(2, videoUrlCol + 1, origDataRows, 1);
+      var ufVals = ufRange.getValues();
+      for (var ui = 0; ui < ufRows.length; ui++) {
+        var ufRow = parseInt(ufRows[ui], 10);
+        ufVals[ufRow - 2][0] = pendingUrlFixes[ufRows[ui]];
+      }
+      ufRange.setNumberFormat('@');
+      ufRange.setValues(ufVals);
+      log('INFO', 'fetchAllFeeds', 'Upgraded ' + ufRows.length + ' stored watch URL(s) to /shorts/');
     }
 
     var lsRows = Object.keys(pendingLiveState);
@@ -1612,7 +1652,10 @@ function extractFeedChannelId(feedUrl) {
  *
  * Produces the same item objects as parseAtom so the rest of crawlAllFeeds is
  * unchanged; view_count is left 0 here and recovered by enrichLiveMetadata
- * (which the crawl already runs on every batch).
+ * (which the crawl already runs on every batch). Unlike the RSS feed, the
+ * playlist carries no Shorts signal, so every item gets a watch URL plus a
+ * short_unknown flag; crawlAllFeeds probes genuinely new ones (see
+ * probeYouTubeShort) and the self-heal corrects the rest on a later RSS crawl.
  *
  * @param {string} channelId - 'UC…' channel id.
  * @param {string} channelName
@@ -1700,7 +1743,10 @@ function parseYouTubeUploads(jsonText, channelName, tier, category) {
       media_type: 'video',
       channel_name: channelName,
       title: title,
+      // Provisional: the playlist can't tell a Short from a long-form upload.
+      // short_unknown asks crawlAllFeeds to probe before persisting a new row.
       url: 'https://www.youtube.com/watch?v=' + videoId,
+      short_unknown: true,
       preview_image: thumb.url || ('https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg'),
       published_at: toIsoDate(published),
       tier: tier,
@@ -1710,6 +1756,54 @@ function parseYouTubeUploads(jsonText, channelName, tier, category) {
   }
 
   return videos;
+}
+
+/** True when a feed/stored URL is YouTube's Shorts form — the frontend's own test. */
+function isShortsUrl(url) {
+  return typeof url === 'string' && url.indexOf('/shorts/') !== -1;
+}
+
+/**
+ * Asks YouTube whether a video is a Short. The Data API exposes no such flag,
+ * but youtube.com/shorts/<id> answers 200 for a real Short and 303s to
+ * /watch?v=<id> for anything else (Apps Script's user agent first gets a 302
+ * to m.youtube.com, which then answers the same way; an unknown id is a 404).
+ * Redirects are walked manually, one hop at a time, so the Location header is
+ * what decides and the fetch can never be steered off youtube.com.
+ *
+ * Costs one or two UrlFetchApp calls. The caller runs it only for genuinely
+ * new Data-API items, never for the whole upload window on every crawl.
+ *
+ * @param {string} videoId - 11-char YouTube id.
+ * @returns {boolean|null} true = Short, false = not a Short, null = unknown
+ *   (404, 5xx, unexpected redirect, network error) — caller leaves the URL alone.
+ */
+function probeYouTubeShort(videoId) {
+  if (!/^[\w-]{11}$/.test(String(videoId || ''))) return null;
+  var url = 'https://www.youtube.com/shorts/' + videoId;
+  var maxHops = 3;
+  try {
+    for (var hop = 0; hop <= maxHops; hop++) {
+      var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: false });
+      var code = response.getResponseCode();
+      if (code === 200) return true;
+      if (code < 300 || code >= 400) return null;
+
+      var headers = response.getAllHeaders() || {};
+      var location = headers['Location'] || headers['location'] || '';
+      if (Array.isArray(location)) location = location[0] || '';
+      if (location.charAt(0) === '/' && location.charAt(1) !== '/') {
+        location = url.match(/^https:\/\/[^/?#]+/i)[0] + location;
+      }
+      if (!/^https:\/\/(www\.|m\.)?youtube\.com\//i.test(location)) return null;
+      if (/\/watch(\?|$)/.test(location)) return false;
+      if (!isShortsUrl(location)) return null;
+      url = location;
+    }
+  } catch (e) {
+    log('WARN', 'probeYouTubeShort', videoId + ': ' + e.message);
+  }
+  return null;
 }
 
 function extractYouTubeId(url) {
