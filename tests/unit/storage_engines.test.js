@@ -27,6 +27,7 @@ import {
 } from '../../js/cache.js';
 import { engines, pickEngine, isStalled, __test__ as storageTest } from '../../js/storage.js';
 import { FLAG_KEYS, __test__ as flagsTest } from '../../js/flags.js';
+import { CONFIG } from '../../js/config.js';
 
 // --- localStorage mock (Node's experimental global shadows jsdom's) ---------
 let lsStore = {};
@@ -85,7 +86,12 @@ afterEach(async () => {
 });
 
 describe('flag → engine preference', () => {
-  it('defaults to legacy: localStorage only', () => {
+  it('defaults to idb: IndexedDB, then localStorage', () => {
+    expect(enginePreference()).toBe(IDB_PREFERENCE);
+  });
+
+  it('legacy mode is localStorage only', () => {
+    newPageLoad('legacy');
     expect(enginePreference()).toBe(LEGACY_PREFERENCE);
     expect(LEGACY_PREFERENCE).toEqual(['local']);
   });
@@ -102,6 +108,8 @@ describe('flag → engine preference', () => {
 });
 
 describe('legacy mode — the kill switch', () => {
+  beforeEach(() => newPageLoad('legacy'));
+
   it('round-trips all four snapshots through localStorage without ever opening IndexedDB', async () => {
     await saveFeedCache(VIDEOS, 42);
     await saveSearchIndex(VIDEOS);
@@ -128,8 +136,7 @@ describe('legacy mode — the kill switch', () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 
-  it('legacy flag set explicitly behaves exactly like the default', async () => {
-    newPageLoad('legacy');
+  it('legacy flag set explicitly overrides the idb default', async () => {
     await saveFeedCache(VIDEOS, 42);
     expect(JSON.parse(lsStore[CACHE_KEYS.FEED])).toMatchObject({ total: 42 });
     expect(openSpy).not.toHaveBeenCalled();
@@ -329,13 +336,26 @@ describe('localStorage blocked outright', () => {
     newPageLoad(undefined);
   });
 
-  it('reads the default, caches nothing, and never throws', async () => {
-    expect(enginePreference()).toBe(LEGACY_PREFERENCE);
-    expect(await pickEngine(LEGACY_PREFERENCE)).toBeNull();
-    await expect(saveFeedCache(VIDEOS, 42)).resolves.toBe(false);
-    await expect(loadFeedCache()).resolves.toBeNull();
+  it('reads the idb default and still caches in IndexedDB, never throwing', async () => {
+    expect(enginePreference()).toBe(IDB_PREFERENCE);
+    await expect(saveFeedCache(VIDEOS, 42)).resolves.toBe(true);
+    await expect(loadFeedCache()).resolves.toEqual({ videos: VIDEOS, total: 42 });
     await expect(clearFeedCache()).resolves.toBeUndefined();
-    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('with a legacy default: caches nothing, never opens IndexedDB, never throws', async () => {
+    CONFIG.STORAGE_ENGINE_DEFAULT = 'legacy';
+    newPageLoad(undefined);
+    try {
+      expect(enginePreference()).toBe(LEGACY_PREFERENCE);
+      expect(await pickEngine(LEGACY_PREFERENCE)).toBeNull();
+      await expect(saveFeedCache(VIDEOS, 42)).resolves.toBe(false);
+      await expect(loadFeedCache()).resolves.toBeNull();
+      await expect(clearFeedCache()).resolves.toBeUndefined();
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      CONFIG.STORAGE_ENGINE_DEFAULT = 'idb';
+    }
   });
 });
 
