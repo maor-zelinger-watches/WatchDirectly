@@ -793,6 +793,26 @@ that component's heading.
 
 ## Backend
 
+### 1.25.1 — 2026-10-02
+- **Shorts ingested on a Data-API fallback crawl are filed as Shorts.** The
+  frontend recognises a Short purely by its `/shorts/` URL, which the channel
+  RSS feed supplies. When YouTube blocks RSS from Apps Script IPs the crawl
+  falls back to `playlistItems.list`, which carries no Shorts signal, and
+  `parseYouTubeUploads` wrote `watch?v=` for every item — so a Short ingested
+  on one of those crawls (`8ois5twG3YY`, The 1916 Company, 2026-10-02)
+  rendered as a long-form video while its siblings from RSS crawls were
+  Shorts. Two fixes in `crawlAllFeeds`: genuinely new Data-API items are
+  probed once via `youtube.com/shorts/<id>` (200 = Short, 303 to `/watch` =
+  not; redirects walked by hand, youtube.com hosts only, three hops), and a
+  row already stored with a watch URL is upgraded in place the next time the
+  RSS feed says `/shorts/` for the same id — one batched, text-formatted
+  column write, never the reverse, since the Data API's watch URL carries no
+  information. An inconclusive probe (404, 5xx, off-site redirect, network
+  error) keeps the watch URL and never fails the channel; the self-heal
+  corrects it on the next unblocked crawl. Only new items are probed, so a
+  blocked crawl costs one or two extra fetches per new video, not fifteen per
+  channel.
+
 ### 1.25.0 — 2026-09-25
 - **A channel added from the add-channel page has content immediately.**
   `handleAddChannel` used to call `scheduleRefresh()` to crawl the new channel
