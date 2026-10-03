@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.25.1';
+const VERSION = '1.26.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -261,7 +261,7 @@ const SIGNATURE_MAX_SKEW_MS = 5 * 60 * 1000;
 // unauthenticated `clientError` telemetry endpoint is likewise omitted (it has
 // its own budgeted rate limits).
 const SIGNED_ACTIONS = {
-  comment: true, vote: true, star: true, bookmark: true, emailConsent: true,
+  comment: true, vote: true, star: true, bookmark: true, emailConsent: true, feedback: true,
   myVotes: true, myStars: true, myBookmarks: true, session: true, bootstrap: true,
 };
 
@@ -437,6 +437,8 @@ function doPost(e) {
         return jsonResponse(handleMyBookmarks(data));
       case 'emailConsent':
         return jsonResponse(handleEmailConsent(data));
+      case 'feedback':
+        return jsonResponse(handleFeedback(data));
       case 'bootstrap':
         return jsonResponse(handleBootstrap(data));
       case 'session':
@@ -4669,7 +4671,7 @@ function handleBootstrap(data) {
 //
 // SPREADSHEET_IDS.CUSTOMERS holds everything keyed to a signed-in account:
 // the Customers tab (identity + marketing consent) plus the Votes, Stars,
-// and Bookmarks activity tabs (getUserDataTab above). One place to export
+// Bookmarks and Feedback tabs (getUserDataTab above). One place to export
 // or delete a user's data — their comments, which are public content, are
 // the only per-user rows elsewhere. NOTE: because the activity tabs live
 // here, sharing this spreadsheet shares activity too — hand off a mailing
@@ -4717,7 +4719,7 @@ function getCustomersSheet() {
     var tabs = ss.getSheets();
     for (var i = 0; i < tabs.length; i++) {
       var n = tabs[i].getName();
-      if (n !== 'Votes' && n !== 'Stars' && n !== 'Bookmarks') { sheet = tabs[i]; break; }
+      if (n !== 'Votes' && n !== 'Stars' && n !== 'Bookmarks' && n !== FEEDBACK_SHEET_NAME) { sheet = tabs[i]; break; }
     }
     if (sheet) sheet.setName('Customers');
     else sheet = ss.insertSheet('Customers');
@@ -5072,6 +5074,94 @@ function readUserBookmarkIds(email) {
     if (rows[i][emailCol] === email) ids.push(String(rows[i][videoIdCol]));
   }
   return ids;
+}
+
+// ============================================================
+// FEEDBACK — the floating "Send feedback" button's submissions
+// ============================================================
+//
+// Rows land in the "Feedback" tab of the CUSTOMERS spreadsheet (the one
+// user-data file — a person's feedback is part of their data, so it lives
+// next to their account row and activity tabs). Signed-in only: every send
+// must carry a valid token, and the row is stamped with the sender's
+// verified email + name. Guards: a message length cap and the same per-user
+// spacing as comments.
+
+var FEEDBACK_SHEET_NAME = 'Feedback';
+var FEEDBACK_HEADERS = [
+  'feedback_id', 'created_at', 'email', 'name', 'message',
+  'page', 'app_version', 'user_agent',
+];
+const FEEDBACK_MAX_LENGTH = 2000;        // chars; the dialog's textarea caps at the same
+const FEEDBACK_RATE_LIMIT_SECONDS = 30;  // per sender (same as comments)
+const FEEDBACK_FIELD_LIMITS = { page: 300, appVersion: 20, userAgent: 300 };
+
+/**
+ * Gets (or creates) the "Feedback" tab of the CUSTOMERS spreadsheet.
+ * @returns {Sheet}
+ */
+function getFeedbackSheet() {
+  return getUserDataTab(FEEDBACK_SHEET_NAME, FEEDBACK_HEADERS);
+}
+
+/**
+ * Records one feedback message from a signed-in user. `message` is required
+ * (non-blank, at most FEEDBACK_MAX_LENGTH chars — over-long is REJECTED, not
+ * clipped, so the sender knows it didn't land whole); `token` is required
+ * and must verify — the row carries the sender's email + name.
+ */
+function handleFeedback(data) {
+  var message = typeof data.message === 'string' ? data.message.trim() : '';
+  if (!message || !data.token) {
+    return { status: 'error', message: 'message and token are required' };
+  }
+  if (message.length > FEEDBACK_MAX_LENGTH) {
+    return { status: 'error', message: 'Feedback is too long (max ' + FEEDBACK_MAX_LENGTH + ' characters)' };
+  }
+
+  var user = authenticateUser(data.token);
+  if (!user) {
+    log('ERROR', 'feedback', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+  if (isActionRateLimited('feedback', user.email, FEEDBACK_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
+  var row = [
+    Utilities.getUuid(),
+    new Date().toISOString(),
+    user.email,
+    user.name || '',
+    message,
+    clip(data.page, FEEDBACK_FIELD_LIMITS.page),
+    clip(data.appVersion, FEEDBACK_FIELD_LIMITS.appVersion),
+    clip(data.userAgent, FEEDBACK_FIELD_LIMITS.userAgent),
+  ];
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
+
+  try {
+    var sheet = getFeedbackSheet();
+    // '@' (plain text) before the values land: a message starting with
+    // = + - @ must never execute as a formula when the owner opens the
+    // sheet. Mirrors the Comments and clientError writers.
+    var range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, FEEDBACK_HEADERS.length);
+    range.setNumberFormat('@');
+    range.setValues([row]);
+  } finally {
+    lock.releaseLock();
+  }
+
+  return { status: 'ok', feedback_id: row[0] };
 }
 
 // ============================================================

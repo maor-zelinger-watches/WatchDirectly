@@ -1620,6 +1620,172 @@ body.fullscreen-mode {
 }
 
 /* ============================================================
+   FEEDBACK — floating button + dialog (js/feedback.js)
+   The button mirrors the channel logo: a volt disc carrying a black
+   mark with a burnt-orange outline (the one place --orange is used
+   outside the wordmark). Fixed bottom-right, clear of the footer.
+   ============================================================ */
+
+.feedback-fab {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: calc(var(--footer-height) + var(--sp-4));
+  z-index: 150; /* above the footer (100); under the cookie banner (200),
+                   the fullscreen overlay (300) and every dialog */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg-canvas);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.feedback-fab[hidden] {
+  display: none; /* signed-out: no button (the dialog needs a sender) */
+}
+
+.feedback-fab:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.feedback-fab:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 3px;
+}
+
+.feedback-fab svg {
+  width: 28px;
+  height: 28px;
+}
+
+/* The logo treatment: black fill, burnt-orange outline, volt cut-outs */
+.feedback-fab__bubble {
+  fill: var(--bg-canvas);
+  stroke: var(--orange);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.feedback-fab__dot {
+  fill: var(--accent);
+}
+
+.feedback-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 350; /* same layer as the sign-in overlay: above fullscreen (300), below toasts (400) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+}
+
+.feedback-overlay[hidden] {
+  display: none;
+}
+
+.feedback-overlay__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.feedback-overlay__dialog {
+  position: relative;
+  width: min(92vw, 440px);
+  padding: var(--sp-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  outline: none;
+}
+
+.feedback-overlay__close {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  font-size: var(--fs-base);
+  line-height: 1;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast);
+}
+
+.feedback-overlay__close:hover {
+  color: var(--text-primary);
+}
+
+.feedback-overlay__title {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  margin-bottom: var(--sp-3);
+}
+
+.feedback-overlay__copy {
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-4);
+}
+
+.feedback-overlay__textarea {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  padding: var(--sp-3);
+  font-family: var(--font-family);
+  font-size: 1rem; /* 16px: stops iOS Safari auto-zooming on focus */
+  line-height: var(--lh-normal);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  resize: vertical;
+  transition: border-color var(--transition-fast);
+}
+
+.feedback-overlay__textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.feedback-overlay__textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.feedback-overlay__textarea:disabled {
+  opacity: 0.6;
+}
+
+.feedback-overlay__note {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  margin-top: var(--sp-2);
+  min-height: 1em;
+}
+
+.feedback-overlay__actions {
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: flex-end;
+  margin-top: var(--sp-4);
+}
+
+/* ============================================================
    TOAST NOTIFICATIONS
    ============================================================ */
 

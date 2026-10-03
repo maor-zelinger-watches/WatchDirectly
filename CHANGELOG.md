@@ -21,6 +21,20 @@ that component's heading.
 
 ## Frontend
 
+### 1.32.0 — 2026-10-03
+- **Feedback button.** Signed-in users get a floating button bottom-right,
+  above the footer, styled like the channel logo (volt disc, black
+  speech-bubble mark with a burnt-orange outline). It opens a dialog with one
+  text box, an ✕ and Submit; the message goes to the new backend `feedback`
+  action (`api.sendFeedback`) with the session token, page URL, app version
+  and browser, and lands in the Feedback tab of the CUSTOMERS spreadsheet
+  under the sender's email. The button is hidden while signed out and hides
+  again on sign-out (closing the dialog if open). ✕, the backdrop and Escape
+  close without sending and keep the draft; a failed send keeps the draft and
+  shows the server's message; an older backend answers "Feedback isn't
+  available yet". Needs backend ≥ 1.26.0. Why: beta users had no way to
+  report a bug or ask for a creator without leaving the site.
+
 ### 1.31.0 — 2026-10-02
 - **IndexedDB is now the default cache storage for everyone.**
   `STORAGE_ENGINE_DEFAULT` flips from `'legacy'` to `'idb'`, so the large
@@ -792,6 +806,18 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.26.0 — 2026-10-03
+- **`feedback` action.** New signed-in POST (`message` + `token`) backing the
+  site's feedback button. The row — id, time, verified email and name, the
+  message, page, app version, user agent — is appended to a **Feedback** tab
+  of the CUSTOMERS spreadsheet (created on first use via `getUserDataTab`, so
+  a person's feedback lives next to their account row and activity tabs;
+  `getCustomersSheet` never claims it as the Customers tab). A missing or
+  invalid token is an error and nothing is written. Guards: a 2,000-character
+  cap (rejected, not clipped), the block list, a 30s spacing per sender, and
+  the '@' plain-text format set before the values so a message can't execute
+  as a formula. `feedback` joins SIGNED_ACTIONS.
 
 ### 1.25.1 — 2026-10-02
 - **Shorts ingested on a Data-API fallback crawl are filed as Shorts.** The

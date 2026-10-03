@@ -400,6 +400,29 @@ export function createApiClient(baseUrl, options = {}) {
     },
 
     /**
+     * Sends a feedback message from the floating "Send feedback" button.
+     * Requires a valid Google ID / app session token — the backend files the
+     * row under the sender's verified email and name. Page URL, app version
+     * and user agent ride along (like clientError) so a bug report is
+     * reproducible. Requires backend >= 1.26.0; an older backend throws
+     * "Unknown action".
+     *
+     * @param {string} message - The feedback text (backend caps at 2000 chars)
+     * @param {string} token - Google Sign-In ID token or app session token
+     * @returns {Promise<{feedback_id: string}>}
+     */
+    async sendFeedback(message, token) {
+      return post({
+        action: 'feedback',
+        message,
+        token,
+        appVersion: CONFIG.APP_VERSION,
+        page: typeof location !== 'undefined' ? String(location.href).slice(0, 300) : '',
+        userAgent: typeof navigator !== 'undefined' ? String(navigator.userAgent).slice(0, 300) : '',
+      });
+    },
+
+    /**
      * Fetches the signed-in user's votes, starred channels, bookmarks AND
      * marketing-consent state in one request. Replaces the separate
      * per-feature round trips at sign-in: the backend serializes a user's

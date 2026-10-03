@@ -38,6 +38,7 @@ import { loadMyVotesAndStars } from './bootstrap.js';
 import { setupFullscreenKeys } from './fullscreen.js';
 import { handleDeepLink } from './share.js';
 import { setupSinglePlay } from './single-play.js';
+import { setupFeedback, feedbackOnAuthChange } from './feedback.js';
 import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged, loadMoreTop, resortTopRanking } from './views.js';
 
 // The Starred view repaints when a star lands or the server reconciles —
@@ -129,6 +130,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
   setupFullscreenKeys();
   setupSinglePlay();
+  setupFeedback();
   loadStarsFromStorage();
   loadBookmarksFromStorage();
 
@@ -918,6 +920,7 @@ function setupAuthUI() {
   onAuthChange((user) => {
     updateAuthUI(user);
     authOverlayOnAuthChange(user);
+    feedbackOnAuthChange(user);
     state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
     if (user) {
       loadMyVotesAndStars();
@@ -937,6 +940,7 @@ function setupAuthUI() {
   const user = getCurrentUser();
   if (user) {
     updateAuthUI(user);
+    feedbackOnAuthChange(user);
     loadMyVotesAndStars();
     state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
   } else {
