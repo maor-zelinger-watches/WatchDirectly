@@ -1465,6 +1465,15 @@ that component's heading.
 
 ## Repo
 
+### 1.2.9 — 2026-10-03
+- **Backend deploy health-check waits out propagation.** `deploy-backend.sh`
+  checked prod 5 times, 5s apart — about 40–60s — but a new deployment
+  version takes 60–90s to propagate. Two consecutive 1.26.0 deploys served
+  the old version for the whole window, were declared failed and rolled back,
+  then went live a minute later anyway (and the rollback raced the same way).
+  The loop now runs `HEALTH_ATTEMPTS` × `HEALTH_SLEEP_SECONDS` (defaults
+  12 × 10s), both overridable per run, and each line shows attempt/total.
+
 ### 1.2.8 — 2026-10-01
 - **E2E contexts start with the cookie banner already answered.**
   `playwright.config.js` sets a `storageState` that seeds

@@ -84,17 +84,25 @@ fi
 # --- Health check: curl /exec, retry for propagation, assert JSON + version --
 # A healthy Apps Script /exec 302-redirects to googleusercontent.com and returns
 # application/json; an unauthorized/broken one returns HTML (sign-in / 403 page).
+# A new deployment version takes 60–90s to propagate (measured 2026-10-03: two
+# consecutive prod deploys served the OLD version for the whole 5×5s window,
+# were rolled back as "failed", and then went live anyway a minute later —
+# the rollback itself raced the same way). So the window must comfortably
+# outlast propagation: HEALTH_ATTEMPTS × HEALTH_SLEEP_SECONDS (defaults 12 × 10s
+# ≈ 2–4 min with curl time). Override per run, e.g. HEALTH_ATTEMPTS=20.
+HEALTH_ATTEMPTS="${HEALTH_ATTEMPTS:-12}"
+HEALTH_SLEEP_SECONDS="${HEALTH_SLEEP_SECONDS:-10}"
 health_check() {
   local exec_url="$1" want_version="$2" label="$3"
   local body="/tmp/wd_hc_$$_${label}.txt"
   local attempt http got
-  for attempt in 1 2 3 4 5; do
+  for (( attempt = 1; attempt <= HEALTH_ATTEMPTS; attempt++ )); do
     http=$(curl -s -L -m 30 -o "$body" -w '%{http_code}' \
       "${exec_url}?action=feed&page=1&limit=1" 2>/dev/null || echo "000")
     if [[ "$http" == "200" ]] && grep -q '"status":"ok"' "$body" 2>/dev/null; then
       got=$(grep -oE '"version":"[^"]*"' "$body" | head -1 | sed 's/.*"version":"//; s/"$//')
       if [[ -n "$want_version" && "$got" != "$want_version" ]]; then
-        echo "   $label attempt $attempt: serving v$got, expected v$want_version (propagating…)"
+        echo "   $label attempt $attempt/$HEALTH_ATTEMPTS: serving v$got, expected v$want_version (propagating…)"
       else
         # POST pipeline check. Every user write (vote, comment, star, bookmark)
         # goes POST → 302 → googleusercontent echo, a path that can break
@@ -114,12 +122,12 @@ health_check() {
           echo "✅ $label healthy — HTTP 200, JSON feed + JSON POST, version ${got:-?}"
           rm -f "$body"; return 0
         fi
-        echo "   $label attempt $attempt: GET healthy but POST pipeline not serving JSON (http=$phttp, version=${pgot:-none})"
+        echo "   $label attempt $attempt/$HEALTH_ATTEMPTS: GET healthy but POST pipeline not serving JSON (http=$phttp, version=${pgot:-none})"
       fi
     else
-      echo "   $label attempt $attempt: not healthy yet (http=$http)"
+      echo "   $label attempt $attempt/$HEALTH_ATTEMPTS: not healthy yet (http=$http)"
     fi
-    sleep 5
+    sleep "$HEALTH_SLEEP_SECONDS"
   done
   rm -f "$body"
   return 1
