@@ -21,7 +21,7 @@ Each "sheet" is a **separate Google Spreadsheet**. There are eight:
 | **META** | Settings & secrets (see the config table below) | ✅ Yes — for settings/keys |
 | **BLOCKED** | Users banned from commenting | ✅ Yes — for moderation |
 | **COMMENTS** | User comments (filled automatically) | ❌ No |
-| **CUSTOMERS** | Everything per signed-in user: the **Customers** tab (account + email consent) plus the **Votes**, **Stars**, and **Bookmarks** tabs | ❌ No — the app manages it |
+| **CUSTOMERS** | Everything per signed-in user: the **Customers** tab (account + email consent) plus the **Votes**, **Stars**, and **Bookmarks** tabs — and the **Feedback** tab (what signed-in users send from the site's feedback button) | ❌ No — the app manages it |
 | **LOGS** | Diagnostic log (filled automatically) | ❌ No |
 | **CLIENT_ERRORS** | Frontend error reports (filled automatically) | ❌ No |
 
@@ -90,6 +90,16 @@ is ever overwritten.
 Set the channel's **`enabled`** cell to **`FALSE`**. It immediately stops being
 crawled and disappears from the site's Channels tab. Set it back to `TRUE` to
 resume. (Deleting the row also works, but disabling keeps its history.)
+
+### 📣 Read user feedback
+
+Open the **CUSTOMERS** spreadsheet, **Feedback** tab. Every message sent from
+the site's floating feedback button lands there as one row: when it was sent,
+who sent it (`email` + `name` from their Google sign-in — the button only
+shows to signed-in users), the message, and the page/app version/browser it
+came from, so a bug report is reproducible. Nothing to configure — the tab is
+created on the first submission. Spam guards: a 2,000-character cap, a 30s
+spacing per sender, and blocked users (below) can't send.
 
 ### 🚫 Block a user from commenting
 

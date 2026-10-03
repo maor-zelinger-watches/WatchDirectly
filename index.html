@@ -152,6 +152,36 @@
     </div>
   </div>
 
+  <!-- ===== FEEDBACK (js/feedback.js) =====
+       A floating button, bottom-right above the footer, styled like the
+       channel logo (volt disc, black mark with a burnt-orange outline).
+       Signed-in only: it starts hidden and app.js's auth listener shows it.
+       It opens a dialog with one textarea; the message lands in the
+       Feedback tab of the CUSTOMERS spreadsheet under the sender's email. -->
+  <button class="feedback-fab" id="feedback-fab" type="button" aria-label="Send feedback" aria-haspopup="dialog" aria-controls="feedback-overlay" hidden>
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path class="feedback-fab__bubble" d="M4 4.5h16a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5h-7.2L8 20.6V16.5H4A1.5 1.5 0 0 1 2.5 15V6A1.5 1.5 0 0 1 4 4.5z"></path>
+      <circle class="feedback-fab__dot" cx="8" cy="10.5" r="1.2"></circle>
+      <circle class="feedback-fab__dot" cx="12" cy="10.5" r="1.2"></circle>
+      <circle class="feedback-fab__dot" cx="16" cy="10.5" r="1.2"></circle>
+    </svg>
+  </button>
+
+  <div class="feedback-overlay" id="feedback-overlay" hidden>
+    <div class="feedback-overlay__backdrop" data-close></div>
+    <form class="feedback-overlay__dialog" id="feedback-form" role="dialog" aria-modal="true" aria-labelledby="feedback-title" tabindex="-1" novalidate>
+      <button type="button" class="feedback-overlay__close" data-close aria-label="Close">✕</button>
+      <h2 class="feedback-overlay__title" id="feedback-title">Send feedback</h2>
+      <p class="feedback-overlay__copy">Found a bug, missing a creator, or have an idea? Tell us.</p>
+      <label class="sr-only" for="feedback-message">Your feedback</label>
+      <textarea class="feedback-overlay__textarea" id="feedback-message" rows="5" maxlength="2000" placeholder="What's on your mind?" required></textarea>
+      <p class="feedback-overlay__note" id="feedback-identity"></p>
+      <div class="feedback-overlay__actions">
+        <button type="submit" class="btn btn--primary" id="feedback-submit">Submit</button>
+      </div>
+    </form>
+  </div>
+
   <!-- ===== TOAST NOTIFICATIONS ===== -->
   <div class="toast-container" id="toast-container" role="status" aria-live="polite" aria-atomic="true"></div>
 
