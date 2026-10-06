@@ -1465,6 +1465,14 @@ that component's heading.
 
 ## Repo
 
+### 1.2.10 — 2026-10-06
+- **No more daily CI run against production.** The `schedule` trigger
+  (09:17 UTC) is gone from `ci.yml`; the live smoke + perf job now runs only
+  on demand via `workflow_dispatch`. Per-push unit + e2e are unchanged. The
+  scheduled run was extra traffic on the Apps Script backend — the project
+  hit Google's 800-of-1,000 simultaneous-executions warning on 2026-10-06 —
+  and it was not catching anything the per-push suites miss.
+
 ### 1.2.9 — 2026-10-03
 - **Backend deploy health-check waits out propagation.** `deploy-backend.sh`
   checked prod 5 times, 5s apart — about 40–60s — but a new deployment

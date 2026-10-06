@@ -1,14 +1,14 @@
 name: CI
 
 # Unit + e2e run on every push and PR (fast, hermetic — no live backend).
-# Smoke + perf hit the live site, so they run on a schedule / on demand only,
-# never per-push, to avoid hammering the Apps Script backend.
+# Smoke + perf hit the live site, so they run on demand only (Actions →
+# CI → Run workflow), never per-push and no longer on a schedule: the daily
+# run added load to the Apps Script backend without catching anything the
+# per-push suites don't.
 on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: '17 9 * * *' # daily, 09:17 UTC — smoke + perf against production
   workflow_dispatch:
 
 concurrency:
@@ -41,7 +41,7 @@ jobs:
 
   smoke-perf:
     name: smoke + perf (live)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
