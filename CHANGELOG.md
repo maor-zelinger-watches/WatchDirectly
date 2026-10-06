@@ -807,6 +807,29 @@ that component's heading.
 
 ## Backend
 
+### 1.26.1 — 2026-10-06
+- **The whole sorted catalog is cached, so feed pages past the head and
+  search chunks stop re-scanning the Videos sheet.** Every request the 50-row
+  feed head couldn't answer — cursor pages 2+ (each scrolled page and each
+  read-ahead prefetch), offset pages past the head, and the search index's
+  limit=100 chunks — re-read and re-sorted the entire sheet (~2,100 rows,
+  2.4–7.7s each, 30s+ under contention). Measured on 2026-10-06, one browser's
+  first search-box focus fired 22 of those scans plus 28 archive pages, and a
+  cold load 4 more; those scans made up most of the 592k executions in the
+  week that pushed the project to Google's simultaneous-executions limit, at
+  which point even a no-op `/exec` waited 30s for a slot and the UI stalled.
+  `getVideos`, `handleTopWeek` and `handleVideo` now read `readSortedCatalog()`,
+  one scan per 300s or per invalidation (every writer that changes a row still
+  bumps the generation and now also drops the snapshot). The ~1.2MB payload is
+  far past CacheService's 100KB/key cap, so the shared sorted-list cache gains
+  chunking: values are ASCII-escaped (the cap is in bytes), split into 90KB
+  pieces keyed by generation, and stitched back with one `getAll` plus a
+  length check — a missing piece is a miss, never a truncated catalog. Small
+  values (head, Top This Week) are stored exactly as before. The whole-archive
+  snapshot was over the same cap and silently failing to cache on every
+  request; it caches now too. The head is repopulated once per scan instead of
+  on every warm cursor page. No response shape or ordering changes.
+
 ### 1.26.0 — 2026-10-03
 - **`feedback` action.** New signed-in POST (`message` + `token`) backing the
   site's feedback button. The row — id, time, verified email and name, the
