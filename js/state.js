@@ -46,6 +46,12 @@ export const state = {
   view: 'latest',           // 'latest' (chronological), 'top' (weekly upvotes),
                             // 'starred', 'bookmarks', or 'channels'
   prefetchBuffer: [],       // [{page, videos}] fetched ahead, contiguous from currentPage+1
+  feedReserve: null,        // {videos, anchor, reached} — cached Latest cards the
+                            // revalidate replaced instead of keeping (fresh page 1
+                            // shared nothing with the cached front). Served as pages
+                            // once pagination reaches where they start, so a returning
+                            // visitor scrolls back through familiar cards with zero
+                            // network calls. See prefetch.js "feed reserve".
   prefetching: false,       // single refill loop at a time
   prefetchToken: 0,         // invalidates in-flight refills when pagination resets
   pendingFetchPage: 0,      // page loadNextPage is fetching on demand (0 = none)

@@ -29,6 +29,8 @@ import { observeLazyIframe } from './lazy-iframe.js';
 import {
   serverHasMore, cursorAfter,
   invalidatePrefetchBuffer, takeBufferedPage, refillPrefetchBuffer,
+  fetchFeedPage,
+  stashFeedReserve,
 } from './prefetch.js';
 import { prefetchComments, updateInlineCommentFormUI, setCommentsToggleCount } from './comments-ui.js';
 import { clearVoteMarkings, setOnVotesChanged } from './votes.js';
@@ -252,7 +254,7 @@ async function loadNextPage() {
         const epoch = state.prefetchToken;
         state.pendingFetchPage = nextPage;
         try {
-          const data = await api.fetchFeed(nextPage, CONFIG.PAGE_SIZE, state.nextCursor || '');
+          const data = await fetchFeedPage(nextPage, state.nextCursor || '');
           if (epoch !== state.prefetchToken) return;
           batch = { videos: data.videos || [], nextCursor: data.next_cursor };
           state.totalVideos = data.total || 0;
@@ -618,6 +620,9 @@ async function revalidateFeed() {
     // — a search query is active, OR the user is on a different tab. When they
     // return to Latest it re-renders from this state.
     const adoptFreshAsState = () => {
+      // The replaced list becomes the reserve: pagination serves those cards
+      // again, without the network, once it reaches where they start.
+      stashFeedReserve(state.videos, freshVideos);
       state.videos = freshVideos;
       state.totalVideos = data.total || freshVideos.length;
       state.currentPage = 1;
@@ -666,8 +671,9 @@ async function revalidateFeed() {
     // down. When the cached front shares ZERO ids with fresh page 1 the whole
     // visible window is wholesale-stale, so nothing was "pushed down": keeping
     // those cards strands them interleaved with the fresh ones (prefetch_races
-    // bug 4). Fall back to a full replace + re-paginate; a genuine burst of
-    // brand-new items simply re-fetches the tail, no data lost.
+    // bug 4). Fall back to a full replace + re-paginate — but keep the replaced
+    // cards as the feed reserve (prefetch.js), so the tail is served from
+    // memory once pagination reaches it instead of re-fetched page by page.
     const frontOverlap = state.videos
       .slice(0, freshVideos.length)
       .some(v => freshIdSet.has(v.video_id));
@@ -790,6 +796,14 @@ async function revalidateFeed() {
       // persists the merged feed, not the pre-merge snapshot.
       saveFeedCacheSoon(state.videos, state.totalVideos);
     } else {
+      // Full replace — the cards just animated out are NOT thrown away: they
+      // become the feed reserve, served back as pages (zero network) once
+      // pagination reaches the range they cover. Without this a visitor
+      // returning after ~6h (enough new items to push the whole cached front
+      // off page 1) re-fetched every card they already had, one cursor page
+      // at a time, which read as "the feed doesn't load until I reach the
+      // articles I had before".
+      stashFeedReserve(state.videos, freshVideos);
       state.videos = freshVideos;
       state.totalVideos = data.total || freshVideos.length;
       state.currentPage = 1;
