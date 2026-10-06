@@ -68,8 +68,25 @@ const FEED_HEAD_COUNT = 50;
 const FEED_HEAD_CACHE_KEY = 'feed_head_v1';
 const FEED_HEAD_CACHE_SECONDS = 300;
 
+// Whole-catalog cache: the ENTIRE sorted live catalog, so every request the
+// head cannot answer — cursor pages (page 2+ of the feed), offset pages past
+// the head, and the search index's limit=100 chunks — is a cache read instead
+// of a full Videos-sheet scan + sort. Measured 2026-10-06: a browser's first
+// search focus fired 22 limit=100 feed pages, each a full scan of ~2100 rows
+// (2.4-7.7s, 30s+ under contention); together with every scrolled cursor page
+// those scans were most of the ~590k executions/week that drove the project
+// to Google's simultaneous-executions limit. The payload (~1.2MB) is far past
+// CacheService's 100KB/key cap, so the shared sorted-list cache splits big
+// values into chunks (see cachePutChunked). Same TTL/invalidation as the head:
+// every writer that changes a row bumps the generation, which stales both.
+const CATALOG_CACHE_KEY = 'catalog_sorted_v1';
+const CATALOG_CACHE_SECONDS = 300;
+// Chunk size for cached values. Chunks are ASCII-escaped before splitting so
+// one char is one byte, keeping each piece comfortably under the 100KB cap.
+const CACHE_CHUNK_CHARS = 90000;
+
 // Short-lived "no such video" marker for the single-video lookup (BE11). A shared
-// deep link to a bogus id otherwise forces handleVideo through readAllVideos() AND
+// deep link to a bogus id otherwise forces handleVideo through readSortedCatalog() AND
 // readSortedArchive() — two full scans — on every hit; a repeated bogus id would
 // re-run both each time. Caching the miss for a few seconds lets a burst of the
 // same bad id short-circuit to not-found without touching the sheets.
@@ -2974,6 +2991,30 @@ function readAllVideos() {
 }
 
 /**
+ * The whole live catalog, sorted newest-first, from the chunked CacheService
+ * snapshot — or from one sheet scan that then populates it for every caller
+ * in the next CATALOG_CACHE_SECONDS. This is what the read-only handlers
+ * (feed pages past the head, cursor pages, search chunks, Top This Week's
+ * window, deep-link lookups) read instead of readAllVideos(), so a burst of
+ * requests costs one scan rather than one scan each.
+ *
+ * Returns the cached payload shape: { videos, total, gen, [fresh] }. `fresh`
+ * is set only on the call that produced the snapshot (never persisted), so a
+ * caller can refresh derived caches — the feed head — exactly once per scan.
+ * Expired provisional rows (a premiere/live item whose expires_at lapsed)
+ * make the snapshot a miss, like the head: the scan drops them.
+ *
+ * @returns {{videos: Object[], total: number, gen: number, fresh?: boolean}}
+ */
+function readSortedCatalog() {
+  return cachedSortedList(CATALOG_CACHE_KEY, CATALOG_CACHE_SECONDS, function() {
+    var videos = readAllVideos();
+    videos.sort(compareVideos);
+    return videos;
+  }, { total: true, checkExpiry: true });
+}
+
+/**
  * Turns a raw sheet grid (header + rows) into normalized, deduped video
  * objects. Shared by readAllVideos (live sheet) and readArchiveVideos (the
  * Archive tab) so both serve the exact same shape — same expiry drop, same
@@ -3093,7 +3134,7 @@ function bumpCacheGeneration() {
 function readCachedSortedList(key, options) {
   options = options || {};
   try {
-    var raw = CacheService.getScriptCache().get(key);
+    var raw = cacheGetChunked(CacheService.getScriptCache(), key);
     if (!raw) return null;
     var payload = JSON.parse(raw);
     if (!payload || !Array.isArray(payload.videos)) return null;
@@ -3132,11 +3173,86 @@ function putCachedSortedList(key, ttlSeconds, payload, capturedGen) {
   try {
     if (capturedGen !== currentCacheGeneration()) return false;
     payload.gen = capturedGen;
-    CacheService.getScriptCache().put(key, JSON.stringify(payload), ttlSeconds);
+    cachePutChunked(CacheService.getScriptCache(), key, JSON.stringify(payload), ttlSeconds, capturedGen);
     return true;
   } catch (e) {
     return false;
   }
+}
+
+/**
+ * Stores a JSON string in CacheService, splitting values past the 100KB/key cap
+ * into chunks. Small values go under `key` as-is (so nothing changes for the
+ * feed head and Top This Week). A big value is first escaped to pure ASCII so
+ * one char is one byte (CacheService counts bytes; a Hebrew or emoji title is
+ * 2-4 bytes per char), cut into CACHE_CHUNK_CHARS pieces stored under
+ * `key.<tag>.<i>`, and then — last, so a reader never sees a manifest before
+ * its chunks exist — a manifest `{__chunks, tag, len}` goes under `key`. The
+ * tag (the generation the payload was stamped with) is part of the chunk keys,
+ * so a reader can never stitch chunks from two different snapshots together.
+ * Chunks from a superseded snapshot just age out with their TTL. Throws on
+ * failure like a plain put; callers already treat that as "not cached".
+ */
+function cachePutChunked(cache, key, json, ttlSeconds, tag) {
+  if (json.length <= CACHE_CHUNK_CHARS && !/[\u007f-\uffff]/.test(json)) {
+    cache.put(key, json, ttlSeconds);
+    return;
+  }
+  var ascii = json.replace(/[\u007f-\uffff]/g, function(c) {
+    return '\\u' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4);
+  });
+  if (ascii.length <= CACHE_CHUNK_CHARS) {
+    cache.put(key, ascii, ttlSeconds);
+    return;
+  }
+  var n = Math.ceil(ascii.length / CACHE_CHUNK_CHARS);
+  var parts = {};
+  for (var i = 0; i < n; i++) {
+    parts[chunkKey_(key, tag, i)] = ascii.substr(i * CACHE_CHUNK_CHARS, CACHE_CHUNK_CHARS);
+  }
+  if (typeof cache.putAll === 'function') {
+    cache.putAll(parts, ttlSeconds);
+  } else {
+    for (var k in parts) cache.put(k, parts[k], ttlSeconds);
+  }
+  cache.put(key, JSON.stringify({ __chunks: n, tag: tag, len: ascii.length }), ttlSeconds);
+}
+
+/**
+ * Reads a value stored by cachePutChunked: a plain value comes back as-is; a
+ * manifest is expanded by fetching its chunks (one getAll) and checking every
+ * piece is present and the total length matches. Any gap — a chunk evicted
+ * early, a half-written snapshot — yields null, which every caller treats as
+ * a miss and re-derives from the sheet.
+ */
+function cacheGetChunked(cache, key) {
+  var raw = cache.get(key);
+  if (!raw) return null;
+  if (raw.indexOf('{"__chunks"') !== 0) return raw;
+  var manifest = JSON.parse(raw);
+  var n = manifest.__chunks;
+  if (typeof n !== 'number' || n < 1) return null;
+  var keys = [];
+  for (var i = 0; i < n; i++) keys.push(chunkKey_(key, manifest.tag, i));
+  var parts;
+  if (typeof cache.getAll === 'function') {
+    parts = cache.getAll(keys) || {};
+  } else {
+    parts = {};
+    for (var j = 0; j < keys.length; j++) parts[keys[j]] = cache.get(keys[j]);
+  }
+  var out = '';
+  for (var m = 0; m < keys.length; m++) {
+    var piece = parts[keys[m]];
+    if (typeof piece !== 'string' || !piece) return null;
+    out += piece;
+  }
+  if (typeof manifest.len === 'number' && out.length !== manifest.len) return null;
+  return out;
+}
+
+function chunkKey_(key, tag, i) {
+  return key + '.' + String(tag) + '.' + i;
 }
 
 /**
@@ -3171,6 +3287,7 @@ function cachedSortedList(key, ttlSeconds, producer, options) {
   var payload = { videos: cap > 0 ? videos.slice(0, cap) : videos, gen: gen };
   if (options.total) payload.total = videos.length;
   putCachedSortedList(key, ttlSeconds, payload, gen);
+  payload.fresh = true; // this call paid the scan (never persisted — set after the put)
   return payload;
 }
 
@@ -3282,7 +3399,8 @@ function handleVideo(params) {
 
   // Not-found short-circuit (BE11): a recent lookup that resolved to nothing is
   // remembered briefly, so a burst of the same bogus id can't repeatedly force
-  // the full readAllVideos() + readSortedArchive() scans below. Best-effort, and
+  // the readSortedCatalog() + readSortedArchive() reads below (each a sheet
+  // scan when its cache is cold). Best-effort, and
   // only for ids short enough to be a safe cache key. Keyed by id — a video that
   // later appears is a cache miss until this marker's short TTL lapses, which is
   // acceptable for a deep-link lookup.
@@ -3309,7 +3427,7 @@ function handleVideo(params) {
 
   var head = readFeedHead();
   var video = head ? findIn(head.videos) : null;
-  if (!video) video = findIn(readAllVideos());
+  if (!video) video = findIn(readSortedCatalog().videos);
   if (!video) video = findIn(readSortedArchive());
 
   // Cache the miss so the next lookup of this id skips both full scans.
@@ -3414,26 +3532,27 @@ function getVideos(page, limit, cursor) {
     }
   }
 
-  // Capture the generation BEFORE the sheet read so a vote/comment/crawl that
-  // invalidates mid-scan advances it past this value; putCachedSortedList then
-  // refuses to install this now-stale head for the full TTL (the BE2 race).
-  var gen = currentCacheGeneration();
-  var videos = readAllVideos();
+  // Everything the head can't answer comes from the whole-catalog snapshot:
+  // one sheet scan + sort per CATALOG_CACHE_SECONDS (or per invalidation),
+  // shared by every cursor page, deep offset page and search chunk in flight.
+  // The snapshot carries the generation captured before its scan, so the head
+  // populate below stays guarded against a concurrent invalidate (BE2 race).
+  var catalog = readSortedCatalog();
+  var videos = catalog.videos;
 
   if (videos.length === 0) {
     return { status: 'ok', videos: [], total: 0, page: page, next_cursor: '' };
   }
 
-  // Sort by published_at descending (newest first), video_id tiebreak
-  videos.sort(compareVideos);
-
-  // Read-through populate: any full-path request refreshes the head for the
-  // next caller, stamped with the generation captured above so a snapshot read
-  // before a concurrent invalidate can't be re-installed. Best-effort.
-  putCachedSortedList(FEED_HEAD_CACHE_KEY, FEED_HEAD_CACHE_SECONDS, {
-    videos: videos.slice(0, FEED_HEAD_COUNT),
-    total: videos.length,
-  }, gen);
+  // Read-through populate of the head: once per scan (the call that produced
+  // the snapshot), or when this request fell through a missing head. A warm
+  // cursor page must NOT rewrite the head on every call. Best-effort.
+  if (catalog.fresh || (!cursor && start + limit <= FEED_HEAD_COUNT)) {
+    putCachedSortedList(FEED_HEAD_CACHE_KEY, FEED_HEAD_CACHE_SECONDS, {
+      videos: videos.slice(0, FEED_HEAD_COUNT),
+      total: videos.length,
+    }, catalog.gen);
+  }
 
   // Cursor pagination: resume strictly after the (published_at, video_id)
   // position the client last saw. Unlike the page offset above, items
@@ -3489,7 +3608,9 @@ function readFeedHead() {
 function invalidateFeedHead() {
   bumpCacheGeneration();
   try {
-    CacheService.getScriptCache().remove(FEED_HEAD_CACHE_KEY);
+    var cache = CacheService.getScriptCache();
+    cache.remove(FEED_HEAD_CACHE_KEY);
+    cache.remove(CATALOG_CACHE_KEY); // chunks age out; the manifest is what readers key on
   } catch (e) {
     /* best-effort — the generation bump already invalidated it */
   }
@@ -3517,7 +3638,12 @@ function readTopWeek() {
 function invalidateTopWeek() {
   bumpCacheGeneration();
   try {
-    CacheService.getScriptCache().remove(TOP_WEEK_CACHE_KEY);
+    var cache = CacheService.getScriptCache();
+    cache.remove(TOP_WEEK_CACHE_KEY);
+    // The ranking is derived from the whole-catalog snapshot, and every writer
+    // that re-ranks (crawl view refresh, vote/comment recount) also changed
+    // rows baked into that snapshot — drop it too, not just the ranked slice.
+    cache.remove(CATALOG_CACHE_KEY);
   } catch (e) {
     /* best-effort — the generation bump already invalidated it */
   }
@@ -3638,8 +3764,9 @@ function handleTopWeek(params) {
   // Capture the generation BEFORE the sheet read so a vote/comment/crawl that
   // invalidates mid-scan advances it past this value; putCachedSortedList then
   // refuses to install this now-stale window for the full TTL (the BE2 race).
-  var gen = currentCacheGeneration();
-  var recent = readAllVideos().filter(function(v) {
+  var catalog = readSortedCatalog();
+  var gen = catalog.gen;
+  var recent = catalog.videos.filter(function(v) {
     var t = new Date(v.published_at).getTime();
     return !isNaN(t) && t >= cutoff;
   });

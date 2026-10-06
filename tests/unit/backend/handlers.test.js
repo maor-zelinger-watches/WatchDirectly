@@ -399,11 +399,15 @@ describe('getVideos feed-head cache (skip the sheet scan on early pages)', () =>
     expect(second.next_cursor).toBe(first.next_cursor);
   });
 
-  it('cursor requests always take the live path', () => {
+  it('cursor requests resolve against the cached whole catalog, not a fresh scan', () => {
+    // Cursor resolution needs the full sorted catalog. Before the whole-catalog cache
+    // that meant a sheet scan per cursor page (every scrolled page, every
+    // read-ahead prefetch); now the scan that populated the head also cached
+    // the whole catalog, and the cursor page is served from it.
     const { be, reads } = countingSetup();
-    be.getVideos(1, 10, '');                          // populates the head
+    be.getVideos(1, 10, '');                          // populates the head + catalog
     const res = be.getVideos(2, 1, '2026-01-02T00:00:00.000Z|vid1');
-    expect(reads()).toBe(2);                          // cursor resolution needs the full catalog
+    expect(reads()).toBe(1);                          // no second scan
     expect(res.videos.map((v) => v.video_id)).toEqual(['vid2']);
   });
 
@@ -587,9 +591,11 @@ describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
     expect(res.videos.map((v) => v.video_id)).toEqual(['a']); // no ghost
   });
 
-  it('falls through to a live scan when the request exceeds the cached slice', () => {
+  it('falls through to the whole-catalog snapshot when the request exceeds the cached slice', () => {
     // Populate a cache of TOP_WEEK_CACHE_COUNT rows against a larger window, then
-    // ask for more than the cap: the cache can't satisfy it, so re-scan.
+    // ask for more than the cap: the ranked slice can't satisfy it, so the
+    // window is re-derived — from the cached whole catalog (the whole-catalog cache),
+    // which the first scan populated, so still no second sheet read.
     const rows = [];
     for (let i = 0; i < 60; i++) rows.push(['v' + i, 'https://x/' + i, daysAgo(1), 60 - i, 0, 'Chan']);
     const { be, reads } = setup(rows);
@@ -598,12 +604,12 @@ describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
     expect(reads()).toBe(1);
     expect(first.total).toBe(60);
 
-    const big = be.handleTopWeek({ limit: 60 });        // 60 > cached 50 → live scan
-    expect(reads()).toBe(2);
+    const big = be.handleTopWeek({ limit: 60 });        // 60 > cached 50 → re-derive from the catalog
+    expect(reads()).toBe(1);
     expect(big.videos.length).toBe(60);
 
     const small = be.handleTopWeek({ limit: 50 });      // satisfiable from cache again
-    expect(reads()).toBe(2);                            // no extra scan
+    expect(reads()).toBe(1);                            // no extra scan
     expect(small.videos.length).toBe(50);
   });
 
