@@ -21,6 +21,27 @@ that component's heading.
 
 ## Frontend
 
+### 1.33.0 — 2026-10-06
+- **Coming back after a few hours no longer re-fetches the cards you already
+  had.** On return, the cached Latest feed paints and fresh page 1 is fetched.
+  When fresh page 1 shared nothing with the cached front — which happens after
+  roughly six hours away, since the feed gains about ten items in that time —
+  the revalidate replaced the whole cached list with fresh page 1 and reset
+  pagination, so every card you had scrolled through was thrown away and
+  re-fetched from the server one cursor page at a time. That read as "the
+  feed doesn't load until I reach the articles I already had". The replaced
+  cards are now kept as a *feed reserve* (`prefetch.js`). Pages keep coming
+  from the server until one ends at or past the newest card you had cached;
+  from that point the server's continuation is, by construction, exactly your
+  cached tail, so every following page is served from memory with no network
+  call and the rendered feed is identical to what the server would return.
+  Cards deleted upstream in the meantime are dropped as the server pages pass
+  them. One fetch path now serves both infinite scroll and the read-ahead
+  buffer, so the buffered pages fill instantly too. A small change (fresh
+  page 1 still overlaps the cached front) keeps the tail in place as before
+  and needs no reserve. Side effect: each returning visit saves up to 60
+  backend requests. Backends without cursor support ignore the reserve.
+
 ### 1.32.0 — 2026-10-03
 - **Feedback button.** Signed-in users get a floating button bottom-right,
   above the footer, styled like the channel logo (volt disc, black
