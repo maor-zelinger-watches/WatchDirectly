@@ -24,7 +24,7 @@ import { initAuth, getCurrentUser, onAuthChange, signOut } from './auth.js';
 import { setupAuthOverlay, openAuthOverlay, authOverlayOnAuthChange } from './auth-overlay.js';
 import { sanitizeHtml, cssEscape, safeUrl } from './utils.js';
 import { showToast } from './toast.js';
-import { buildCard, insertCardChronologically, renderList, cardTimeMs } from './cards.js';
+import { buildCard, insertCardChronologically, renderList, cardTimeMs, FIRST_PAINT_PRIORITY_CARDS } from './cards.js';
 import { observeLazyIframe } from './lazy-iframe.js';
 import {
   serverHasMore, cursorAfter,
@@ -463,10 +463,15 @@ async function appendCards(videos) {
   const shorts = deduped.filter(isShort);
   const inserted = [];
 
+  // The first network paint into an empty feed: its first cards are the first
+  // screen, so their preview images load eagerly at high priority (the LCP
+  // candidate). Later pages, and appends to a populated feed, stay lazy.
+  const priorityUntil = feedContainer.childElementCount === 0 ? FIRST_PAINT_PRIORITY_CARDS : 0;
+
   // Long-form cards append in batch order (pages arrive chronological).
   const frag = document.createDocumentFragment();
   mains.forEach((video, i) => {
-    const card = buildCard(video);
+    const card = buildCard(video, { priority: i < priorityUntil });
     card.classList.add('media-card--enter');
     card.style.setProperty('--enter-delay', `${i * 60}ms`);
     frag.appendChild(card);

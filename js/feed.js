@@ -60,14 +60,59 @@ export function typeFilterVisible(video, types) {
   return types.includes(mediaType(video));
 }
 
+// --- article preview images -----------------------------------------------
+//
+// Preview images come from the article sites at whatever size the site serves
+// — measured 2026-10-07: Fratello's are 170-420KB each, so the six images in a
+// cold load's first screen were ~1MB, and on a slow connection the LCP image
+// shared the link with five others at equal priority. Two fixes live here:
+//
+//   - Sites behind Cloudflare Image Resizing publish URLs with a
+//     `/cdn-cgi/image/<options>/` segment whose options the client may set.
+//     For those, the card requests sized variants (a srcset the browser picks
+//     from by viewport and DPR) with `format=auto` (WebP/AVIF where supported).
+//     172KB → 39KB at 800px wide in the measurement. Other hosts keep the
+//     stored URL untouched.
+//   - The first card or two of a fresh paint load eagerly with
+//     fetchpriority=high (`priority` option); everything below stays lazy.
+
+export const PREVIEW_WIDTHS = [640, 1280]; // 1x phone / 2x phone & 1-2x desktop (feed max 760px)
+export const PREVIEW_SIZES = '(max-width: 760px) 100vw, 760px';
+const CF_IMAGE_RE = /^(https:\/\/[^/]+\/cdn-cgi\/image\/)([^/]*)(\/.+)$/;
+const CF_SIZING_OPTION_RE = /^(width|w|height|h|fit|format|f|dpr)=/;
+
+/**
+ * The `src` / `srcset` for an article preview image. Returns null for no URL;
+ * `srcset` is '' when the host offers no resizing (plain `src` only).
+ *
+ * @param {string} url - the stored preview_image URL (already safeUrl'd)
+ * @returns {{src: string, srcset: string}|null}
+ */
+export function previewImageSources(url) {
+  if (!url) return null;
+  const m = String(url).match(CF_IMAGE_RE);
+  if (!m) return { src: url, srcset: '' };
+  const [, prefix, options, rest] = m;
+  const kept = options.split(',').filter(o => o && !CF_SIZING_OPTION_RE.test(o));
+  const variant = (w) => `${prefix}${[...kept, `width=${w}`, 'fit=scale-down', 'format=auto'].join(',')}${rest}`;
+  return {
+    src: variant(PREVIEW_WIDTHS[PREVIEW_WIDTHS.length - 1]),
+    srcset: PREVIEW_WIDTHS.map(w => `${variant(w)} ${w}w`).join(', '),
+  };
+}
+
 /**
  * Creates an HTML string for a media card (video or article) in the feed.
  * Uses CSS Grid: thumbnail left, info right, comments below.
  *
  * @param {Object} item - Media item data from the API
+ * @param {{priority?: boolean}} [opts] - `priority`: this card is in the first
+ *   screen of a fresh paint — its preview image loads eagerly at high fetch
+ *   priority instead of lazily (the LCP candidate must not queue behind the
+ *   images below it)
  * @returns {string} HTML string for the card
  */
-export function createMediaCard(item) {
+export function createMediaCard(item, { priority = false } = {}) {
   const escaped = {
     title: sanitizeHtml(item.title),
     channel: sanitizeHtml(item.channel_name),
@@ -88,8 +133,13 @@ export function createMediaCard(item) {
   
   // The whole image is one link — hover overlays don't exist on touch.
   // The "Read Article" pill is a span inside it (anchors can't nest).
-  const articleMedia = safeUrl(item.preview_image)
-    ? `<img src="${sanitizeHtml(safeUrl(item.preview_image))}" alt="${escaped.title}" class="article-card__img" loading="lazy">`
+  const preview = previewImageSources(safeUrl(item.preview_image));
+  const imgLoading = priority ? 'loading="eager" fetchpriority="high"' : 'loading="lazy"';
+  const imgSrcset = preview && preview.srcset
+    ? ` srcset="${sanitizeHtml(preview.srcset)}" sizes="${PREVIEW_SIZES}"`
+    : '';
+  const articleMedia = preview
+    ? `<img src="${sanitizeHtml(preview.src)}"${imgSrcset} alt="${escaped.title}" class="article-card__img" ${imgLoading}>`
     : `<div class="article-card__placeholder">${iconSvg('article', 44)}</div>`;
 
   const embedHtml = isArticle ? `
