@@ -131,7 +131,7 @@ function loadBackend(opts = {}) {
     SpreadsheetApp: { openById: (id) => spreadsheets[id] },
     CacheService: cache,
     PropertiesService: props,
-    LockService: { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }) },
+    LockService: opts.lock || { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }) },
     Logger: { log() {} },
     Utilities: { sleep() {}, getUuid: () => 'uuid' },
     UrlFetchApp: {},
@@ -147,8 +147,9 @@ function loadBackend(opts = {}) {
     'getVideos', 'handleFeed', 'handleTopWeek', 'handleVideo', 'handleArchive', 'readSortedArchive', 'readSortedCatalog',
     'readFeedHead', 'invalidateFeedHead', 'invalidateArchive', 'updateVoteCount',
     'currentCacheGeneration', 'bumpCacheGeneration',
-    'readCachedSortedList', 'putCachedSortedList', 'cachePutChunked', 'cacheGetChunked',
+    'readCachedSortedList', 'putCachedSortedList', 'cachePutChunked', 'cacheGetChunked', 'cachedSortedList',
     'FEED_HEAD_CACHE_KEY', 'CATALOG_CACHE_KEY', 'ARCHIVE_CACHE_KEY', 'CACHE_CHUNK_CHARS', 'FEED_HEAD_COUNT',
+    'SORTED_LIST_REBUILD_LOCK_MS',
   ];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
   return { ...factory(...Object.values(globals)), cache, props, videosSheet, videosSpreadsheet };
@@ -366,5 +367,102 @@ describe('chunked CacheService values — the catalog is far past the 100KB/key 
     expect(JSON.parse(be.cache._store.k2).__chunks).toBe(3);
     expect(be.cacheGetChunked(cache, 'k2')).toBe(over);
     expect(be.cacheGetChunked(cache, 'nope')).toBeNull();
+  });
+});
+
+/**
+ * A LockService stub that records every waitLock/releaseLock and can run a
+ * hook INSIDE waitLock — standing in for "another execution held the lock and
+ * populated the cache while we waited", the whole point of the guard.
+ */
+function recordingLock({ onWait, throwOnWait = false } = {}) {
+  const stats = { waits: 0, releases: 0, timeouts: [] };
+  const lock = {
+    waitLock(ms) {
+      stats.waits++;
+      stats.timeouts.push(ms);
+      if (throwOnWait) throw new Error('Lock timeout: another process was holding the lock for too long.');
+      if (onWait) onWait();
+    },
+    tryLock: () => true,
+    releaseLock() { stats.releases++; },
+  };
+  return { _stats: stats, getScriptLock: () => lock };
+}
+
+describe('cachedSortedList — stampede guard (2026-10-03..08 "Too many simultaneous invocations: Spreadsheets")', () => {
+  it('a miss takes the script lock, re-checks the cache, and skips the scan when a holder populated it', () => {
+    // Everything that landed on the same miss used to scan the sheet itself.
+    // Now the first one scans under the lock; the rest find the snapshot on
+    // their post-lock re-check and never touch the Spreadsheet service.
+    let be;
+    const lock = recordingLock({
+      onWait: () => {
+        // "The execution ahead of us" finishes its rebuild while we wait.
+        be.putCachedSortedList(be.CATALOG_CACHE_KEY, 300, {
+          videos: [{ video_id: 'FROM-HOLDER', title: 'FROM-HOLDER', published_at: iso(now - DAY), media_type: 'video' }], total: 1,
+        }, be.currentCacheGeneration());
+      },
+    });
+    be = loadBackend({ videoRows: bigCatalog(50), lock });
+
+    const got = be.readSortedCatalog();
+    expect(got.videos.map((v) => v.video_id)).toEqual(['FROM-HOLDER']);
+    expect(got.fresh).toBeUndefined();          // served, not produced
+    expect(be.videosSheet._stats.reads).toBe(0); // no scan at all
+    expect(lock._stats.waits).toBe(1);
+    expect(lock._stats.releases).toBe(1);
+    expect(lock._stats.timeouts).toEqual([be.SORTED_LIST_REBUILD_LOCK_MS]);
+  });
+
+  it('a genuine miss scans once under the lock and releases it', () => {
+    const lock = recordingLock();
+    const be = loadBackend({ videoRows: bigCatalog(50), lock });
+
+    const got = be.readSortedCatalog();
+    expect(got.videos).toHaveLength(50);
+    expect(got.fresh).toBe(true);
+    expect(be.videosSheet._stats.reads).toBe(1);
+    expect(lock._stats.waits).toBe(1);
+    expect(lock._stats.releases).toBe(1);
+  });
+
+  it('a hit never touches the lock', () => {
+    const lock = recordingLock();
+    const be = loadBackend({ videoRows: bigCatalog(50), lock });
+    be.readSortedCatalog(); // populate
+    be.readSortedCatalog();
+    be.getVideos(3, 10, '');
+    be.handleTopWeek({ limit: 10 });
+    expect(be.videosSheet._stats.reads).toBe(1);
+    expect(lock._stats.waits).toBe(1); // only the populate waited
+  });
+
+  it('contended past the bound, the request scans unshared — never worse than before the guard', () => {
+    const lock = recordingLock({ throwOnWait: true });
+    const be = loadBackend({ videoRows: bigCatalog(50), lock });
+
+    const got = be.readSortedCatalog();
+    expect(got.videos).toHaveLength(50);
+    expect(got.fresh).toBe(true);
+    expect(be.videosSheet._stats.reads).toBe(1);
+    expect(lock._stats.waits).toBe(1);
+    expect(lock._stats.releases).toBe(0); // never held, so never released
+  });
+
+  it('releases the lock when the scan itself throws', () => {
+    const lock = recordingLock();
+    const be = loadBackend({ videoRows: bigCatalog(5), lock });
+    be.videosSheet.getDataRange = () => { throw new Error('Too many simultaneous invocations: Spreadsheets'); };
+
+    expect(() => be.readSortedCatalog()).toThrow(/simultaneous invocations/);
+    expect(lock._stats.waits).toBe(1);
+    expect(lock._stats.releases).toBe(1);
+  });
+
+  it('the bound is well under the 6-minute execution limit and well over a normal scan', () => {
+    const be = loadBackend({ videoRows: [] });
+    expect(be.SORTED_LIST_REBUILD_LOCK_MS).toBeGreaterThanOrEqual(10000);
+    expect(be.SORTED_LIST_REBUILD_LOCK_MS).toBeLessThan(6 * 60 * 1000);
   });
 });
