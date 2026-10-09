@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /add-channel.html
+
+Sitemap: https://www.howyouwatch.com/sitemap.xml

@@ -21,6 +21,26 @@ that component's heading.
 
 ## Frontend
 
+### 1.35.0 — 2026-10-09
+- **Shared links unfurl with an image, and the tab has an icon.** Sharing is
+  first-class (`share.js` mints `?v=<id>` links from every card) yet every
+  shared link rendered as the same imageless generic card, and the tab showed
+  the browser's default globe — the repo had no image assets at all. The
+  home, privacy and terms pages now carry a canonical URL, full Open Graph
+  tags (site name, URL, title, description, 1200×630 image with dimensions
+  and alt) and a Twitter `summary_large_image` card; all five pages link a
+  favicon set (`assets/favicon.svg` for modern browsers, `.ico` fallback,
+  `apple-touch-icon.png` for iOS) and set `theme-color`. The mark is the
+  site's own: a volt disc carrying the speech bubble with a feed card inside
+  (thumbnail block over text lines), black with the burnt-orange outline.
+  `robots.txt` allows crawling, hides the add-channel admin page and points
+  at a new three-URL `sitemap.xml` (index, privacy, terms; `404.html` and
+  `add-channel.html` stay `noindex`). `tests/unit/seo_meta.test.js` fails if
+  a page drops a tag, an asset goes missing, the image is not 1200×630, or
+  the sitemap drifts from the canonical URLs. To change the share image,
+  replace `assets/og-image.png` at 1200×630 — no code change. The CSP's
+  `img-src 'self'` already allows the assets.
+
 ### 1.34.0 — 2026-10-09
 - **Cold loads on a slow connection reach the first card about three seconds
   sooner.** The app ships 30 unbundled ES modules with an import chain 11
