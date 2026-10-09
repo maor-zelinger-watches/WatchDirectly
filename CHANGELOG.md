@@ -21,6 +21,30 @@ that component's heading.
 
 ## Frontend
 
+### 1.35.1 — 2026-10-09
+- **The privacy policy now says what the code does.** Three claims on
+  `privacy.html` were wrong: §2.2 said the Google authentication token is
+  "not stored persistently" (sign-in exchanges it for an app session token
+  that lives in `localStorage` under `wd_user` with name, email and picture,
+  is valid 30 days and renews itself when you visit in its last 7 days, and
+  is sent on every signed-in request); §2.4 said localStorage holds only the
+  feed cache and nothing is transmitted (it also holds the identity blob and
+  the session token, favorites, bookmarks, filter and consent settings, and
+  IndexedDB holds the large caches); and §7 said revoking Google access ends
+  the session immediately (the app session is independent of Google — only
+  signing out ends it, otherwise it expires within 30 days). Nothing
+  disclosed error telemetry, votes/favorites/bookmarks, or feedback. New
+  §2.4 Votes, Favorites & Bookmarks (stored under the email; votes public in
+  aggregate only, favorites/bookmarks private), §2.5 Feedback (message +
+  name, email, page, app version, user agent), §2.6 Error Reports (message,
+  stack, page, user agent, app version, random per-page-load id; no
+  identity, tokens scrubbed), §2.7 Data on Your Device; §3 adds votes,
+  account tenure weighing votes, bug-fixing; §4 notes the one-time Google
+  token verification and Google-hosted backend; §7 fixes the revocation
+  claim and lists everything a deletion request covers. Old §2.5/§2.6 become
+  §2.8/§2.9; the footer's `#cookies` anchor is unchanged. Wording reviewed by
+  Maor before shipping. Retires the content-privacy-policy fix plan.
+
 ### 1.35.0 — 2026-10-09
 - **Shared links unfurl with an image, and the tab has an icon.** Sharing is
   first-class (`share.js` mints `?v=<id>` links from every card) yet every
