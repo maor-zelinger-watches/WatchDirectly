@@ -31,7 +31,7 @@ if (self !== top) {
 }
 
 import { api } from './api-client.js';
-import { isSignedIn, getToken, isTokenExpired, refreshToken } from './auth.js';
+import { isSignedIn, getToken, isTokenExpired, refreshToken, signOut } from './auth.js';
 import { reconcileMyVotes } from './votes.js';
 import { reconcileMyStars } from './stars.js';
 import { reconcileMyBookmarks } from './bookmarks.js';
@@ -43,11 +43,54 @@ export async function loadMyVotesAndStars() {
   if (isTokenExpired()) token = await refreshToken();
   if (!token) return; // can't reconcile right now; caches stay best-effort
 
-  const pending = api.fetchBootstrap(token);
+  // One promise for every reconciler — created BEFORE anything is awaited so
+  // each reconciler's epoch capture still precedes the request (see above).
+  const pending = fetchBootstrapWithReauth(token);
   await Promise.all([
     reconcileMyVotes(pending),
     reconcileMyStars(pending),
     reconcileMyBookmarks(pending),
     reconcileMyEmailConsent(pending),
   ]);
+}
+
+// The backend's answers that mean "this session is no longer accepted" even
+// though the token's own exp hasn't passed: a revoked session (server
+// sign-out on another device, a block), a session past its absolute max age,
+// or a token minted before sessions carried a version (the one-time cutover).
+const SESSION_REJECTED_RE = /invalid authentication token|session too old|have been blocked/i;
+
+/** True when an API error says the server no longer accepts our session. */
+export function isSessionRejected(err) {
+  return !!(err && SESSION_REJECTED_RE.test(String(err.message || err)));
+}
+
+/**
+ * The bootstrap request, with one recovery attempt when the server rejects
+ * the session: a locally-valid token can still be refused server-side (see
+ * SESSION_REJECTED_RE), and without this the page would sit "signed in" while
+ * every action failed. refreshToken() first tries a silent renewal, then
+ * Google One Tap (auto-select — usually no UI for a live Google session); if
+ * that yields a token the bootstrap is retried once, otherwise — or if the
+ * retry is refused too — the page signs out so the UI matches the server.
+ *
+ * @param {string} token
+ * @returns {Promise<Object>} the bootstrap payload
+ */
+async function fetchBootstrapWithReauth(token) {
+  try {
+    return await api.fetchBootstrap(token);
+  } catch (err) {
+    if (!isSessionRejected(err)) throw err;
+    const fresh = await refreshToken().catch(() => null);
+    if (fresh) {
+      try {
+        return await api.fetchBootstrap(fresh);
+      } catch (err2) {
+        if (!isSessionRejected(err2)) throw err2;
+      }
+    }
+    signOut();
+    throw err;
+  }
 }

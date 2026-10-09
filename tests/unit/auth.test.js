@@ -20,11 +20,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
+  revokeSession: vi.fn(),
   showToast: vi.fn(),
 }));
 
 vi.mock('../../js/api-client.js', () => ({
-  api: { createSession: mocks.createSession },
+  api: { createSession: mocks.createSession, revokeSession: mocks.revokeSession },
 }));
 vi.mock('../../js/toast.js', () => ({
   showToast: mocks.showToast,
@@ -116,6 +117,8 @@ let captured;
 
 beforeEach(() => {
   mocks.createSession.mockReset();
+  mocks.revokeSession.mockReset();
+  mocks.revokeSession.mockResolvedValue({ revoked: true });
   mocks.showToast.mockReset();
   installStorage();
   captured = installGoogle();
@@ -302,5 +305,36 @@ describe('sign-out', () => {
 
     expect(auth.isSignedIn()).toBe(false);
     expect(seen).toEqual([null]);
+  });
+
+  it('revokes the session server-side with the pre-signout token (SEC2/BE15)', async () => {
+    const token = makeSessionToken({ exp: futureExp() });
+    const auth = await loadAuth();
+    await signIn(auth, captured, { sessionToken: token });
+
+    auth.signOut();
+
+    expect(mocks.revokeSession).toHaveBeenCalledWith(token);
+    expect(auth.isSignedIn()).toBe(false); // local clear didn't wait on the network
+  });
+
+  it('a failed server revoke neither throws nor blocks the local sign-out', async () => {
+    mocks.revokeSession.mockRejectedValue(new Error('offline'));
+    const auth = await loadAuth();
+    await signIn(auth, captured, { sessionToken: makeSessionToken({ exp: futureExp() }) });
+
+    auth.signOut(); // must not throw
+    await Promise.resolve(); // let the rejected revoke settle through its catch
+
+    expect(auth.isSignedIn()).toBe(false);
+    expect(mocks.revokeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('signed-out sign-out (no token) skips the server revoke', async () => {
+    const auth = await loadAuth();
+
+    auth.signOut();
+
+    expect(mocks.revokeSession).not.toHaveBeenCalled();
   });
 });

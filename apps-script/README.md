@@ -146,14 +146,16 @@ Without a valid token they're refused.
 
 ### 🔄 Force an immediate refresh
 
-Visit (or `curl`) your deployed web-app URL with:
+Send a `POST` to the web-app URL with a JSON body:
 
-```
-?action=refresh&token=YOUR_ADMIN_TOKEN
+```json
+{ "action": "refresh", "token": "YOUR_ADMIN_TOKEN" }
 ```
 
 Kicks off a full crawl right now instead of waiting for the 4-hour schedule.
 Useful right after adding channels, to see their content appear immediately.
+(POST-only since backend 1.23.0 — the old `?action=refresh&token=…` link put
+the admin token in the URL, where it lands in browser history and proxy logs.)
 
 ### 📋 Read the diagnostic logs
 
@@ -222,8 +224,9 @@ Each row is a `key` in column A and its `value` in column B.
 | Add a YouTube channel or news site | Use the `add-channel.html` page (`add_channel_password` from META) — or paste its URL into CHANNELS, live on the next refresh (≤4h) |
 | Let someone else add channels | Give them the `add-channel.html` link + the add-channel password, or share the CHANNELS spreadsheet as Editor |
 | Stop pulling from a channel | Set its `enabled` cell to `FALSE` |
-| See new content right now | `?action=refresh&token=…` |
-| Ban a commenter | Add their email to the BLOCKED sheet |
+| See new content right now | POST `{ "action": "refresh", "token": "…" }` |
+| Ban a commenter | Run `blockUser('their@email')` from the editor (adds the BLOCKED row AND kills their live sessions; a hand-added row alone leaves their session working until it expires) |
+| Sign someone out everywhere | Run `bumpSessionVersion('their@email')` from the editor |
 | Change how often it refreshes | Edit `refresh_interval_hours` in META |
 | Turn on live/premiere + view counts | Add `youtube_api_key` to META |
 | Turn on automatic refreshing | Run `setupScheduledRefresh` once |
