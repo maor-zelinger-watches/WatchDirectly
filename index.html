@@ -23,8 +23,13 @@
   <meta name="referrer" content="strict-origin-when-cross-origin">
 
   <!-- Google Analytics (GA4), opt-in: js/analytics.js shows the cookie banner and
-       loads gtag.js only after Accept. External file — no inline script under the CSP. -->
-  <script src="js/analytics.js"></script>
+       loads gtag.js only after Accept. External file — no inline script under the CSP.
+       `defer`: it only needs to run before DOMContentLoaded (it waits for that
+       itself), and as a blocking script at the top of <head> it held the parser
+       for one round trip before the stylesheet and feed requests could start
+       (600ms on Slow 4G, measured 2026-10-07). Deferred scripts still run in
+       document order, so window.gtag exists before any module executes. -->
+  <script src="js/analytics.js" defer></script>
 
   <title>How You Watch — Watch Content, No Algorithm</title>
   <meta name="description" content="Chronological feed of the best watch YouTube content from 19 curated creators. No algorithm, just the latest videos and community discussion.">
@@ -44,6 +49,45 @@
   
   <!-- Styles -->
   <link rel="stylesheet" href="css/style.css">
+
+  <!-- Module preloads: every module js/app.js and js/error-reporter.js reach.
+       The app ships 30 unbundled ES modules with an import chain 11 deep; left
+       to discovery the browser fetches them one dependency level at a time —
+       11 round trips, 5.6s on Slow 4G before the first card (measured
+       2026-10-07), with the feed data sitting ready since 1.8s. Listed here
+       they all go out in one wave as soon as the HTML parses. Keep in sync
+       with the import graph: tests/unit/module_preload.test.js fails when a
+       reachable module is missing or an unreachable one is listed. -->
+  <link rel="modulepreload" href="js/app.js">
+  <link rel="modulepreload" href="js/error-reporter.js">
+  <link rel="modulepreload" href="js/api-client.js">
+  <link rel="modulepreload" href="js/api.js">
+  <link rel="modulepreload" href="js/auth-overlay.js">
+  <link rel="modulepreload" href="js/auth.js">
+  <link rel="modulepreload" href="js/bookmarks.js">
+  <link rel="modulepreload" href="js/bootstrap.js">
+  <link rel="modulepreload" href="js/cache.js">
+  <link rel="modulepreload" href="js/cards.js">
+  <link rel="modulepreload" href="js/comments-ui.js">
+  <link rel="modulepreload" href="js/comments.js">
+  <link rel="modulepreload" href="js/config.js">
+  <link rel="modulepreload" href="js/feed.js">
+  <link rel="modulepreload" href="js/feedback.js">
+  <link rel="modulepreload" href="js/flags.js">
+  <link rel="modulepreload" href="js/fullscreen.js">
+  <link rel="modulepreload" href="js/icons.js">
+  <link rel="modulepreload" href="js/lazy-iframe.js">
+  <link rel="modulepreload" href="js/prefetch.js">
+  <link rel="modulepreload" href="js/share.js">
+  <link rel="modulepreload" href="js/single-play.js">
+  <link rel="modulepreload" href="js/stars.js">
+  <link rel="modulepreload" href="js/state.js">
+  <link rel="modulepreload" href="js/storage.js">
+  <link rel="modulepreload" href="js/toast.js">
+  <link rel="modulepreload" href="js/utils.js">
+  <link rel="modulepreload" href="js/vendor/idb-keyval.js">
+  <link rel="modulepreload" href="js/views.js">
+  <link rel="modulepreload" href="js/votes.js">
 </head>
 <body>
 
