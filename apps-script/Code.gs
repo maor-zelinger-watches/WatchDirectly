@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.27.0';
+const VERSION = '1.27.1';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -1341,6 +1341,10 @@ function crawlAllFeeds(onlyFeedUrl) {
     // Takes its own lock, like pruneOldVideos, and invalidates the archive cache
     // when it removes anything.
     retired = pruneOldArchive();
+
+    // Third: drop client error reports past their retention period. Its own
+    // sheet, its own lock; never throws (see pruneOldClientErrors).
+    pruneOldClientErrors();
   }
 
   // The crawl appended rows and refreshed view counts / live state in place —
@@ -5956,6 +5960,58 @@ function blockUser(email) {
   log('INFO', 'blockUser', 'Blocked and revoked sessions for ' + email);
 }
 
+/**
+ * Deletes client error reports older than CLIENT_ERROR_RETENTION_DAYS. Runs at
+ * the end of each scheduled crawl (fetchAllFeeds), like the archive prunes.
+ *
+ * The sheet is append-only and every row's `logged_at` is stamped server-side
+ * at write time, so rows are in logged_at order: the expired rows are a
+ * contiguous prefix under the header, removed with ONE deleteRows call — no
+ * full rewrite. The scan stops at the first row that is not expired, which
+ * also keeps any undateable row (and everything after it) in place rather
+ * than guessing its age. Takes the script lock briefly so it can't interleave
+ * with handleClientError's reserve-then-write; busy or failing, it returns 0
+ * and the next crawl reattempts. Never throws.
+ *
+ * @returns {number} rows deleted
+ */
+function pruneOldClientErrors() {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(5000);
+  } catch (e) {
+    return 0; // busy — the next crawl reattempts
+  }
+  try {
+    var sheet = getSheet('CLIENT_ERRORS');
+    var lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return 0;
+    var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    var tsCol = headers.indexOf('logged_at');
+    if (tsCol === -1) return 0; // can't age rows without a timestamp
+
+    var cutoff = Date.now() - CLIENT_ERROR_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    var stamps = sheet.getRange(2, tsCol + 1, lastRow - 1, 1).getValues();
+    var expired = 0;
+    for (var i = 0; i < stamps.length; i++) {
+      var t = new Date(stamps[i][0]).getTime();
+      if (isNaN(t) || t >= cutoff) break;
+      expired++;
+    }
+    if (expired === 0) return 0;
+
+    sheet.deleteRows(2, expired);
+    log('INFO', 'pruneOldClientErrors', 'Deleted ' + expired + ' error reports older than ' +
+      CLIENT_ERROR_RETENTION_DAYS + 'd; ' + (lastRow - 1 - expired) + ' remain');
+    return expired;
+  } catch (e) {
+    log('ERROR', 'pruneOldClientErrors', e.message);
+    return 0;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // ============================================================
 // META (Key-Value Config)
 // ============================================================
@@ -6103,6 +6159,11 @@ function handleEnrich() {
 // budget. Rejected/overflow reports are DROPPED with an ok response:
 // the reporter is fire-and-forget, and an error status would only make
 // a struggling client do more work.
+// Retention for the CLIENT_ERRORS sheet: rows older than this are deleted by
+// pruneOldClientErrors at the end of each scheduled crawl. The sheet is an
+// operational log with no identity in it, but it is append-only and grows
+// with every page error, and the privacy policy (§2.6) states this period.
+const CLIENT_ERROR_RETENTION_DAYS = 30;
 const CLIENT_ERRORS_PER_REQUEST = 10;   // rows accepted from one POST
 const CLIENT_ERRORS_PER_MINUTE = 60;    // global budget, approximate (cache
                                       // increments are not atomic; a racing
