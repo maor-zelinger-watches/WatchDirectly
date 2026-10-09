@@ -21,6 +21,27 @@ that component's heading.
 
 ## Frontend
 
+### 1.37.0 — 2026-10-09
+- **Poppins is served from the site itself; the Google Fonts round trips before
+  first paint are gone.** Every page pulled the font through a render-blocking
+  `<link rel="stylesheet">` to fonts.googleapis.com — DNS + TLS to that host,
+  the CSS, then DNS + TLS to fonts.gstatic.com for the woff2 — ~850ms of a
+  cold visitor's wait before text could paint (measured 2026-10-09 in a real
+  browser). The same Poppins v24 files now live under `assets/fonts/`
+  (weights 400/500/600/700, latin + latin-ext subsets with `unicode-range`,
+  so latin-ext only downloads when a glyph needs it; the 300 weight was
+  fetched but used nowhere and is dropped) and are declared with
+  `@font-face` / `font-display: swap` at the top of `css/style.css`.
+  `index.html` preloads the four latin files so they ride the first request
+  wave with the HTML instead of waiting for the stylesheet to be parsed.
+  Payload is unchanged (~31KB) but it arrives over the already-open
+  same-origin connection. With no third-party font host left, the CSP on all
+  five pages drops fonts.googleapis.com from `style-src` and
+  fonts.gstatic.com from `font-src`. `tests/unit/self_hosted_fonts.test.js`
+  fails if a Google Fonts link comes back, an `@font-face` points at a
+  missing file, a design-token weight has no face, or a preload names a file
+  no face declares.
+
 ### 1.36.0 — 2026-10-09
 - **Sign out now signs you out everywhere, and a session the server has
   revoked no longer leaves the page stuck.** Sign-out used to delete the
