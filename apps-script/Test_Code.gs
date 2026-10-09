@@ -26,6 +26,10 @@ function test_help() {
     '                                   extraction + the UC→UU uploads-playlist trick.',
     '  test_parseYouTubeUploads()       Pure logic, no network. Checks the API-JSON',
     '                                   → item mapping (thumbnails, dates, skips).',
+    '  test_bodyLooksLikeFeed()         Pure logic, no network. Checks the feed-vs-HTML',
+    '                                   sniff behind pasting a feed URL into CHANNELS.',
+    '  test_extractFeedTitle()          Pure logic, no network. Checks the feed-level',
+    '                                   title extraction that names a pasted feed URL.',
     '  test_youtubeApiKey()             Confirms youtube_api_key is set and that ONE',
     '                                   live playlistItems.list call succeeds.',
     '  test_rssVsApiAllChannels()       For every enabled channel: raw RSS code+count',
@@ -58,6 +62,52 @@ function test_extractAndDerive() {
   }
   var cid = 'UCXPXfAAo-yV6Y-0PZecwBLw';
   Logger.log('UC→UU derivation: ' + cid + ' → UU' + cid.slice(2));
+  Logger.log(pass + '/' + cases.length + ' passed');
+}
+
+/** Verifies bodyLooksLikeFeed tells feed XML apart from HTML pages. */
+function test_bodyLooksLikeFeed() {
+  var cases = [
+    ['<?xml version="1.0"?><rss version="2.0"><channel>…', true],
+    ['<feed xmlns="http://www.w3.org/2005/Atom"><title>x</title>', true],
+    ['<?xml version="1.0"?><urlset xmlns="…sitemap…">', false],
+    ['<!DOCTYPE html><html><head><title>A page</title></head>', false],
+    ['', false],
+  ];
+  var pass = 0;
+  for (var i = 0; i < cases.length; i++) {
+    var got = bodyLooksLikeFeed(cases[i][0]);
+    var okc = got === cases[i][1];
+    if (okc) pass++;
+    Logger.log((okc ? 'PASS' : 'FAIL') + ' bodyLooksLikeFeed case ' + i + ' = ' + got +
+      (okc ? '' : ' (expected ' + cases[i][1] + ')'));
+  }
+  Logger.log(pass + '/' + cases.length + ' passed');
+}
+
+/** Verifies extractFeedTitle reads the channel/feed title, never an item's. */
+function test_extractFeedTitle() {
+  var cases = [
+    // RSS2: channel title wins over the first item title
+    ['<?xml version="1.0"?><rss><channel><title>Hodinkee</title>' +
+     '<item><title>Some Article</title></item></channel></rss>', 'Hodinkee'],
+    // CDATA + entities get unwrapped/decoded
+    ['<rss><channel><title><![CDATA[Worn &amp; Wound]]></title></channel></rss>', 'Worn & Wound'],
+    // Atom: feed-level title
+    ['<feed xmlns="http://www.w3.org/2005/Atom"><title>A Blog To Watch</title>' +
+     '<entry><title>Post</title></entry></feed>', 'A Blog To Watch'],
+    // No title / not a feed
+    ['<rss><channel></channel></rss>', ''],
+    ['', ''],
+  ];
+  var pass = 0;
+  for (var i = 0; i < cases.length; i++) {
+    var got = extractFeedTitle(cases[i][0]);
+    var okc = got === cases[i][1];
+    if (okc) pass++;
+    Logger.log((okc ? 'PASS' : 'FAIL') + ' extractFeedTitle case ' + i + ' = "' + got + '"' +
+      (okc ? '' : ' (expected "' + cases[i][1] + '")'));
+  }
   Logger.log(pass + '/' + cases.length + ' passed');
 }
 

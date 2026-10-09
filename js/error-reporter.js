@@ -53,6 +53,17 @@ function truncate(value, n) {
   return s.length > n ? s.slice(0, n) : s;
 }
 
+// Redact JWT / app-session-token shapes (three dot-separated base64url
+// segments, the last two long) before a report leaves the page — a stray token
+// in a console.error arg or an error message must never reach the sheet, per
+// this module's "no token ever leaves the page" invariant (SEC8). The segment
+// lengths are tuned to match real tokens (long payload + signature) without
+// touching ordinary dotted identifiers like module paths.
+const TOKEN_RE = /[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g;
+function scrubTokens(value) {
+  return String(value == null ? '' : value).replace(TOKEN_RE, '[redacted-token]');
+}
+
 /** Queues one report; all guards live here so every stream shares them. */
 function capture(message, stack, source) {
   try {
@@ -165,7 +176,11 @@ export function initErrorReporter() {
         a instanceof Error ? `${a.message}` : truncate(a, 200)
       );
       const firstError = args.find((a) => a instanceof Error);
-      capture(parts.join(' '), (firstError && firstError.stack) || '', 'console.error');
+      capture(
+        scrubTokens(parts.join(' ')),
+        scrubTokens((firstError && firstError.stack) || ''),
+        'console.error'
+      );
     } catch (e) {
       // Never let reporting break console.error callers.
     }

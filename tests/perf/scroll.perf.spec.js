@@ -20,6 +20,7 @@ import {
   allUnique,
   scrollToBottom,
   sleep,
+  expectVisibleWithin,
 } from './helpers.js';
 
 test.describe('PERF · scrolling', () => {
@@ -41,7 +42,7 @@ test.describe('PERF · scrolling', () => {
     // the staggered entrance animation (local work), not I/O; the 2200ms
     // timeout IS the budget.
     await scrollToBottom(page);
-    await expect(page.locator('.media-card').nth(19)).toBeVisible({ timeout: 2200 });
+    await expectVisibleWithin(page.locator('.media-card').nth(19), 2200);
     expect(allUnique(await cardIds(page))).toBe(true);
   });
 

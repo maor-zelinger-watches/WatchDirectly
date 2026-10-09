@@ -7,6 +7,8 @@
  */
 
 import { timeAgo, sanitizeHtml, formatCount, safeUrl } from './utils.js';
+import { iconSvg } from './icons.js';
+import { CONFIG } from './config.js';
 
 /**
  * Detects YouTube Shorts from the stored URL — shorts entries in the
@@ -43,13 +45,74 @@ export function mediaType(item) {
 }
 
 /**
+ * True when `video` is left visible by the content-type chip selection.
+ * An empty selection means "All" — everything shows. Otherwise a video is
+ * visible only when its mediaType() is one of the selected types. Mirrors the
+ * CSS `feed--hide-<type>` rules applyTypeVisibility writes, so pagination can
+ * count "newly visible" cards without measuring rendered layout.
+ *
+ * @param {Object} video - Media item from the API
+ * @param {string[]} types - the selected content types (state.filter.types)
+ * @returns {boolean}
+ */
+export function typeFilterVisible(video, types) {
+  if (!Array.isArray(types) || types.length === 0) return true;
+  return types.includes(mediaType(video));
+}
+
+// --- article preview images -----------------------------------------------
+//
+// Preview images come from the article sites at whatever size the site serves
+// — measured 2026-10-07: Fratello's are 170-420KB each, so the six images in a
+// cold load's first screen were ~1MB, and on a slow connection the LCP image
+// shared the link with five others at equal priority. Two fixes live here:
+//
+//   - Sites behind Cloudflare Image Resizing publish URLs with a
+//     `/cdn-cgi/image/<options>/` segment whose options the client may set.
+//     For those, the card requests sized variants (a srcset the browser picks
+//     from by viewport and DPR) with `format=auto` (WebP/AVIF where supported).
+//     172KB → 39KB at 800px wide in the measurement. Other hosts keep the
+//     stored URL untouched.
+//   - The first card or two of a fresh paint load eagerly with
+//     fetchpriority=high (`priority` option); everything below stays lazy.
+
+export const PREVIEW_WIDTHS = [640, 1280]; // 1x phone / 2x phone & 1-2x desktop (feed max 760px)
+export const PREVIEW_SIZES = '(max-width: 760px) 100vw, 760px';
+const CF_IMAGE_RE = /^(https:\/\/[^/]+\/cdn-cgi\/image\/)([^/]*)(\/.+)$/;
+const CF_SIZING_OPTION_RE = /^(width|w|height|h|fit|format|f|dpr)=/;
+
+/**
+ * The `src` / `srcset` for an article preview image. Returns null for no URL;
+ * `srcset` is '' when the host offers no resizing (plain `src` only).
+ *
+ * @param {string} url - the stored preview_image URL (already safeUrl'd)
+ * @returns {{src: string, srcset: string}|null}
+ */
+export function previewImageSources(url) {
+  if (!url) return null;
+  const m = String(url).match(CF_IMAGE_RE);
+  if (!m) return { src: url, srcset: '' };
+  const [, prefix, options, rest] = m;
+  const kept = options.split(',').filter(o => o && !CF_SIZING_OPTION_RE.test(o));
+  const variant = (w) => `${prefix}${[...kept, `width=${w}`, 'fit=scale-down', 'format=auto'].join(',')}${rest}`;
+  return {
+    src: variant(PREVIEW_WIDTHS[PREVIEW_WIDTHS.length - 1]),
+    srcset: PREVIEW_WIDTHS.map(w => `${variant(w)} ${w}w`).join(', '),
+  };
+}
+
+/**
  * Creates an HTML string for a media card (video or article) in the feed.
  * Uses CSS Grid: thumbnail left, info right, comments below.
- * 
+ *
  * @param {Object} item - Media item data from the API
+ * @param {{priority?: boolean}} [opts] - `priority`: this card is in the first
+ *   screen of a fresh paint — its preview image loads eagerly at high fetch
+ *   priority instead of lazily (the LCP candidate must not queue behind the
+ *   images below it)
  * @returns {string} HTML string for the card
  */
-export function createMediaCard(item) {
+export function createMediaCard(item, { priority = false } = {}) {
   const escaped = {
     title: sanitizeHtml(item.title),
     channel: sanitizeHtml(item.channel_name),
@@ -70,9 +133,14 @@ export function createMediaCard(item) {
   
   // The whole image is one link — hover overlays don't exist on touch.
   // The "Read Article" pill is a span inside it (anchors can't nest).
-  const articleMedia = safeUrl(item.preview_image)
-    ? `<img src="${sanitizeHtml(safeUrl(item.preview_image))}" alt="${escaped.title}" class="article-card__img" loading="lazy">`
-    : `<div class="article-card__placeholder">📰</div>`;
+  const preview = previewImageSources(safeUrl(item.preview_image));
+  const imgLoading = priority ? 'loading="eager" fetchpriority="high"' : 'loading="lazy"';
+  const imgSrcset = preview && preview.srcset
+    ? ` srcset="${sanitizeHtml(preview.srcset)}" sizes="${PREVIEW_SIZES}"`
+    : '';
+  const articleMedia = preview
+    ? `<img src="${sanitizeHtml(preview.src)}"${imgSrcset} alt="${escaped.title}" class="article-card__img" ${imgLoading}>`
+    : `<div class="article-card__placeholder">${iconSvg('article', 44)}</div>`;
 
   const embedHtml = isArticle ? `
     <div class="article-card__embed">
@@ -104,7 +172,7 @@ export function createMediaCard(item) {
         <div class="media-card__content">
           <h3 class="media-card__title"><a href="${sanitizeHtml(escaped.url)}" target="_blank" rel="noopener noreferrer">${escaped.title}</a></h3>
           <div class="media-card__meta">
-            <span class="media-card__channel">${isArticle ? '📰' : '🎬'} ${escaped.channel}</span>
+            <span class="media-card__channel">${iconSvg(isArticle ? 'article' : 'video', 14)} ${escaped.channel}</span>
             <button class="media-card__star" data-channel="${escaped.channel}" aria-pressed="false" title="Favorite this creator" aria-label="Favorite ${escaped.channel}">☆</button>
             <span class="media-card__separator">·</span>
             <span class="media-card__time">${timeAgo(item.published_at)}</span>
@@ -118,17 +186,20 @@ export function createMediaCard(item) {
             <span class="media-card__vote-icon" aria-hidden="true">▲</span>
             <span class="media-card__vote-count">${item.vote_count || 0}</span>
           </button>
-          <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}">
-            💬 ${item.comment_count || 0} comments
+          <button class="media-card__comments-toggle" data-video-id="${escaped.videoId}" aria-label="Comments" aria-expanded="false" aria-controls="comments-body-${escaped.videoId}">
+            ${iconSvg('comment', 14)}<span class="media-card__comments-count">${item.comment_count || 0} comments</span>
+          </button>
+          <button class="media-card__bookmark" data-video-id="${escaped.videoId}" aria-pressed="false" title="Save for later" aria-label="Bookmark ${escaped.title}">
+            ${iconSvg('bookmark', 15)}
           </button>
           <button class="media-card__share" data-video-id="${escaped.videoId}" title="Share" aria-label="Share ${escaped.title}">
-            <span class="media-card__share-icon" aria-hidden="true">🔗</span>
+            <span class="media-card__share-icon" aria-hidden="true">${iconSvg('share', 15)}</span>
           </button>
           <button class="media-card__expand" data-video-id="${escaped.videoId}" title="Expand" aria-label="Expand ${escaped.title}">
             <span class="media-card__expand-icon" aria-hidden="true">⛶</span>
           </button>
         </div>
-        <div class="media-card__comments-body" data-video-id="${escaped.videoId}" style="display: none;">
+        <div class="media-card__comments-body" id="comments-body-${escaped.videoId}" data-video-id="${escaped.videoId}" style="display: none;">
           <div class="media-card__comments-list" data-video-id="${escaped.videoId}">
             <!-- Comments rendered here -->
           </div>
@@ -173,11 +244,62 @@ export function avatarUrl(url, size = 176) {
 }
 
 /**
+ * Which platform a curated channel publishes on: 'youtube' for YouTube
+ * channels, 'article' for everything else — a source either has a YouTube
+ * link or it's an article site, so no card ever goes unmarked. The backend's
+ * computed `platform` field wins (it can also see feed_url, which is not
+ * public); the URL/avatar heuristic below covers lists cached before that
+ * field existed.
+ *
+ * @param {Object} creator - A channel entry from the getChannels backend action
+ * @returns {'youtube'|'article'}
+ */
+export function channelPlatform(creator) {
+  const explicit = creator && creator.platform;
+  if (explicit === 'youtube' || explicit === 'article') return explicit;
+
+  const url = String((creator && creator.url) || '');
+  const match = url.match(/^https?:\/\/([^/?#]+)/i);
+  if (match) {
+    const host = match[1].replace(/^www\./i, '').toLowerCase();
+    if (host === 'youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com')) {
+      return 'youtube';
+    }
+    return 'article';
+  }
+  // No usable URL — YouTube avatars come from Google's image CDNs.
+  const avatar = String((creator && creator.avatar) || '');
+  if (/yt3\.googleusercontent\.com|ytimg\.com/i.test(avatar)) return 'youtube';
+  return 'article';
+}
+
+// Corner mark + link description per platform, keyed by channelPlatform().
+// The YouTube mark is the play-button lozenge drawn inline (brand red must not
+// depend on an external asset); article sites get the flat newspaper icon.
+const PLATFORM_META = {
+  youtube: {
+    icon: '<svg viewBox="0 0 28 20" width="22" height="16" role="img"><rect width="28" height="20" rx="5" fill="#f00"/><path d="M11 5.2l8.2 4.8-8.2 4.8z" fill="#fff"/></svg>',
+    title: 'YouTube channel',
+    linkSuffix: 'on YouTube',
+  },
+  article: {
+    icon: iconSvg('article', 17),
+    title: 'Article site',
+    linkSuffix: 'website',
+  },
+};
+
+/**
  * Creates an HTML string for a channel card on the Channels tab: the creator's
- * avatar (with a monogram fallback beneath, revealed if the image is missing or
- * fails to load), their name, and a favorite ☆ button. The star button reuses
- * the `media-card__star` class + `data-channel` attribute so the existing star
- * engine (toggle, sign-in reconcile, cross-view sync) drives it unchanged.
+ * avatar in a platform-colored ring (with a monogram fallback beneath, revealed
+ * if the image is missing or fails to load), their name, a platform mark in the
+ * card's top-left corner (YouTube play lozenge vs. flat newspaper for article
+ * sites), and
+ * a favorite ☆ button. The star button reuses the `media-card__star` class +
+ * `data-channel` attribute so the existing star engine (toggle, sign-in
+ * reconcile, cross-view sync) drives it unchanged. The card's `data-platform`
+ * powers both the ring color and the Channels-tab platform filter the same way
+ * `data-media-type` powers the feed's type chips: styling/hiding is pure CSS.
  *
  * @param {Object} creator - A channel entry from the getChannels backend action
  * @returns {string} HTML string for the card
@@ -187,6 +309,8 @@ export function createChannelCard(creator) {
   const url = safeUrl(creator.url);
   const avatar = safeUrl(avatarUrl(creator.avatar));
   const initial = sanitizeHtml((creator.channel_name || '?').trim().charAt(0).toUpperCase());
+  const platform = channelPlatform(creator);
+  const meta = PLATFORM_META[platform];
 
   const linkOpen = url
     ? `<a href="${sanitizeHtml(url)}" target="_blank" rel="noopener noreferrer"`
@@ -197,10 +321,14 @@ export function createChannelCard(creator) {
     ? `<img src="${sanitizeHtml(avatar)}" alt="" class="channel-card__avatar" loading="lazy" referrerpolicy="no-referrer">`
     : '';
 
+  const markHtml = `<span class="channel-card__platform channel-card__platform--${platform}" title="${meta.title}" aria-hidden="true">${meta.icon}</span>`;
+  const figureLabel = `${name} ${meta.linkSuffix}`;
+
   return `
-    <article class="channel-card" data-channel="${name}">
+    <article class="channel-card" data-channel="${name}" data-platform="${platform}">
+      ${markHtml}
       <button class="media-card__star channel-card__star" data-channel="${name}" aria-pressed="false" title="Favorite this creator" aria-label="Favorite ${name}">☆</button>
-      ${linkOpen} class="channel-card__figure" aria-label="${name} on YouTube">
+      ${linkOpen} class="channel-card__figure" aria-label="${figureLabel}">
         <span class="channel-card__monogram" aria-hidden="true">${initial}</span>
         ${imgHtml}
       ${linkClose}
@@ -259,6 +387,33 @@ const TIER_SUBSTR = 30;   // query token appears inside the field
 const TIER_FUZZY = 12;    // within one typo of a field token
 const FUZZY_MIN_LEN = 4;  // don't fuzzy-match very short tokens
 
+/**
+ * Computes and caches the per-video fields scoring reads: the tokenized and
+ * diacritic-normalized title and channel. These are intrinsic to the row, so
+ * they're memoized once on the object (`_searchFields`) — recomputing them for
+ * every video on every keystroke was the search hot path (FE10). Called at
+ * index merge time so the cache is warm before the first query; scoreVideo
+ * also lazily fills it for any row that skipped that path.
+ *
+ * The channel's HOST is deliberately NOT cached here: the channel→host map
+ * loads asynchronously (and can change), so it's resolved per query instead.
+ *
+ * @param {Object} v - a media item
+ * @returns {{titleTokens: string[], channelTokens: string[], titleNorm: string, channelNorm: string}}
+ */
+export function searchFields(v) {
+  let f = v._searchFields;
+  if (!f) {
+    f = v._searchFields = {
+      titleTokens: tokenize(v.title),
+      channelTokens: tokenize(v.channel_name),
+      titleNorm: normalizeText(v.title),
+      channelNorm: normalizeText(v.channel_name),
+    };
+  }
+  return f;
+}
+
 /** Best tier score for one query token against one field's tokens + raw text. */
 function scoreToken(qt, fieldTokens, fieldNorm) {
   let best = 0;
@@ -287,10 +442,7 @@ const FIELD_WEIGHT_HOST = 2;
  * more words narrows the result). 0 means "no match".
  */
 function scoreVideo(v, queryTokens, hostsByChannel) {
-  const titleTokens = tokenize(v.title);
-  const channelTokens = tokenize(v.channel_name);
-  const titleNorm = normalizeText(v.title);
-  const channelNorm = normalizeText(v.channel_name);
+  const { titleTokens, channelTokens, titleNorm, channelNorm } = searchFields(v);
   const hostName = hostsByChannel ? hostsByChannel[v.channel_name] || '' : '';
   const hostTokens = hostName ? tokenize(hostName) : [];
   const hostNorm = hostName ? normalizeText(hostName) : '';
@@ -406,6 +558,39 @@ export function mergeTopRanking(current, fresh) {
     .slice(window)
     .filter(v => v && !freshIds.has(v.video_id));
   return [...freshList, ...tail];
+}
+
+/**
+ * Top This Week ranking score: upvotes plus one synthetic vote per
+ * CONFIG.TOP_WEEK_VIEWS_PER_VOTE views — the mirror of the backend's
+ * topWeekScore, computed from the same stored counts the row carries.
+ */
+export function topWeekScore(v) {
+  return (Number(v.vote_count) || 0) +
+    Math.floor((Number(v.view_count) || 0) / CONFIG.TOP_WEEK_VIEWS_PER_VOTE);
+}
+
+/**
+ * Sorts a Top This Week list into the server's ranking order: score
+ * descending (topWeekScore), then published_at descending, then video_id
+ * descending — the exact mirror of the backend's compareTopWeek, so a locally
+ * re-ranked list lands in the same order the next fetch would return.
+ * Returns a new array — does not mutate the input.
+ */
+export function sortTopRanking(videos) {
+  const time = (v) => {
+    const t = new Date(v.published_at).getTime();
+    return Number.isFinite(t) ? t : 0;
+  };
+  return [...videos].sort((a, b) => {
+    const dv = topWeekScore(b) - topWeekScore(a);
+    if (dv !== 0) return dv;
+    const dt = time(b) - time(a);
+    if (dt !== 0) return dt;
+    const aId = String(a.video_id || '');
+    const bId = String(b.video_id || '');
+    return aId < bId ? 1 : (aId > bId ? -1 : 0);
+  });
 }
 
 /**

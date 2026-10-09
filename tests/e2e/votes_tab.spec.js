@@ -28,8 +28,11 @@ const TOP_WEEK = {
   total: 2,
 };
 
-/** Routes that every test needs. `signedIn` seeds a fake Google session. */
-async function setup(page, { signedIn = false } = {}) {
+/**
+ * Routes that every test needs. `signedIn` seeds a fake Google session;
+ * `topWeek` overrides the ranked payload (for the view-weight scenarios).
+ */
+async function setup(page, { signedIn = false, topWeek = TOP_WEEK } = {}) {
   await page.route('**/macros/**', async (route) => {
     const req = route.request();
     const url = req.url();
@@ -38,7 +41,7 @@ async function setup(page, { signedIn = false } = {}) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(LATEST_FEED) });
     }
     if (url.includes('action=topWeek')) {
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(TOP_WEEK) });
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(topWeek) });
     }
     if (url.includes('action=commentsBatch')) {
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', byVideo: {} }) });
@@ -60,8 +63,10 @@ async function setup(page, { signedIn = false } = {}) {
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', video_ids: [] }) });
       }
       if (body.action === 'vote') {
-        // Echo a toggled-on vote, count bumped by 1 from the seed
-        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', voted: true, vote_count: 2 }) });
+        // Echo a toggled-on vote, count bumped by 1 from the seed. A vote on
+        // the #2 top-week video outranks #1 (42), for the reorder tests.
+        const count = body.videoId === 'top_vid_lo' ? 43 : 2;
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'ok', voted: true, vote_count: count }) });
       }
     }
 
@@ -146,6 +151,85 @@ test.describe('Upvoting', () => {
     // Server echoes voted=true, vote_count=2
     await expect(vote).toHaveClass(/media-card__vote--active/);
     await expect(vote.locator('.media-card__vote-count')).toHaveText('2');
+  });
+
+  test('a vote that outranks #1 moves the card to the top of Top This Week', async ({ page }) => {
+    await setup(page, { signedIn: true });
+
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+    await expect(page.locator('.media-card')).toHaveCount(2);
+    await expect(page.locator('.media-card__title').first()).toContainText('Most Upvoted This Week');
+
+    // Vote on #2 — the mocked server confirms with 43, beating #1's 42.
+    await page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote').click();
+
+    // The liked card re-ranks to the top, count carried along.
+    await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
+    await expect(page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote-count')).toHaveText('43');
+    await expect(page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote')).toHaveClass(/media-card__vote--active/);
+  });
+
+  test('the re-ranked order survives leaving and reopening the Top tab', async ({ page }) => {
+    await setup(page, { signedIn: true });
+
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+    await expect(page.locator('.media-card')).toHaveCount(2);
+    await page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote').click();
+    await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
+
+    // Leave for Latest and come back — the tab renders from state (no refetch),
+    // which must hold the re-ranked order, not the load-time one.
+    await page.locator('.feed-tab', { hasText: 'Latest' }).click();
+    await expect(page.locator('.media-card__title').first()).toContainText('Latest Video One');
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+
+    await expect(page.locator('.media-card')).toHaveCount(2);
+    await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
+  });
+
+  test('view weight holds #1 in place: a raw-vote lead is not enough', async ({ page }) => {
+    // #1 has 42 votes + 15000 views = score 45. Voting #2 to 43 raw votes
+    // (score 43) beats 42 votes but NOT the view-weighted score — the order
+    // must not change. Guards against the resort ignoring view_count.
+    const topWeek = {
+      status: 'ok',
+      videos: [
+        { ...TOP_WEEK.videos[0], view_count: 15000 },
+        { ...TOP_WEEK.videos[1], view_count: 0 },
+      ],
+      total: 2,
+    };
+    await setup(page, { signedIn: true, topWeek });
+
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+    await expect(page.locator('.media-card')).toHaveCount(2);
+
+    await page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote').click();
+    await expect(page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote-count')).toHaveText('43');
+
+    await expect(page.locator('.media-card__title').first()).toContainText('Most Upvoted This Week');
+  });
+
+  test('view weight lifts the liked card: 5000 views count as one vote', async ({ page }) => {
+    // #1: 42 votes + 10000 views = 44. #2: 8 votes + 12000 views = 10; a vote
+    // takes it to 43 + 2 = 45, which now outranks 44 — the card moves up
+    // only because its views are counted.
+    const topWeek = {
+      status: 'ok',
+      videos: [
+        { ...TOP_WEEK.videos[0], view_count: 10000 },
+        { ...TOP_WEEK.videos[1], view_count: 12000 },
+      ],
+      total: 2,
+    };
+    await setup(page, { signedIn: true, topWeek });
+
+    await page.locator('.feed-tab', { hasText: 'Top This Week' }).click();
+    await expect(page.locator('.media-card')).toHaveCount(2);
+
+    await page.locator('.media-card[data-video-id="top_vid_lo"] .media-card__vote').click();
+
+    await expect(page.locator('.media-card__title').first()).toContainText('Second Best This Week');
   });
 
   test('a vote cast after the search index is built shows in search results', async ({ page }) => {

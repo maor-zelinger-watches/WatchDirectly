@@ -21,6 +21,423 @@ that component's heading.
 
 ## Frontend
 
+### 1.35.0 — 2026-10-09
+- **Shared links unfurl with an image, and the tab has an icon.** Sharing is
+  first-class (`share.js` mints `?v=<id>` links from every card) yet every
+  shared link rendered as the same imageless generic card, and the tab showed
+  the browser's default globe — the repo had no image assets at all. The
+  home, privacy and terms pages now carry a canonical URL, full Open Graph
+  tags (site name, URL, title, description, 1200×630 image with dimensions
+  and alt) and a Twitter `summary_large_image` card; all five pages link a
+  favicon set (`assets/favicon.svg` for modern browsers, `.ico` fallback,
+  `apple-touch-icon.png` for iOS) and set `theme-color`. The mark is the
+  site's own: a volt disc carrying the speech bubble with a feed card inside
+  (thumbnail block over text lines), black with the burnt-orange outline.
+  `robots.txt` allows crawling, hides the add-channel admin page and points
+  at a new three-URL `sitemap.xml` (index, privacy, terms; `404.html` and
+  `add-channel.html` stay `noindex`). `tests/unit/seo_meta.test.js` fails if
+  a page drops a tag, an asset goes missing, the image is not 1200×630, or
+  the sitemap drifts from the canonical URLs. To change the share image,
+  replace `assets/og-image.png` at 1200×630 — no code change. The CSP's
+  `img-src 'self'` already allows the assets.
+
+### 1.34.0 — 2026-10-09
+- **Cold loads on a slow connection reach the first card about three seconds
+  sooner.** The app ships 30 unbundled ES modules with an import chain 11
+  deep, and the browser only discovers each level once the one above it has
+  arrived — 11 round trips, 5.6s on Chrome's Slow 4G profile, while the feed
+  data had been sitting ready since 1.8s. `index.html` now lists a
+  `<link rel="modulepreload">` for every module reachable from `js/app.js`
+  and `js/error-reporter.js`, so they all go out in one wave as the HTML
+  parses; `tests/unit/module_preload.test.js` derives the reachable set from
+  the import graph and fails when the list drifts. Three smaller first-screen
+  fixes ride along: the first two cards of a fresh paint into an empty feed
+  load their preview image eagerly with `fetchpriority="high"` (the LCP
+  candidate no longer queues behind the images below it) while the rest stay
+  lazy; article sites behind Cloudflare Image Resizing (`/cdn-cgi/image/`)
+  get a 640w/1280w `srcset` with `fit=scale-down,format=auto` (172KB → 39KB
+  JPEG / 19KB AVIF at 640px; other hosts keep the stored URL untouched); and
+  `js/analytics.js` is `defer`red, since as a blocking `<head>` script it
+  held the parser one round trip before the stylesheet and feed requests
+  could start. Measured 2026-10-07, cold, Slow 4G, HTTP/2, backend mocked at
+  a fixed 2.5s: last module 6.3s → 3.5s, first card 8.9s → 6.0s, LCP
+  9.9s → 7.0s, sixth first-screen image 14.7s → 9.6s. Unthrottled, the
+  module wave drops from 301ms to 46ms. No behavior change otherwise.
+
+### 1.33.0 — 2026-10-06
+- **Coming back after a few hours no longer re-fetches the cards you already
+  had.** On return, the cached Latest feed paints and fresh page 1 is fetched.
+  When fresh page 1 shared nothing with the cached front — which happens after
+  roughly six hours away, since the feed gains about ten items in that time —
+  the revalidate replaced the whole cached list with fresh page 1 and reset
+  pagination, so every card you had scrolled through was thrown away and
+  re-fetched from the server one cursor page at a time. That read as "the
+  feed doesn't load until I reach the articles I already had". The replaced
+  cards are now kept as a *feed reserve* (`prefetch.js`). Pages keep coming
+  from the server until one ends at or past the newest card you had cached;
+  from that point the server's continuation is, by construction, exactly your
+  cached tail, so every following page is served from memory with no network
+  call and the rendered feed is identical to what the server would return.
+  Cards deleted upstream in the meantime are dropped as the server pages pass
+  them. One fetch path now serves both infinite scroll and the read-ahead
+  buffer, so the buffered pages fill instantly too. A small change (fresh
+  page 1 still overlaps the cached front) keeps the tail in place as before
+  and needs no reserve. Side effect: each returning visit saves up to 60
+  backend requests. Backends without cursor support ignore the reserve.
+
+### 1.32.0 — 2026-10-03
+- **Feedback button.** Signed-in users get a floating button bottom-right,
+  above the footer, styled like the channel logo (volt disc, black
+  speech-bubble mark with a burnt-orange outline). It opens a dialog with one
+  text box, an ✕ and Submit; the message goes to the new backend `feedback`
+  action (`api.sendFeedback`) with the session token, page URL, app version
+  and browser, and lands in the Feedback tab of the CUSTOMERS spreadsheet
+  under the sender's email. The button is hidden while signed out and hides
+  again on sign-out (closing the dialog if open). ✕, the backdrop and Escape
+  close without sending and keep the draft; a failed send keeps the draft and
+  shows the server's message; an older backend answers "Feedback isn't
+  available yet". Needs backend ≥ 1.26.0. Why: beta users had no way to
+  report a bug or ask for a creator without leaving the site.
+
+### 1.31.0 — 2026-10-02
+- **IndexedDB is now the default cache storage for everyone.**
+  `STORAGE_ENGINE_DEFAULT` flips from `'legacy'` to `'idb'`, so the large
+  snapshots (feed, search index, Top This Week, channels) move from
+  localStorage to IndexedDB on each browser's next load. The existing
+  localStorage copy is migrated over, so this costs no cold load. Why: Safari
+  counts localStorage at 2 bytes/char once any character is outside Latin-1,
+  which caps it at ~2.6M chars. The search index is about that size and
+  growing, and when it doesn't fit it silently isn't saved. Browsers with an
+  explicit `wd_storage_engine` flag keep their choice. `?storage=legacy`
+  stays as the per-browser kill switch, and setting the default back to
+  `'legacy'` rolls it back for everyone. Tests now pin the idb default and
+  run legacy through the explicit flag.
+
+### 1.30.1 — 2026-10-01
+- **Footer fits on phones again.** 1.30.0's extra "Cookies" link pushed the
+  footer row (three links + "© 2026 How You Watch" + version badge) past the
+  width of most phones. The copyright was ellipsized at every width up to
+  375px on the feed, and the nav row overflowed at 320px. Under 480px the
+  footer now uses tighter padding and gaps, so the full row fits from 375px up.
+  At 360px and below, the version badge hides (it's still logged to the
+  console at boot) rather than cutting the copyright. Checked at
+  320/340/360/375/390/414/480/768/1280px on the feed, privacy and terms pages.
+
+### 1.30.0 — 2026-10-01
+- **Google Analytics (GA4, `G-LNXRS74XZ3`), opt-in behind a cookie consent
+  banner.** Uses Google Consent Mode v2 in "basic" mode: every storage type
+  defaults to denied, and `gtag.js` is only injected after the visitor clicks
+  Accept, so nothing is requested from Google and no `_ga` cookie is set
+  before that. Reject and Accept are equal-size, side by side. The choice is
+  kept in `localStorage` (`wd_analytics_consent`), and a new "Cookies" footer
+  link on every public page reopens the banner. Withdrawing consent deletes the
+  `_ga` cookies. Setup lives in `js/analytics.js` rather than Google's inline
+  snippet, so the strict CSP (no `'unsafe-inline'`) holds. The CSP allowlists
+  `www.googletagmanager.com` plus the `*.google-analytics.com` /
+  `*.analytics.google.com` beacon hosts. Loaded on index, privacy, terms and
+  404; not on the operator-only add-channel page.
+- **Privacy policy updated.** It used to promise no analytics and no cookies.
+  It now describes the opt-in analytics, how to change the choice, and lists
+  Google Analytics as a third-party service.
+- E2E contexts start with consent pre-answered (`playwright.config.js`
+  `storageState`) so the fixed banner never covers what specs click.
+  `cookie_banner.spec.js` covers the banner itself on both viewports.
+
+### 1.29.0 — 2026-09-25
+- **Transient backend failures are retried instead of surfacing as "API error:
+  404".** `/exec` answers with a 302 to a one-shot googleusercontent "echo" URL,
+  and that hop intermittently returns a 404 page instead of the JSON — in
+  bursts, with the script itself healthy (reproduced against production
+  2026-09-23; 4 of ~20 requests in one burst). `api.js` now treats any body that
+  parses as a JSON result as the result, whatever the HTTP status; retries an
+  idempotent GET, or a POST that never reached the script, on
+  `CONFIG.API_RETRY_DELAYS_MS` (400 ms, 1.2 s); and marks a POST that failed
+  *at the echo hop* — so it did execute — as `resultLost`, never resending it
+  (a toggle would double-fire). Votes, stars and bookmarks keep their optimistic
+  flip on `resultLost` and confirm it from the server's own list
+  (myVotes / myStars / bootstrap) instead of rolling back with a toast.
+- **IndexedDB storage for the cache snapshots, behind a per-browser flag —
+  shipped OFF.** The feed, search index, Top This Week and channel snapshots can
+  now live in IndexedDB instead of localStorage, chosen per browser by
+  `localStorage.wd_storage_engine` (`idb` | `legacy`), or once via
+  `?storage=idb|legacy|default` (applied, then removed from the URL — it works
+  on iPhones, which have no devtools). The default is
+  `CONFIG.STORAGE_ENGINE_DEFAULT = 'legacy'`, so nobody changes storage with
+  this release; the boot log prints `storage engine: <engine> (<flag|default>)`.
+  Why it exists: Safari counts localStorage at 2 bytes per character once any
+  character is outside Latin-1 (production titles have em dashes and curly
+  quotes), halving its cap to ~2.6M characters — and the full search index
+  sits right around that. When it doesn't fit, the quota error is swallowed,
+  and every returning visitor's search re-walks the whole catalog (measured on
+  WebKit against production: 43 requests, ~36 s, vs 1 request / ~170 ms from
+  IndexedDB). `legacy` never opens IndexedDB, so it is a safe kill switch; in
+  `idb` mode every storage call is time-bounded, so an IndexedDB that never
+  answers (a known iOS failure) costs about a second and falls back to
+  localStorage instead of stalling boot. Rolling it out = flipping the default.
+- **What changes at the default (`legacy`), even with the flag off:** cache
+  snapshot reads and writes are now async, queued per key so they always land
+  in call order; the search index is persisted without its per-row token memo
+  (`_searchFields`), which roughly doubled it — that alone brings today's index
+  under Safari's cap, with ~10% headroom; and opening Top This Week and then
+  leaving before its snapshot loads no longer clears the tab you moved to.
+
+### 1.28.2 — 2026-09-22
+- **Header badge reads "Beta" instead of "Alpha."** The `header__logo-icon`
+  label next to the site title, on every page (home, add-channel, privacy,
+  terms, 404), now says Beta — the site has moved past its alpha phase.
+  Cosmetic only; no behavior change.
+
+### 1.28.1 — 2026-09-22
+- **Legal-page contact is now an email, not the GitHub repo link.** The Privacy
+  Policy (data-deletion + complaints) and Terms (questions) pointed visitors to
+  "open an issue on our GitHub repository," which advertised the exact repo URL
+  on the public site. Swapped all three for a `mailto:` to
+  contact@andrewmorganwatches.com — a friendlier contact channel that no longer
+  surfaces the repo from the legal pages. (The repo stays discoverable via the
+  Pages DNS CNAME regardless, so this is about not volunteering the link, not a
+  security control — the model already assumes a public repo.)
+
+### 1.28.0 — 2026-09-22
+- **Write requests are now HMAC-signed (SEC-Sybil, phased).** Every write
+  POST (`api.js` `post()`) carries a `ts` + `sig`, where `sig` is
+  `base64url(HMAC-SHA256("action\nts", REQUEST_SIGNING_SECRET))` computed with
+  Web Crypto — the same canonicalization the backend recomputes (Backend
+  1.23.0). It's a speed bump against drive-by curl/bot abuse and stale replay,
+  layered on the existing Google Sign-In auth — **not** an authorization
+  boundary: a static site necessarily ships `REQUEST_SIGNING_SECRET` in
+  `config.js`, so it's public by construction (the comment there says so). The
+  real anti-Sybil defense (account-age gating + vote anomaly detection) is a
+  separate, secret-free follow-up. Signing is best-effort: a context without
+  Web Crypto sends the request unsigned, which the backend's soft-launch
+  window accepts. No user-visible change.
+
+### 1.27.0 — 2026-09-22
+- **Liking a post now moves it within Top This Week immediately.** A vote
+  updated the button count everywhere (FE13) but nothing re-sorted the
+  loaded ranking, and the tab never refetches within a session
+  (`topLoaded` stays true), so the liked card kept its old position until
+  a full page reload. After the server confirms a vote, the loaded list
+  is now re-sorted client-side with an exact mirror of the backend's
+  ranking order and the Top tab repaints if it's visible — no extra
+  round trip. The saved first-page snapshot refreshes too (only while it
+  covers the whole loaded window), so the next session paints the new
+  order instantly.
+- **The local re-rank uses the new view-weighted score.** Backend 1.22.0
+  counts every 5,000 views as one upvote in the Top This Week ranking;
+  the client mirror (`CONFIG.TOP_WEEK_VIEWS_PER_VOTE`, kept in sync with
+  the backend constant) applies the same formula, so a liked card lands
+  exactly where the next server fetch would put it, views included.
+
+### 1.26.0 — 2026-09-22
+- **Search now genuinely covers the whole catalog and archive.** The
+  backend clamps every page request to 100 rows (BE11) and computes
+  offsets from the clamped value, but the search-index build still did
+  its page math with the requested 500-row chunk — pages 2..N landed on
+  already-fetched offsets and the page loop cut out ~5× early, so the
+  index silently held only the newest ~400 live + ~500 archive rows of a
+  ~4,100-item catalog. Search, Favorites, and Bookmarks were blind to the
+  rest. The build now derives the effective page size from what page 1
+  actually returned (any future server-side clamp self-heals), and
+  `SEARCH_CHUNK_SIZE` drops to 100 to match what the backend serves.
+  Verified live: the index completes at 3,788 rows and deep-archive
+  articles from months back are searchable again.
+- **Cached sessions top up the index instead of re-walking the catalog.**
+  Correct coverage means ~41 page requests per full build against a
+  backend that serializes executions (~3.7 min wall clock, measured; all
+  background, the UI never blocks). That cost is now paid at most once
+  per 24h per device: a session seeding from a fresh complete cached
+  index walks feed pages newest-first only until the first fully-known
+  page — usually one ~4s background request. A top-up never re-stamps
+  the persisted snapshot, so the TTL'd full rebuild (the pass that lets
+  server-side deletions age out) still comes due on schedule.
+  `CACHE_VERSION` bumps to 2 so pre-fix truncated indexes are discarded
+  rather than trusted as complete.
+
+### 1.25.3 — 2026-09-22
+- **Tab row no longer drags vertically on iOS.** Making the five-tab row
+  horizontally scrollable (1.24.0) silently made it a vertical scroll
+  container too — `overflow-x: auto` computes `overflow-y` to auto — and
+  the active tab's underline protruded 1px past the content edge, so iOS
+  offered that pixel as draggable overflow and rubber-banded the labels
+  half out of view. overflow-y is now pinned to hidden and the underline
+  sits at bottom: 0, with an e2e guard asserting the row has zero
+  vertical scrollable overflow.
+
+### 1.25.2 — 2026-09-22
+- **Full Google pill inside the overlay on every viewport.** The overlay's
+  Google button rendered as the icon-only circle on phones — a leftover of
+  the header's `< 480px` compact mode, from before the button moved into
+  the dialog. The overlay has room everywhere, so it's now always the
+  full-width "Sign in with Google" pill, sized large for the dialog's
+  primary action.
+
+### 1.25.1 — 2026-09-22
+- **No Google UI outside the sign-in overlay.** 1.25.0 still auto-invoked
+  Google One Tap for signed-out visitors on load, so a Google-branded
+  popup appeared before anyone touched the Sign in pill. The automatic
+  prompt is gone: the header shows only our pill, and the only Google
+  surface is the button inside the overlay it opens. One Tap remains
+  solely the last-resort re-auth for a session that lapsed entirely.
+
+### 1.25.0 — 2026-09-22
+- **Sign-in overlay with a marketing-email consent step.** The header's
+  embedded Google button became a volt Sign in pill that opens a dialog
+  hosting the official Google button; on a first sign-in the SAME overlay
+  flows into an explicit opt-in question — "No thanks" / "Yes, email me",
+  nothing pre-ticked, and dismissing records nothing (it asks again next
+  visit; only a button click writes). A signed-in visitor the server says
+  never answered gets the question once per page load. The choice rides
+  the one-round-trip sign-in bootstrap (backend 1.20.0) with the same
+  epoch-race semantics as votes/stars/bookmarks, and a backend without
+  consent support never prompts. Avatar + name in the header now open
+  **Email preferences** — the change-your-mind / unsubscribe path — and
+  privacy.html documents the whole thing (new §2.5). (Andrew's
+  email-permission request — the last of the four.)
+
+### 1.24.0 — 2026-09-22
+- **Bookmarking.** Every video and article card carries a bookmark button in
+  its action bar (between comments and share): outline when unsaved, filled
+  volt when saved — the same color-flip language as the ☆ → ★ favorite star,
+  whose machinery it reuses wholesale. Toggles are optimistic with an
+  in-flight guard (one gesture, one POST), persist per signed-in user
+  (backend 1.19.0's `bookmark` action) with localStorage for instant paint
+  on reload, and reconcile through the sign-in bootstrap — a bookmark
+  toggled mid-flight beats the older snapshot. Signed-out taps get the
+  standard "Please sign in to bookmark" info toast. A new **Bookmarks** tab
+  (between Favorites and Channels) lists saved items newest-first off the
+  full search index — same stale-while-revalidate flow as Favorites — and
+  composes with search and the type chips; its empty state invites the
+  action. Five tabs no longer fit a phone row, so the tab row now scrolls
+  horizontally with the scrollbar hidden. (Andrew's bookmarking request —
+  the last of the four except email consent.)
+- **Flat icon set.** Every colored emoji icon is now a flat monochrome SVG
+  drawn in `currentColor` (new `js/icons.js`), matching the ☆/▲/⛶ glyphs:
+  the comments bubble (was 💬), share link (was 🔗), the channel platform
+  mark in card meta (was 🎬/📰), the article placeholder tile, and the
+  Channels-tab article corner mark. Flat icons inherit each button's
+  normal/hover/active colors, which colored emoji never could. Comment-count
+  updates now go through one helper so `textContent` writes can't wipe the
+  inline icon.
+
+### 1.23.0 — 2026-09-22
+- **Password-protected add-channel page.** `add-channel.html` is a small
+  operator form: paste a YouTube channel, site homepage, or RSS feed link,
+  enter the add-channel password, and the backend resolves and appends the
+  channel, then kicks off a crawl so its content appears within minutes
+  (backend 1.18.0's `addChannel` action). The password is checked
+  server-side — the repo is public, so the page holds no secret — travels
+  only in the POST body, and is never persisted by the page. Success shows
+  the resolved name and platform; errors (wrong password, duplicate, no
+  feed found) surface as-is. Noindexed; meant to be shared as a link + the
+  `add_channel_password` META value. (Andrew's add-channels request.)
+
+### 1.22.0 — 2026-09-22
+- **Channels tab shows each creator's platform.** Every channel card now
+  carries a platform-colored ring around the avatar (red = YouTube, hairline
+  grey = article site) and a corner mark — the YouTube play lozenge or 📰 —
+  mirroring the favorite star's geometry on the opposite corner. A new chips
+  row (All / YouTube / Articles) filters the grid, reusing the feed's
+  pure-CSS visibility pattern (`data-platform` + container classes, no
+  re-render). Classification prefers the backend's computed `platform` field
+  (backend 1.16.0) and falls back to a URL/avatar heuristic for cached lists;
+  a source with no YouTube link is an article site by definition, so no card
+  ever renders unmarked. (Andrew's channel-list request.)
+
+### 1.21.9 — 2026-09-10
+- **No more re-fade when leaving fullscreen.** `.media-card--fullscreen`
+  overrides `animation`, so exiting fullscreen re-applied a card's still-present
+  `.media-card--enter` rule as a brand-new animation: the card flashed back to
+  opacity 0 and faded in again, and the exit re-anchor measured the card
+  mid-replay — permanently offsetting the restored scroll by the from-state's
+  ~12px translateY (confirmed via instrumented CI runs on the T11 flake hunt).
+  Entrance classes and the inline `--enter-delay` are now dropped once the
+  arrival animation settles (`animationend`, or `animationcancel` for a card
+  expanded mid-stagger), so later class churn has nothing to replay.
+
+### 1.21.8 — 2026-08-27
+- **Clickjacking protection.** The CSP ships via `<meta http-equiv>`, where the
+  spec ignores `frame-ancestors`, and GitHub Pages can't send `X-Frame-Options` —
+  so a JS frame-buster in `js/bootstrap.js` now blanks the page and breaks out
+  when the site is framed, closing the invisible-overlay click-hijack on a
+  returning visitor's restored session (SEC6).
+- **Sanitizer consistency.** The reply button rendered after posting a comment
+  now passes `comment_id` through `sanitizeHtml` like every other API value
+  reaching `innerHTML`, and the header avatar gates its `src` on `safeUrl` like
+  the other avatar renders — neither was exploitable, but both broke the
+  invariant the rest of the codebase holds (SEC10, SEC11).
+- **One owner for "update every list holding this row".** `patchVideoEverywhere`
+  in `js/state.js` walks a registry of the row-holding lists (feed, Top This
+  Week, search index) and persists once through the coalesced cache write,
+  replacing the four hand-rolled copies (votes, comments, revalidateFeed's two)
+  that kept drifting apart — the drift that had cost search cards their live
+  counts (FE13). The dead `state.renderToken` counter (11 writes, zero reads)
+  is gone (FE11), and a single `epoch` helper now owns generation counters,
+  with `voteEpoch` and `topUpToken` migrated first (FE14, incremental).
+- **Comment refresh can't render into a detached node.** The 300ms fade timer
+  re-checks `listEl.isConnected` before painting fresh comments (the cache
+  already holds them; the next expand renders from it), and change detection
+  compares a cheap `comment_id:created_at` signature instead of
+  `JSON.stringify`-ing both whole trees on every expand (FE12).
+- **Fix: leaving the Channels tab no longer buries the next view under the
+  channel grid.** The Channels tab renders `.channel-card` elements into the
+  shared feed container, but the Starred view and the searched Latest view
+  re-render through `reconcileList`, which diffs only `.media-card` elements —
+  so Favorites → Channels → Favorites left the whole channel grid on screen
+  beneath the starred feed ("Favorites doesn't load"). `update()` now purges
+  channel cards whenever the active view isn't Channels, at the same spot that
+  already flips the grid class and controls. Regression-covered by unit
+  (`view_residue.test.js`) and e2e (`channels_tab.spec.js`) tests.
+
+### 1.21.6 — 2026-08-27
+- **Accessibility, fullscreen, and feed-performance pass.** The fullscreen watch
+  overlay is now a proper dialog (`role="dialog"`/`aria-modal`, background made
+  `inert`, focus trapped and returned to the expand control on exit), and
+  switching tabs from fullscreen lands at the top of the new view instead of
+  mid-list. Tabs gained full keyboard support (arrow keys, Home/End, roving
+  tabindex, panel association); every control now shows a visible `:focus-visible`
+  ring; placeholder text meets AA contrast; toasts announce through a live region;
+  and the comments toggle exposes `aria-expanded`. Search re-renders incrementally
+  — diffed by video id, with tokens memoized and progress throttled to one render
+  per frame — instead of rebuilding the whole list on every index chunk, so open
+  comment threads and playing iframes survive; votes ignore double-clicks; the
+  YouTube postMessage flood skips JSON parsing; and concurrent toasts are capped.
+
+### 1.21.5 — 2026-08-27
+- **Instant cache restore + lighter cache writes.** Restoring a multi-page cached
+  feed now paints all at once via `renderList` instead of replaying the per-card
+  entrance animation, which had left the lower cards blank for up to ~5 seconds on
+  a deep cache. Vote/comment count updates coalesce their localStorage writes
+  (trailing idle-callback) and cap the persisted snapshot, instead of
+  re-serializing the whole accumulated feed on every click. Feed and search-index
+  caches now carry a version + timestamp and self-heal when stale (wrong version or
+  older than 24h), and the search-index backfill fetches only the pages it still
+  has headroom for — with bounded concurrency — rather than firing every archive
+  page and discarding the overflow.
+
+### 1.21.4 — 2026-08-27
+- **Failed cold loads now show a retry state instead of a blank page.** A
+  first-visit load that failed (offline, or an Apps Script cold-start error) used
+  to leave a permanently blank feed with a silently-retrying spinner. `#feed-empty`
+  now shows an error message and a Retry button, distinguishes offline from a
+  server error, and auto-retries when connectivity returns.
+- **Hardened Google sign-in against storage and refresh edge cases.** A
+  `localStorage` write that throws (private mode, quota) no longer reports a false
+  "Sign-in failed" while the user is actually signed in — persistence is guarded
+  and listeners always fire. Concurrent token refreshes now share one in-flight
+  request, GIS loads via `onGoogleLibraryLoad` instead of a silent 10s poll, and a
+  credential-decode error logs only its name so no token fragment can reach the
+  error reporter.
+
+### 1.21.3 — 2026-08-27
+- **Bounded the content-type filter's page-fetch storm.** Selecting a chip that
+  hides every card on a fetched page (e.g. "Shorts" against a mostly long-form
+  catalog) used to walk the entire catalog: hidden cards add zero height, so the
+  load-more sentinel never left view and the `requestAnimationFrame` retrigger
+  re-fired immediately, each pass also refilling the prefetch buffer and
+  re-serializing the whole feed cache. A zero-visible-yield streak now parks
+  pagination after `FILTER_ZERO_YIELD_MAX_PAGES`, resuming on a chip change, tab
+  switch, or genuine scroll; the unfiltered feed still auto-fills as before.
+
 ### 1.21.2 — 2026-08-22
 - **Header now carries an "Alpha" label instead of the watch emoji.** The
   `⌚` logo icon on all four pages (index, terms, privacy, 404) is replaced
@@ -454,6 +871,409 @@ that component's heading.
 
 ## Backend
 
+### 1.26.2 — 2026-10-08
+- **A request still gets its error JSON when the Spreadsheet service is what
+  failed.** Every "Failed" `doGet` row in the Apps Script console over
+  2026-10-03..08 had the same stack: the handler threw "Too many simultaneous
+  invocations: Spreadsheets", the catch block called `log()`, `log()` opened
+  the Meta sheet to read `log_level`, the Spreadsheet service threw *again*,
+  and that second throw escaped `doGet`. The execution died as Failed and the
+  client got Google's HTML error page instead of the `{status:'error'}` JSON
+  it knows how to retry. `log()` now falls back to the ERROR-only threshold
+  when the level can't be read, and both `doGet` and `doPost` wrap the log
+  call so the response never depends on it.
+- **A whole-catalog cache miss is rebuilt once, not once per request in
+  flight.** 1.26.1 made every request *after* a scan cheap, but the miss
+  itself was shared by everything that landed on it — a cold landing is feed
+  + Top Week + comments, a search focus is four parallel chunk pages — and
+  each of those ran its own full Videos-sheet scan. Those concurrent scans
+  were the 1,200+ "Too many simultaneous invocations: Spreadsheets" failures
+  in Cloud Logging and, once the service was saturated, the `doGet`
+  executions wedged at the 6-minute limit. `cachedSortedList` now takes the
+  script lock on a miss, re-checks the cache (the holder ahead of it has
+  usually just populated it), and scans only if it is still a miss; waiting
+  on the lock touches no sheet. The wait is bounded
+  (`SORTED_LIST_REBUILD_LOCK_MS`, 30s) and best-effort — past the bound a
+  request scans unshared, exactly the 1.26.1 behaviour. Only the read-only
+  paths reach the guard, none of which hold the (non-reentrant) lock.
+
+### 1.26.1 — 2026-10-06
+- **The whole sorted catalog is cached, so feed pages past the head and
+  search chunks stop re-scanning the Videos sheet.** Every request the 50-row
+  feed head couldn't answer — cursor pages 2+ (each scrolled page and each
+  read-ahead prefetch), offset pages past the head, and the search index's
+  limit=100 chunks — re-read and re-sorted the entire sheet (~2,100 rows,
+  2.4–7.7s each, 30s+ under contention). Measured on 2026-10-06, one browser's
+  first search-box focus fired 22 of those scans plus 28 archive pages, and a
+  cold load 4 more; those scans made up most of the 592k executions in the
+  week that pushed the project to Google's simultaneous-executions limit, at
+  which point even a no-op `/exec` waited 30s for a slot and the UI stalled.
+  `getVideos`, `handleTopWeek` and `handleVideo` now read `readSortedCatalog()`,
+  one scan per 300s or per invalidation (every writer that changes a row still
+  bumps the generation and now also drops the snapshot). The ~1.2MB payload is
+  far past CacheService's 100KB/key cap, so the shared sorted-list cache gains
+  chunking: values are ASCII-escaped (the cap is in bytes), split into 90KB
+  pieces keyed by generation, and stitched back with one `getAll` plus a
+  length check — a missing piece is a miss, never a truncated catalog. Small
+  values (head, Top This Week) are stored exactly as before. The whole-archive
+  snapshot was over the same cap and silently failing to cache on every
+  request; it caches now too. The head is repopulated once per scan instead of
+  on every warm cursor page. No response shape or ordering changes.
+
+### 1.26.0 — 2026-10-03
+- **`feedback` action.** New signed-in POST (`message` + `token`) backing the
+  site's feedback button. The row — id, time, verified email and name, the
+  message, page, app version, user agent — is appended to a **Feedback** tab
+  of the CUSTOMERS spreadsheet (created on first use via `getUserDataTab`, so
+  a person's feedback lives next to their account row and activity tabs;
+  `getCustomersSheet` never claims it as the Customers tab). A missing or
+  invalid token is an error and nothing is written. Guards: a 2,000-character
+  cap (rejected, not clipped), the block list, a 30s spacing per sender, and
+  the '@' plain-text format set before the values so a message can't execute
+  as a formula. `feedback` joins SIGNED_ACTIONS.
+
+### 1.25.1 — 2026-10-02
+- **Shorts ingested on a Data-API fallback crawl are filed as Shorts.** The
+  frontend recognises a Short purely by its `/shorts/` URL, which the channel
+  RSS feed supplies. When YouTube blocks RSS from Apps Script IPs the crawl
+  falls back to `playlistItems.list`, which carries no Shorts signal, and
+  `parseYouTubeUploads` wrote `watch?v=` for every item — so a Short ingested
+  on one of those crawls (`8ois5twG3YY`, The 1916 Company, 2026-10-02)
+  rendered as a long-form video while its siblings from RSS crawls were
+  Shorts. Two fixes in `crawlAllFeeds`: genuinely new Data-API items are
+  probed once via `youtube.com/shorts/<id>` (200 = Short, 303 to `/watch` =
+  not; redirects walked by hand, youtube.com hosts only, three hops), and a
+  row already stored with a watch URL is upgraded in place the next time the
+  RSS feed says `/shorts/` for the same id — one batched, text-formatted
+  column write, never the reverse, since the Data API's watch URL carries no
+  information. An inconclusive probe (404, 5xx, off-site redirect, network
+  error) keeps the watch URL and never fails the channel; the self-heal
+  corrects it on the next unblocked crawl. Only new items are probed, so a
+  blocked crawl costs one or two extra fetches per new video, not fifteen per
+  channel.
+
+### 1.25.0 — 2026-09-25
+- **A channel added from the add-channel page has content immediately.**
+  `handleAddChannel` used to call `scheduleRefresh()` to crawl the new channel
+  "within minutes", but that path has never worked on this deployment:
+  installing a trigger needs the `script.scriptapp` OAuth scope, which the
+  ANONYMOUS web app deliberately doesn't carry (adding it 403'd the live
+  `/exec` — 1.14.3, reverted in 1.14.4). Every `ScriptApp` call threw, the add
+  path swallowed it, and a new channel sat empty until the 4-hour trigger. It
+  now crawls just that one feed inline: `fetchAllFeeds` / `crawlAllFeeds` take
+  an optional `feed_url` and skip every other channel. A single-feed crawl
+  shares the one-crawl-at-a-time marker, and leaves `last_fetch`, the crawl
+  resume index and retention pruning alone — whole-catalog bookkeeping that
+  belongs to the full crawl. The response gains `new_items`. If a full crawl
+  is already running, the row is still saved and the 4-hour cycle picks it up.
+- **`scheduleRefresh`'s missing-scope failure is logged once an hour, not once
+  per visitor.** `handleFeed` calls it on every request while the feed is
+  stale, so one stale window wrote one ERROR per request (dozens a minute).
+  The missing `script.scriptapp` scope is this deployment's permanent state,
+  so it's now reported as a single WARN per hour; it's matched on the scope
+  URL because the rest of the message arrives localized (Hebrew). Every other
+  `scheduleRefresh` failure still gets its own ERROR.
+
+### 1.24.2 — 2026-09-24
+- **`log_level = DEBUG` no longer silences the logs it is supposed to open up.**
+  `log()` resolved its threshold with `LOG_LEVELS[configLevel] ||
+  LOG_LEVELS.ERROR`, and `LOG_LEVELS.DEBUG` is `0` — falsy — so a Meta
+  `log_level` of `DEBUG` fell straight through to the ERROR fallback. Setting
+  the *most verbose* level wrote no DEBUG and no INFO line at all, which made
+  every `log('DEBUG', ...)` call in the crawl dead code in exactly the
+  configuration meant to surface it. The threshold is now resolved on the key's
+  presence (`hasOwnProperty`), so DEBUG means DEBUG; an unset or unrecognized
+  `log_level` still falls back to ERROR-only. WARN and ERROR were never
+  affected, so 1.24.1's "set `log_level` to `WARN` during the observe window"
+  vote-trust rollout step behaved as documented — it was only the DEBUG rung
+  that was unreachable. Covered by `tests/unit/backend/log_level.test.js`
+  against the real `Code.gs`: DEBUG writes all four levels, WARN drops INFO but
+  writes WARN+ERROR, and unset/garbage stays ERROR-only.
+
+### 1.24.1 — 2026-09-23
+- **Vote-trust rollout fixes (found investigating an upvote report).** Three
+  defects in 1.24.0's rollout, none in the counting logic itself:
+  - **Enforcement is now inert until the tenure clock has run one full window.**
+    `first_seen_at` only appeared with the CUSTOMERS sheet on 2026-09-22, so
+    every pre-existing account was stamped then — its "tenure" is time since
+    the column, not since it joined. Flipping `vote_trust_enabled` before one
+    trust window had elapsed would have gated the *entire* user base: every
+    upvote's count would tick up optimistically and snap back. The toggle is
+    now held inert until `VOTE_TRUST_CLOCK_START_ISO` + the window
+    (`isVoteTrustEnforced`), regardless of the Meta value.
+  - **The observability signals actually get written.** `log()` drops anything
+    below the Meta `log_level`, whose default is ERROR — but the "would gate /
+    gated low-tenure vote" lines were INFO and the anomaly/signature-soft
+    lines were WARN, so the "watch the logs, then flip the toggle" step was
+    impossible at the default level: nothing was ever written. All rollout
+    signals are now WARN; **set Meta `log_level` to `WARN` during the observe
+    window** to see them.
+  - **The tenure lookup no longer rescans CUSTOMERS on a vote.** The voter's
+    `first_seen_at` is cached (6h) at bootstrap, where sign-in already has the
+    row in hand, so a vote resolves tenure from cache; the CUSTOMERS spreadsheet
+    handle is also opened once per execution instead of once for the Customers
+    tab and again for the Votes tab. Removes the ~1–2s the gate had added to a
+    user's first vote.
+
+### 1.24.0 — 2026-09-22
+- **Vote-trust gate: low-tenure accounts can't inflate the ranking (SEC-Sybil,
+  phased).** The residual anti-Sybil risk after request signing (whose secret is
+  public) is ranking manipulation — Top This Week ranks on `vote_count`, and the
+  API is callable by any Google account, so a pool of fresh accounts could vault
+  or bury a video. Now a vote from an account whose CUSTOMERS `first_seen_at` is
+  younger than the trust window is still **recorded** (the button lights up,
+  `myVotes` reflects it) but does **not** move the ranking `vote_count`. A newly
+  farmed pool therefore can't shift the ranking at all; gaming costs days of
+  pre-farming instead of being free and instant. "Tenure" is time since first
+  sign-in here, not Google account age (tokens don't expose it) — a patient
+  pre-farmer is the accepted limit.
+  - Each Votes row carries a `counted` flag set at insert from the voter's
+    tenure; un-voting decrements `vote_count` only if the row was counted, so a
+    vote cast while untrusted and withdrawn after the account ages in never
+    drifts the count. The reconcile recount totals only counted rows. Rows
+    predating the column (and the lazily-added column itself) read as counted, so
+    nothing already tallied is disturbed. The column is added from the header row
+    handleVote already reads — no extra Votes-sheet scan (BE5).
+  - A voter with no CUSTOMERS row yet (e.g. a direct API caller that skipped
+    bootstrap) is recorded with `first_seen = now`, so skipping sign-in can't
+    dodge the gate. If CUSTOMERS is unreachable the gate fails **open** (votes
+    count) — availability beats a perfect gate.
+  - Anomaly visibility: a burst of low-tenure votes on one video logs a single
+    `Possible vote manipulation` WARN for operator review. No auto-quarantine —
+    the count gate is the defense, so a genuinely viral video is never hidden.
+  - **Phased rollout:** enforcement is gated by the Meta `vote_trust_enabled`
+    row, default off = observe-only (tenure computed, anomalies logged, but every
+    vote still counts) so this ships with zero behavior change. Flip it to `true`
+    to enforce once the logs look right; `vote_trust_tenure_hours` overrides the
+    24-hour default window without a redeploy.
+
+### 1.23.0 — 2026-09-22
+- **`refresh` is now POST-only; the admin token no longer rides in a URL.**
+  The manual-crawl override was gated by `isAdmin(e.parameter.token)` in
+  `doGet`, so the admin token travelled in the query string — where it leaks
+  into browser history, referrer headers, proxy logs, and Apps Script's own
+  execution/access logs. It moves to `doPost` alongside `logs`/`enrich`
+  (token in the body), for the exact reason those endpoints are POST-only;
+  `doGet` now returns an explicit `refresh is POST-only` so an old bookmark
+  fails loudly instead of silently. No frontend caller. **Operator action:
+  rotate `admin_token` in META after this deploys — assume the old value has
+  already been logged somewhere.**
+- **Write requests carry an HMAC signature the backend can enforce (SEC-Sybil,
+  phased rollout).** `enforceRequestSignature` verifies the `ts` + `sig` the
+  frontend now sends (Frontend 1.28.0) on the ten user-write actions
+  (comment/vote/star/bookmark/emailConsent/myVotes/myStars/myBookmarks/session/
+  bootstrap), recomputing `HMAC-SHA256("action\nts")` with a 5-minute skew
+  window and constant-time compare. **Enforcement is gated by a new Meta
+  `require_signature` row**: while it's absent/not `'true'` (the default), a
+  missing/invalid signature is logged but the request still proceeds — so this
+  backend can ship before the signing frontend and older cached clients keep
+  working. Flip `require_signature` to `'true'` once signing frontends have
+  rolled out and old ones aged past their cache TTL. Admin actions
+  (addChannel/logs/enrich/refresh) and the unauthenticated `clientError`
+  telemetry are not gated (they carry their own token/budget). This is a speed
+  bump, not auth — the secret is public in `config.js`; the durable Sybil
+  defense is a separate account-age/anomaly change.
+
+### 1.22.0 — 2026-09-22
+- **Top This Week now counts views: every 5,000 views equal one upvote.**
+  The ranking score becomes `vote_count + floor(view_count / 5000)`
+  (`topWeekScore`, weight in `TOP_WEEK_VIEWS_PER_VOTE`), so a widely
+  watched video can rank without votes while a single view never
+  outweighs one. The score is derived from the stored counts at sort
+  time rather than saved as its own column — the crawl already refreshes
+  `view_count` for videos in the RSS window and invalidates the top-week
+  cache, so every view update re-ranks the window on the next read with
+  nothing extra to keep in sync. The pagination cursor carries the score
+  in place of the raw vote count (`score|date|id`), keeping deep scrolls
+  gapless under the new order; an in-flight cursor minted before this
+  deploy resumes slightly off-position at worst, which the client's
+  dedupe already absorbs. Mirrored by `CONFIG.TOP_WEEK_VIEWS_PER_VOTE`
+  in Frontend 1.27.0's local re-rank.
+
+### 1.21.0 — 2026-09-22
+- **CUSTOMERS becomes the single user-data spreadsheet.** The Votes, Stars,
+  and Bookmarks tabs move out of the Comments spreadsheet (a pre-CUSTOMERS
+  shortcut) and into CUSTOMERS, next to the Customers identity/consent tab —
+  exporting or deleting everything about a user is now one spreadsheet, and
+  COMMENTS goes back to holding just comments. The move is self-migrating:
+  the first access after deploy creates the missing tab under the script
+  lock and copies the legacy rows across, all-or-nothing (a failed copy
+  deletes the half-made tab and retries next access) and id-deduped (a
+  retry can never duplicate a vote). Legacy tabs are left in COMMENTS for
+  manual cleanup once verified. `getCustomersSheet` now addresses its tab
+  by NAME instead of "first tab" — with sibling tabs in the file, a dragged
+  tab would have silently pointed consent writes at the wrong grid.
+  Operator note: sharing the CUSTOMERS file now shares activity too — hand
+  off a mailing list by exporting the Customers tab, not sharing the file.
+
+### 1.20.0 — 2026-09-22
+- **Email-consent machinery (CUSTOMERS spreadsheet).** POST
+  `{ "action": "emailConsent", "consent": true|false, "token": … }` records
+  the signed-in user's explicit marketing-email answer — boolean only, so
+  the timestamped `consent_updated_at` cell always reflects a deliberate
+  choice; same auth/block-list/rate-limit/lock/`'@'`-write hardening as the
+  other per-user toggles. The sign-in `bootstrap` batch now returns
+  `marketing_consent` ('yes' | 'no' | null = never answered) and lists
+  every signed-in account in the operator's CUSTOMERS spreadsheet on first
+  sighting (email, name, blank consent, `first_seen_at`, source) — blank
+  is "never asked", never "no", and only `marketing_consent = yes` rows may
+  ever be mailed. Header titles normalize to canonical names on first
+  touch: an empty or header-only sheet is rewritten outright; once data
+  rows exist, recognized alias titles rename in place and missing columns
+  append — nothing reorders. An unreachable CUSTOMERS spreadsheet (e.g.
+  not yet shared with the script owner) degrades cleanly: the key is
+  omitted, sign-in reconciliation is unaffected, and the frontend never
+  prompts.
+
+### 1.19.0 — 2026-09-22
+- **Bookmark actions.** POST `{ "action": "bookmark", "videoId": …,
+  "token": … }` toggles the signed-in user's bookmark on an item, mirroring
+  the vote/star contract exactly: same token verification, block list, 2s
+  per-user rate limit, script lock, SEC4 id gate, and `'@'`-formatted text
+  writes (formula injection). Rows live in a new `Bookmarks` tab of the
+  Comments spreadsheet (auto-created, like Votes/Stars); no aggregate count
+  is kept — bookmarks are private. `myBookmarks` returns the caller's saved
+  ids, keyed `bookmark_ids` to match the batch below.
+- **Bootstrap includes bookmarks.** The sign-in `bootstrap` batch now also
+  returns `bookmark_ids` alongside votes and starred channels — still one
+  request, one token verification. Older frontends ignore the extra key;
+  the 1.24.0 frontend treats its absence (an older backend) as "no data"
+  rather than clearing the local cache.
+
+### 1.18.0 — 2026-09-22
+- **`addChannel` action — one-shot channel adds for the add-channel page.**
+  POST `{ "action": "addChannel", "url": …, "token": … }` resolves the URL
+  through the same SSRF-guarded resolver the sheet flow uses, refuses
+  duplicates (by channel id, feed URL, or normalized site URL — a form
+  submit appends, so unlike the fill-blanks sheet flow it must refuse),
+  appends one fully-enriched enabled row, and schedules the async crawl so
+  the channel goes live within minutes. Gated by a NEW dedicated secret,
+  the `add_channel_password` META row: deliberately separate from
+  `admin_token`, so the form's password can be shared with a co-editor
+  without also granting refresh/logs. Constant-time check, fails closed
+  while the row is absent.
+- **Scheduled crawls enrich first.** `scheduledFetchAllFeeds` now runs a
+  contained enrichment pass before crawling, so a URL pasted into CHANNELS
+  by a sheet editor goes live on the next 4-hour cycle with no editor
+  access and no manual `enrichChannels` run. Enrichment failures are logged
+  and swallowed — they never cost the crawl — and the pass is one sheet
+  read when there is nothing to fill.
+
+### 1.17.0 — 2026-09-22
+- **Admin `enrich` action.** POST `{ "action": "enrich", "token": … }` runs
+  `enrichChannels` remotely — the same backfill as the editor's Run button —
+  gated by the existing constant-time admin-token check and sent over POST so
+  the token stays out of URL/query logs (same contract as `logs`). Exists so
+  channel onboarding (paste a URL in the CHANNELS sheet → enrich → refresh)
+  needs no Apps Script editor access — groundwork for letting Andrew add
+  channels himself.
+- **`getChannels` publishes a computed `platform` field** ('youtube' |
+  'article') for the Channels tab's badges and filter (frontend 1.22.0).
+  Classification falls back to the private `feed_url` when the `url` column
+  is blank — 11 live rows are in that state — and everything without a
+  YouTube link is an article site, so nothing ships unclassified. The
+  read-time favicon fallback derives its domain the same way, so URL-less
+  article outlets stop rendering as bare monograms. The field is computed,
+  never copied, so the BE14 public-field whitelist is unchanged.
+- **`enrichChannels` fills article avatars and url-less rows.** Article
+  onboarding now resolves an avatar: the site's apple-touch-icon (largest
+  declared size, SSRF-checked like every scraper fetch), falling back to the
+  feed's channel-level `<image>`/`<logo>`, else blank (favicon at read time,
+  as before). Rows with a blank `url` are no longer skipped: they resolve
+  via `feed_url`, and the url column is filled back — the feed's
+  channel-level `<link>` for article sites, the canonical `/channel/UC…` URL
+  for YouTube — so re-running enrichChannels backfills links, avatars, and
+  platform data for the existing catalog. A blank avatar now counts as
+  resolvable, making the backfill a one-click operator action.
+
+### 1.15.1 — 2026-08-30
+- **Fixed the archive duplication loop (~16K rows for ~1.7K unique items).**
+  `crawlAllFeeds` deduped incoming feed items against the LIVE Videos sheet
+  only, but a slow channel's ~15-entry RSS window reaches past the 60-day prune
+  cutoff — those items live in the Archive tab, so every crawl re-ingested them
+  as "new" (re-paying the article og:image fetch) and end-of-crawl pruning
+  re-archived them: one duplicate Archive row per item per crawl. The crawl now
+  seeds its id/url dedup sets from the Archive tab too (two bounded column
+  reads, best-effort with live-only fallback), and `pruneOldArchive`
+  additionally collapses duplicate rows — keyed like `dedupeByUrl` (url,
+  falling back to id) and keeping the most-engaged copy, the same copy the
+  read path already serves — so the existing production duplicates self-heal
+  on the first post-deploy crawl with no operator action. Also closed in
+  passing: rows written into the Archive tab (the `pruneOldVideos` append and
+  the `pruneOldArchive` survivor rewrite) are now `'@'`-text-formatted first,
+  so a formula-shaped title/url stored safely as text in the live sheet can't
+  re-arm as a live formula in default-format archive cells. Covered end-to-end
+  by `tests/unit/backend/archive_dedup.test.js` against the shipped source.
+
+### 1.15.0 — 2026-08-28
+- **Pasting a feed URL into CHANNELS now works for article sites.**
+  `resolveSiteFeed` treated every pasted URL as a homepage: it scraped the body
+  for a `rel="alternate"` feed `<link>` tag (a feed document has none — it *is*
+  the feed) and then probed conventional origin paths (`/feed`, `/rss.xml`, …),
+  so a directly-pasted feed like `hodinkee.com/articles/rss.xml` failed with
+  "No RSS/Atom feed found" even though the answer was in hand — YouTube feed
+  URLs already worked, which made the gap easy to hit. The fetched body is now
+  sniffed first (new `bodyLooksLikeFeed`, shared with `looksLikeFeed`'s probe)
+  and a feed-shaped response is used as-is, named from the feed's own
+  channel-level `<title>` (new `extractFeedTitle`, RSS2/Atom/CDATA-tolerant).
+  Both helpers covered by pure-logic tests in `Test_Code.gs`.
+
+### 1.14.4 — 2026-08-27
+- **Hotfix: reverted the `script.scriptapp` manifest scope added in 1.14.3.**
+  Adding that OAuth scope forced the anonymous (`ANYONE_ANONYMOUS`) web-app
+  deployment into a re-authorization state, so `/exec` began returning HTTP 403
+  and the live feed went blank. Removing the scope restores anonymous access. The
+  scheduled-refresh trigger consequently stays unregistered — its
+  `ScriptApp.newTrigger` call is caught and now ERROR-logged (that logging
+  improvement is kept), unchanged runtime behavior. Properly enabling the trigger
+  needs a separately-authorized path, not a manifest scope on the anonymous web
+  app (BE12 to be re-approached). All other 1.14.3 changes are retained.
+
+### 1.14.3 — 2026-08-27
+- **Crawl throughput, sheet-read, and archive-scalability pass.** The crawl now
+  writes new items in a single batched `setValues` (still `'@'`-formatted against
+  formula injection) and flushes existing-item updates as range writes instead of
+  hundreds of per-row RPCs; the Meta config sheet is read once per execution rather
+  than on every `getMeta`; and comment rate-limiting moved from permanent
+  `rate_<email>` Meta rows to CacheService, removing that PII store and its
+  unbounded scan growth. The Archive tab is now cached by page (so an oversize value
+  can't silently disable caching) and bounded by an age-based retention pass.
+  Sheets headed `item_id` rather than `video_id` are normalized so dedupe, cursors,
+  and `?v=` deep links work; an empty Videos sheet is bootstrapped with a proper
+  header row instead of a headerless one; the public channels response is restricted
+  to a whitelist of rendered fields; and the manifest gains the `script.scriptapp`
+  scope the scheduled-refresh trigger needs (with its failure now logged at ERROR).
+
+### 1.14.2 — 2026-08-27
+- **Abuse and quota hardening on the read/write endpoints.** Google ID tokens are
+  now validated locally (aud/iss/exp) before the `tokeninfo` network call and
+  failures are negatively cached, so a flood of garbage tokens can no longer burn
+  the daily UrlFetch quota (which would take down sign-in and the crawl). Votes and
+  stars get a short per-user rate limit; the vote count is updated incrementally
+  (±1) instead of rescanning the whole Votes and Videos sheets on every toggle;
+  `page`/`limit` are clamped on every read handler (no more negative-page windows
+  or whole-catalog dumps); repeat lookups of a nonexistent video short-circuit on a
+  cached not-found marker; and the `clientError` intake gains a per-session budget
+  plus a kill-switch alongside the global cap.
+
+### 1.14.1 — 2026-08-27
+- **Hardened write-handler input validation and closed formula-injection gaps.**
+  Every write path now validates ids (`isValidId`, `[A-Za-z0-9_-]{1,64}`). The
+  Votes writer reserves and `'@'`-formats its row like the Comments/Stars writers,
+  so a `videoId` of `=IMPORTXML(…)` can no longer execute against the user-email
+  column, and the crawl's new-row append gets the same plain-text format so a
+  hostile RSS title/url can't seed a live formula. `commentsBatch` builds its
+  accumulator with `Object.create(null)` so a `video_id` of `constructor`/
+  `toString` can't crash the whole feed's comment-count hydration, and a reply's
+  `parentId` is verified to exist on the same video before it is threaded.
+- **Cache-generation guard against the repopulation-vs-invalidation race.** The
+  three copy-pasted feed/top-week/archive cache triads are unified behind
+  `cachedSortedList`, and a monotonic `CACHE_GENERATION` (Script Property) is
+  captured before each sheet scan and stamped into the cached payload. A read
+  that began before a concurrent vote/comment/crawl invalidation can no longer
+  reinstall its stale snapshot for the full TTL — the late write is refused, and
+  any stale-stamped entry is treated as a miss on the next read.
+
 ### 1.14.0 — 2026-08-20
 - **New `clientError` action: frontend error intake.** Accepts the error
   batches posted by the frontend's new reporter and appends them to a
@@ -757,6 +1577,117 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.11 — 2026-10-09
+- **Perf budgets now mean the number written in the test.** Playwright's
+  locator assertions re-check on a backoff (~0, 100, 350, 850, 1850 ms) and
+  fail at the timeout without a final check, so a `toBeVisible({ timeout:
+  1500 })` budget was really ~850 ms: an element appearing at 1000–1450 ms
+  failed it. Budgets were stricter than written and flaky near the edge.
+  `tests/perf/helpers.js` gains `expect*Within` helpers (expect.poll every
+  25 ms, still a native assertion whose timeout is the budget) and every
+  budgeted toBeVisible / toHaveClass / toHaveCount / toHaveText in the perf
+  suite uses them; the journey's scroll `toPass` gets the same intervals.
+  Budget numbers are unchanged and the 10 s setup waits stay plain
+  assertions. `storage-helpers.js` re-exports the shared helper instead of
+  keeping its own copy. One trap found on the way: Playwright's poller pops
+  the last entry off the intervals array it is handed, so a shared `[25]`
+  constant was empty after the first assertion and every later budget
+  silently reverted to the 1 s default backoff — the intervals are now built
+  fresh per call (`budgetIntervals()`).
+
+### 1.2.10 — 2026-10-06
+- **No more daily CI run against production.** The `schedule` trigger
+  (09:17 UTC) is gone from `ci.yml`; the live smoke + perf job now runs only
+  on demand via `workflow_dispatch`. Per-push unit + e2e are unchanged. The
+  scheduled run was extra traffic on the Apps Script backend — the project
+  hit Google's 800-of-1,000 simultaneous-executions warning on 2026-10-06 —
+  and it was not catching anything the per-push suites miss.
+
+### 1.2.9 — 2026-10-03
+- **Backend deploy health-check waits out propagation.** `deploy-backend.sh`
+  checked prod 5 times, 5s apart — about 40–60s — but a new deployment
+  version takes 60–90s to propagate. Two consecutive 1.26.0 deploys served
+  the old version for the whole window, were declared failed and rolled back,
+  then went live a minute later anyway (and the rollback raced the same way).
+  The loop now runs `HEALTH_ATTEMPTS` × `HEALTH_SLEEP_SECONDS` (defaults
+  12 × 10s), both overridable per run, and each line shows attempt/total.
+
+### 1.2.8 — 2026-10-01
+- **E2E contexts start with the cookie banner already answered.**
+  `playwright.config.js` sets a `storageState` that seeds
+  `wd_analytics_consent=denied` for the test origin. Without it, the fixed
+  consent banner (Frontend 1.30.0) intercepted clicks on cards near the bottom
+  of the viewport and broke unrelated specs. `cookie_banner.spec.js` opts back
+  out so it can test a true first visit.
+
+### 1.2.7 — 2026-09-25
+- **Storage test tooling.** `npm run test:storage:webkit` runs the
+  storage-engine flag's e2e and perf specs on WebKit (Safari's engine) via a new
+  `webkit-storage` Playwright project — explicit only; CI installs Chromium
+  alone, so no CI job or deploy gate runs it. `npm run test:perf-live`
+  (`playwright.perf-live.config.js`) serves a checkout against the PRODUCTION
+  backend for before/after storage measurements, with `PERF_LIVE_STORAGE=idb|legacy`
+  to measure one checkout in both modes; it's outside every gate too.
+  `fake-indexeddb` is a new devDependency for the storage unit tests.
+
+### 1.2.6 — 2026-09-24
+- **`deploy-backend.sh` can be run from a git worktree again.** The success-hash
+  path was the literal `.git/backend-deploy-hash`, but inside a worktree `.git`
+  is a *file*, not a directory — so the final `echo … > "$HASH_FILE"` died with
+  "not a directory" under `set -e`. That happens *after* prod has been pushed,
+  deployed and health-checked green, so a genuinely successful deploy exited
+  non-zero and never printed its `✅` line: indistinguishable from a failure, and
+  an invitation to re-run a deploy that had already landed. The path now resolves
+  via `git rev-parse --git-common-dir`, which is a real directory in both a
+  worktree and a normal checkout, and keeps the hash repo-global — what is live
+  in prod is a property of the project, not of whichever worktree shipped it.
+  Found deploying Backend 1.24.2 from a worktree, which is where this project's
+  work happens.
+
+### 1.2.5 — 2026-09-23
+- **The backend deploy gate now health-checks the POST pipeline too.** Every
+  user write (vote, comment, star, bookmark) goes POST → 302 → googleusercontent
+  echo, a path that can break independently of GET — yet `deploy-backend.sh`
+  only ever curled `?action=feed`, so a broken POST pipeline would have passed
+  both the staging and prod gates. After the GET check, it now POSTs to `/exec`
+  and asserts a JSON reply carrying the deployed version. Written with `--data`
+  and deliberately without `-X POST`: forcing the method makes curl re-POST the
+  echo redirect, which Google answers with an "unable to open the file" HTML page
+  — a curl artifact (browsers follow the 302 as GET) that would false-fail the
+  gate.
+
+### 1.2.4 — 2026-08-27
+- **The release gate's header now tells the truth about deploys.** The
+  `scripts/validate-release.js` header still described the backend as "deployed
+  by the post-commit clasp hook" and warned that committing deploys — both false
+  since the hook's removal. It now states the real flow: the deploy skill runs
+  this gate first, then explicitly invokes `npm run deploy:backend` and
+  `git push`; committing never deploys anything (T14).
+- **Root `README.md`.** The repo finally orients a newcomer at the front door:
+  what the site is, the static-Pages frontend + Apps Script backend split, the
+  three independently-versioned components, and how to run, test, and ship —
+  pointing at `apps-script/README.md` for backend operations.
+- **Backend deploys are now staging-gated, health-checked, and self-rolling-back.**
+  `npm run deploy:backend` deploys to the dev Apps Script project first
+  (`apps-script/.clasp.staging.json`, targeted via `clasp -P`) and health-checks
+  its `/exec`, then promotes to prod and health-checks that — curling
+  `/exec?action=feed` for HTTP 200 + JSON + a matching `version`, retrying for
+  propagation — and on prod failure re-pushes the origin/main backend snapshot
+  and redeploys (a version-pointer redeploy can't clear a scope-re-auth state).
+  A manifest OAuth-scope change is **hard-blocked** (it 403s the anonymous web app
+  until re-auth, and staging can't reliably catch it because the dev project's
+  auth state differs); override with `ALLOW_SCOPE_CHANGE=1` after authorizing the
+  scope by hand. Motivated by the 2026-08-27 `script.scriptapp` outage.
+
+### 1.2.2 — 2026-08-27
+- **CI workflow added** (`.github/workflows/ci.yml`): unit + e2e on every push and
+  PR — which activates playwright.config.js's previously-dormant CI guards
+  (`forbidOnly`, retries, single worker) — with smoke + perf on a daily schedule /
+  manual dispatch so the live backend isn't hit per-push. Test hygiene rides along:
+  the smoke suite now targets the live `www.howyouwatch.com` domain (plus a 404
+  case), dead/scratch specs were removed, and the perf helpers derive their tuning
+  constants from `js/config.js` instead of a hardcoded mirror.
 
 ### 1.2.1 — 2026-08-20
 - Rebrand ride-along: npm package renamed `watchdirectly` → `howyouwatch`

@@ -29,7 +29,7 @@
   --text-primary: #ffffff;     /* Pure White — headings, body, icons */
   --text-secondary: #8a8a8a;   /* Slate Grey — secondary text, metadata */
   --text-link: #e1f003;        /* Links carry the accent */
-  --text-muted: #5a5a5a;
+  --text-muted: #767676;       /* Meets AA 4.5:1 on black (placeholders, meta) */
 
   --border: #2a2a2a;           /* Hairline on black */
   --separator: #222222;
@@ -142,6 +142,31 @@ button {
   color: inherit;
 }
 
+/* Keyboard focus ring. `:focus-visible` fires only for keyboard / AT
+   navigation (not mouse clicks), so every focusable control — the ~20 per-card
+   buttons, the tab buttons, links, and text fields — gets a consistent, visible
+   position without intruding on pointer users. Restores what the removed
+   `outline: none` declarations used to suppress with no fallback. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Visually hidden, but announced by assistive tech. Used for structural
+   headings that keep the document outline gap-free without adding visible
+   chrome (e.g. the feed section's h2 between the h1 and the card h3s). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 img {
   max-width: 100%;
   height: auto;
@@ -203,11 +228,43 @@ img {
   flex-shrink: 0;
 }
 
+/* Signed-out: our own pill opens the sign-in overlay (the official Google
+   button renders inside the overlay, not in the header). */
+.header__signin-btn {
+  padding: var(--sp-1) var(--sp-4);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bg-canvas);
+  background: var(--accent);
+  border-radius: var(--radius-lg);
+  transition: background var(--transition-fast);
+}
+
+.header__signin-btn:hover {
+  background: var(--accent-hover);
+}
+
 /* Signed-in user display */
 .header__user {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+/* Avatar + name are one button — the door to Email preferences. */
+.header__user-info {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 2px;
+  border-radius: var(--radius-lg);
+  transition: background var(--transition-fast);
+}
+
+.header__user-info:hover {
+  background: var(--bg-surface-hover);
 }
 
 .header__user-avatar {
@@ -331,6 +388,32 @@ img {
   opacity: 0.7;
 }
 
+/* Phones: three nav links + "© 2026 How You Watch" + the version badge are
+   ~390px at the default spacing, so the copyright got ellipsized. Tighten the
+   spacing so the full row fits from ~360px up; on the narrowest phones drop
+   the version badge (it's also logged to the console at boot) rather than
+   cut the copyright. */
+@media (max-width: 480px) {
+  .footer__inner {
+    padding: 0 var(--sp-3);
+    gap: var(--sp-2);
+  }
+
+  .footer__nav {
+    gap: var(--sp-3);
+  }
+
+  .footer__meta {
+    gap: var(--sp-2);
+  }
+}
+
+@media (max-width: 360px) {
+  .footer__version {
+    display: none;
+  }
+}
+
 /* ============================================================
    MAIN LAYOUT
    ============================================================ */
@@ -350,14 +433,28 @@ img {
    VIEW TABS (Latest / Top This Week)
    ============================================================ */
 
+/* Five tabs no longer fit a phone row — the row scrolls horizontally
+   (scrollbar hidden) instead of wrapping or shrinking the labels.
+   overflow-y is pinned to hidden: with overflow-x:auto alone the spec
+   computes overflow-y to auto too, and the active underline's 1px
+   protrusion made the whole row vertically draggable on iOS (labels
+   rubber-banded half out of view). */
 .feed-tabs {
   display: flex;
   gap: var(--sp-1);
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.feed-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .feed-tab {
   position: relative;
+  flex-shrink: 0;
   padding: var(--sp-3) var(--sp-4);
   font-size: var(--fs-base);
   font-weight: var(--fw-semibold);
@@ -378,13 +475,15 @@ img {
   color: var(--text-primary);
 }
 
-/* Accent underline under the active tab */
+/* Accent underline under the active tab. bottom: 0, not -1px — the row is
+   a scroll container now, so anything past the content edge would either
+   be clipped or (worse) become scrollable vertical overflow. */
 .feed-tab--active::after {
   content: '';
   position: absolute;
   left: var(--sp-4);
   right: var(--sp-4);
-  bottom: -1px;
+  bottom: 0;
   height: 2px;
   background: var(--accent);
   border-radius: 2px 2px 0 0;
@@ -420,7 +519,6 @@ img {
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  outline: none;
   transition: border-color var(--transition-fast);
 }
 
@@ -624,6 +722,11 @@ img {
   white-space: nowrap;
 }
 
+/* Flat channel-type icon (play lozenge / newspaper) inline with the name */
+.media-card__channel .icon {
+  vertical-align: -2.5px;
+}
+
 /* The fixed-width meta parts never wrap or shrink */
 .media-card__time,
 .media-card__views {
@@ -730,6 +833,53 @@ img {
 
 .channel-card__name:hover {
   color: var(--accent);
+}
+
+/* Platform mark — pinned to the card's top-left corner as the exact mirror
+   of the favourite star (same 30px centered box, same corner inset): the
+   YouTube play lozenge or the flat newspaper icon for article sites (both
+   inline SVGs carrying their own size). Decorative (aria-hidden); the
+   figure link's aria-label carries the platform for screen readers. */
+.channel-card__platform {
+  position: absolute;
+  top: var(--sp-2);
+  left: var(--sp-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  line-height: 1;
+}
+
+.channel-card__platform svg {
+  display: block;
+}
+
+/* The newspaper mark draws in currentColor — grey to match the article
+   avatar ring, next to the always-red YouTube lozenge. */
+.channel-card__platform--article {
+  color: var(--text-secondary);
+}
+
+/* Avatar ring — red for YouTube channels, hairline grey for article sites.
+   Drawn as a stacked box-shadow (surface-colored gap, then the ring) so it
+   hugs the circular figure without shifting the layout. */
+.channel-card[data-platform="youtube"] .channel-card__figure {
+  box-shadow: 0 0 0 3px var(--bg-surface), 0 0 0 5px #f00;
+}
+
+.channel-card[data-platform="article"] .channel-card__figure {
+  box-shadow: 0 0 0 3px var(--bg-surface), 0 0 0 5px var(--text-muted);
+}
+
+/* Platform filter (chips above the Channels grid): cards carry
+   data-platform, the container carries one feed--hide-platform-<value>
+   class per hidden platform — visibility is pure CSS, no re-render.
+   Scoped to .feed--channels so the classes are inert on video views. */
+.feed--channels.feed--hide-platform-youtube .channel-card[data-platform="youtube"],
+.feed--channels.feed--hide-platform-article .channel-card[data-platform="article"] {
+  display: none;
 }
 
 /* Favourite star, pinned to the card's top-right corner. Resets the negative
@@ -844,6 +994,7 @@ img {
 .media-card__comments-toggle {
   display: flex;
   align-items: center;
+  gap: var(--sp-1);
   width: 100%;
   padding: var(--sp-3) var(--sp-4);
   font-size: var(--fs-sm);
@@ -867,9 +1018,10 @@ img {
   justify-content: flex-start;
 }
 
-/* Expand-to-fullscreen and share buttons, bottom right of every card */
+/* Bookmark, share, and expand-to-fullscreen buttons, bottom right of every card */
 .media-card__expand,
-.media-card__share {
+.media-card__share,
+.media-card__bookmark {
   display: flex;
   align-items: center;
   padding: var(--sp-3) var(--sp-4);
@@ -880,9 +1032,20 @@ img {
 }
 
 .media-card__expand:hover,
-.media-card__share:hover {
+.media-card__share:hover,
+.media-card__bookmark:hover {
   color: var(--accent);
   background: var(--accent-dim);
+}
+
+/* Saved state: the outline bookmark fills with the accent — the same
+   color-flip language as the ☆ → ★ favourite star. */
+.media-card__bookmark--active {
+  color: var(--accent);
+}
+
+.media-card__bookmark--active .icon--bookmark path {
+  fill: currentColor;
 }
 
 /* Mount point for a deep-linked (?v=) card that isn't in the feed. Shares
@@ -1038,7 +1201,6 @@ body.fullscreen-mode {
   color: var(--text-primary);
   background: transparent;
   border: none;
-  outline: none;
   resize: vertical;
   min-height: 48px;
 }
@@ -1178,7 +1340,6 @@ body.fullscreen-mode {
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  outline: none;
   resize: none;
   min-height: 48px;
 }
@@ -1354,6 +1515,277 @@ body.fullscreen-mode {
 
 
 /* ============================================================
+   SIGN-IN / EMAIL-CONSENT OVERLAY
+   One dialog, three faces (js/auth-overlay.js): Google sign-in,
+   the first-sign-in marketing-email question, Email preferences.
+   ============================================================ */
+
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 350; /* above the fullscreen overlay (300), below toasts (400) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+}
+
+.auth-overlay[hidden] {
+  display: none;
+}
+
+.auth-overlay__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.auth-overlay__dialog {
+  position: relative;
+  width: min(92vw, 400px);
+  padding: var(--sp-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  outline: none;
+}
+
+.auth-overlay__close {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  font-size: var(--fs-base);
+  line-height: 1;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast);
+}
+
+.auth-overlay__close:hover {
+  color: var(--text-primary);
+}
+
+.auth-overlay__title {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--sp-3);
+}
+
+.auth-overlay__copy {
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-4);
+}
+
+.auth-overlay__copy--muted {
+  color: var(--text-muted);
+}
+
+.auth-overlay__note {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  margin-top: var(--sp-3);
+}
+
+.auth-overlay__actions {
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: flex-end;
+}
+
+.auth-overlay__gsi {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-4) 0 var(--sp-2);
+  min-height: 44px;
+}
+
+.auth-overlay__pending {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-4) 0;
+}
+
+.btn--ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ============================================================
+   FEEDBACK — floating button + dialog (js/feedback.js)
+   The button mirrors the channel logo: a volt disc carrying a black
+   mark with a burnt-orange outline (the one place --orange is used
+   outside the wordmark). Fixed bottom-right, clear of the footer.
+   ============================================================ */
+
+.feedback-fab {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: calc(var(--footer-height) + var(--sp-4));
+  z-index: 150; /* above the footer (100); under the cookie banner (200),
+                   the fullscreen overlay (300) and every dialog */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg-canvas);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.feedback-fab[hidden] {
+  display: none; /* signed-out: no button (the dialog needs a sender) */
+}
+
+.feedback-fab:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.feedback-fab:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 3px;
+}
+
+.feedback-fab svg {
+  width: 28px;
+  height: 28px;
+}
+
+/* The logo treatment: black fill, burnt-orange outline, volt cut-outs */
+.feedback-fab__bubble {
+  fill: var(--bg-canvas);
+  stroke: var(--orange);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.feedback-fab__dot {
+  fill: var(--accent);
+}
+
+.feedback-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 350; /* same layer as the sign-in overlay: above fullscreen (300), below toasts (400) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+}
+
+.feedback-overlay[hidden] {
+  display: none;
+}
+
+.feedback-overlay__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.feedback-overlay__dialog {
+  position: relative;
+  width: min(92vw, 440px);
+  padding: var(--sp-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  outline: none;
+}
+
+.feedback-overlay__close {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  font-size: var(--fs-base);
+  line-height: 1;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast);
+}
+
+.feedback-overlay__close:hover {
+  color: var(--text-primary);
+}
+
+.feedback-overlay__title {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  margin-bottom: var(--sp-3);
+}
+
+.feedback-overlay__copy {
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+  margin-bottom: var(--sp-4);
+}
+
+.feedback-overlay__textarea {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  padding: var(--sp-3);
+  font-family: var(--font-family);
+  font-size: 1rem; /* 16px: stops iOS Safari auto-zooming on focus */
+  line-height: var(--lh-normal);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  resize: vertical;
+  transition: border-color var(--transition-fast);
+}
+
+.feedback-overlay__textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.feedback-overlay__textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.feedback-overlay__textarea:disabled {
+  opacity: 0.6;
+}
+
+.feedback-overlay__note {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  margin-top: var(--sp-2);
+  min-height: 1em;
+}
+
+.feedback-overlay__actions {
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: flex-end;
+  margin-top: var(--sp-4);
+}
+
+/* ============================================================
    TOAST NOTIFICATIONS
    ============================================================ */
 
@@ -1408,6 +1840,61 @@ body.fullscreen-mode {
 }
 
 /* ============================================================
+   COOKIE CONSENT BANNER (js/analytics.js)
+   ============================================================ */
+
+/* Sits just above the fixed footer, non-modal so the feed stays usable while
+   undecided. Below the fullscreen overlay (300) so it never covers playback.
+   Reject and Accept are the same size, side by side — refusing is as easy as
+   accepting. */
+.cookie-banner {
+  position: fixed;
+  left: var(--sp-4);
+  right: var(--sp-4);
+  bottom: calc(var(--footer-height) + var(--sp-3));
+  z-index: 200;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3) var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+}
+
+.cookie-banner[hidden] {
+  display: none;
+}
+
+.cookie-banner__text {
+  flex: 1 1 280px;
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--text-secondary);
+}
+
+.cookie-banner__link {
+  color: var(--text-link);
+  white-space: nowrap;
+}
+
+.cookie-banner__actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+.cookie-banner__actions .btn {
+  min-width: 88px;
+  min-height: 36px;
+}
+
+/* ============================================================
    FEED CONTROLS
    ============================================================ */
 
@@ -1422,6 +1909,15 @@ body.fullscreen-mode {
   text-align: center;
   padding: var(--sp-8);
   color: var(--text-secondary);
+}
+
+/* Cold-load failure state (FE2): message + Retry button stacked in #feed-empty */
+.feed__empty-message {
+  margin: 0;
+}
+
+.feed__retry-btn {
+  margin-top: var(--sp-4);
 }
 
 .feed__searching {
@@ -1475,6 +1971,80 @@ body.fullscreen-mode {
   padding: var(--sp-6) var(--sp-4);
   max-width: 680px;
   margin: 0 auto;
+}
+
+/* ============================================================
+   ADD-CHANNEL PAGE (operator-only, add-channel.html)
+   ============================================================ */
+
+.add-channel {
+  padding: var(--sp-6) var(--sp-4);
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.add-channel__title {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--text-primary);
+  margin-bottom: var(--sp-2);
+}
+
+.add-channel__intro {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-normal);
+  margin-bottom: var(--sp-6);
+}
+
+.add-channel__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.add-channel__label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  margin-top: var(--sp-3);
+}
+
+.add-channel__input {
+  width: 100%;
+  padding: var(--sp-3);
+  font-family: var(--font-family);
+  font-size: var(--fs-base);
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.add-channel__input::placeholder {
+  color: var(--text-muted);
+}
+
+.add-channel__submit {
+  margin-top: var(--sp-5);
+  align-self: flex-start;
+}
+
+.add-channel__result {
+  margin-top: var(--sp-5);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--text-secondary);
+}
+
+.add-channel__result--ok {
+  color: var(--accent);
+}
+
+.add-channel__result--error {
+  color: var(--danger, #e5484d);
 }
 
 .legal-page__title {
@@ -1605,6 +2175,8 @@ body.fullscreen-mode {
   transition: transform 0.3s ease;
 }
 
+/* No preview image: the flat newspaper icon centered on the dark tile
+   (the SVG carries its own size and draws in currentColor). */
 .article-card__placeholder {
   position: absolute;
   top: 0;
@@ -1614,7 +2186,6 @@ body.fullscreen-mode {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 3rem;
   color: var(--text-muted);
 }
 

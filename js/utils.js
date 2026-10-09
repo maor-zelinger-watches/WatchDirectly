@@ -76,6 +76,23 @@ export function safeUrl(url) {
 }
 
 /**
+ * Escapes a value for safe interpolation into a CSS attribute selector, e.g.
+ * `[data-video-id="${cssEscape(id)}"]`. Article ids are base64 digests that
+ * can carry `+`, `/`, `=` (and, in theory, a quote), any of which would break
+ * or mismatch an unescaped selector. Uses the platform `CSS.escape` where
+ * present; falls back to escaping just the quote and backslash — the only
+ * characters special inside a double-quoted selector string — for engines and
+ * test runtimes (jsdom) that don't expose it.
+ *
+ * @param {string} value - The dynamic value to place inside the selector
+ * @returns {string} The value, safe to embed in a quoted attribute selector
+ */
+export function cssEscape(value) {
+  const s = String(value == null ? '' : value);
+  return (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
+}
+
+/**
  * Escapes HTML special characters to prevent XSS in user-generated content.
  * Preserves newlines and spaces but escapes everything that could be interpreted as HTML.
  * 

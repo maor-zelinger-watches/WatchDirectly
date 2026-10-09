@@ -3,19 +3,31 @@
  *
  * 13. The whole flow in one go: load -> scroll -> filter -> switch tab ->
  *     back -> expand a card -> exit -> search. Each stage carries its own
- *     latency budget, expressed as the `timeout` on a native web-first
- *     assertion: if the UI hasn't visibly responded within the budget, the
- *     assertion fails and points at the exact slow stage.
+ *     latency budget, expressed as the `timeout` of a native retrying
+ *     assertion (expect.poll via the expect*Within helpers): if the UI hasn't
+ *     visibly responded within the budget, the assertion fails and points at
+ *     the exact slow stage.
  * 14. Optimistic vote + comments toggle mid-scroll — the count flips before
  *     the server answers; comments open quickly.
  * 16. The same journey on a throttled "slow phone" (4x CPU, slow network).
  *
  * Budgets are enforced ONLY through native assertion timeouts — no manual
- * Date.now() stopwatch. The timeout IS the budget.
+ * Date.now() stopwatch. The timeout IS the budget (see helpers.js for why
+ * it's expect.poll and not a locator assertion's own timeout).
  */
 
 import { test, expect } from '@playwright/test';
-import { installMocks, signIn, makeItems, scrollToBottom } from './helpers.js';
+import {
+  installMocks,
+  signIn,
+  makeItems,
+  scrollToBottom,
+  expectVisibleWithin,
+  expectClassWithin,
+  expectNoClassWithin,
+  expectTextWithin,
+  budgetIntervals,
+} from './helpers.js';
 
 const chip = (page, label) =>
   page.locator('#category-chips .chip', { hasText: new RegExp(`^${label}$`) });
@@ -34,41 +46,41 @@ async function runJourney(page, budgets) {
 
   // Stage 1 — cold load: first card visible within budget.
   await page.goto('/', { waitUntil: 'commit' });
-  await expect(page.locator('.media-card').first()).toBeVisible({ timeout: budgets.load });
+  await expectVisibleWithin(page.locator('.media-card').first(), budgets.load);
 
   // Stage 2 — scroll until ~30 cards have rendered, within budget. toPass
   // re-scrolls each attempt (infinite scroll needs the sentinel re-triggered)
-  // and its timeout is the stage budget.
+  // and its timeout is the stage budget (fine intervals — see helpers.js).
   await expect(async () => {
     await scrollToBottom(page);
     expect(await page.locator('.media-card').count()).toBeGreaterThanOrEqual(30);
-  }).toPass({ timeout: budgets.scroll });
+  }).toPass({ timeout: budgets.scroll, intervals: budgetIntervals() });
 
   // Stage 3 — apply a content-type filter (pure CSS): chip goes active.
   await chip(page, 'Videos').click();
-  await expect(chip(page, 'Videos')).toHaveClass(/chip--active/, { timeout: budgets.filter });
+  await expectClassWithin(chip(page, 'Videos'), /chip--active/, budgets.filter);
 
   // Stage 4 — switch to Top. The Videos filter is still active, so assert on
   // the first VISIBLE card (what the user sees), not a filtered-out article.
   await tab(page, 'Top This Week').click();
-  await expect(page.locator('.media-card:visible').first()).toBeVisible({ timeout: budgets.tabTop });
+  await expectVisibleWithin(page.locator('.media-card:visible').first(), budgets.tabTop);
 
   // Stage 5 — back to Latest.
   await tab(page, 'Latest').click();
-  await expect(page.locator('.media-card:visible').first()).toBeVisible({ timeout: budgets.tabBack });
+  await expectVisibleWithin(page.locator('.media-card:visible').first(), budgets.tabBack);
 
   // Stage 6 — expand a card to fullscreen, then exit. Enter and exit each get
   // the fullscreen budget.
   const target = page.locator('.media-card:visible').first();
   await target.locator('.media-card__expand').click();
-  await expect(page.locator('body')).toHaveClass(/fullscreen-mode/, { timeout: budgets.fullscreen });
+  await expectClassWithin(page.locator('body'), /fullscreen-mode/, budgets.fullscreen);
   await page.keyboard.press('Escape');
-  await expect(page.locator('body')).not.toHaveClass(/fullscreen-mode/, { timeout: budgets.fullscreen });
+  await expectNoClassWithin(page.locator('body'), /fullscreen-mode/, budgets.fullscreen);
 
   // Stage 7 — search: results render within budget.
   await page.locator('#search-input').focus();
   await page.fill('#search-input', 'Omega');
-  await expect(page.locator('.media-card:visible').first()).toBeVisible({ timeout: budgets.search });
+  await expectVisibleWithin(page.locator('.media-card:visible').first(), budgets.search);
 }
 
 test.describe('PERF · journeys', () => {
@@ -100,11 +112,11 @@ test.describe('PERF · journeys', () => {
     // Optimistic: the count reflects the vote within 600ms — long before the
     // 2s server response. The timeout is the budget.
     await voteBtn.click();
-    await expect(countEl).toHaveText(String(before + 1), { timeout: 600 });
+    await expectTextWithin(countEl, String(before + 1), 600);
 
     // Comments open quickly.
     await page.locator('.media-card__comments-toggle').first().click();
-    await expect(page.locator('.media-card__comments-body').first()).toBeVisible({ timeout: 800 });
+    await expectVisibleWithin(page.locator('.media-card__comments-body').first(), 800);
   });
 
   test('T16 journey on a throttled slow phone', async ({ page }) => {
