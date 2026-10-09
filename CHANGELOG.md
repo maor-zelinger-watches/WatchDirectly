@@ -21,6 +21,11 @@ that component's heading.
 
 ## Frontend
 
+### 1.36.1 — 2026-10-09
+- **Privacy policy states the error-report retention period.** §2.6 now says
+  error reports are deleted after 30 days, which Backend 1.27.1 enforces.
+  No other change.
+
 ### 1.36.0 — 2026-10-09
 - **Sign out now signs you out everywhere, and a session the server has
   revoked no longer leaves the page stuck.** Sign-out used to delete the
@@ -914,6 +919,21 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.27.1 — 2026-10-09
+- **Client error reports are deleted after 30 days.** The CLIENT_ERRORS
+  sheet was append-only with no retention at all: every page error since the
+  endpoint shipped was still there, and the privacy policy could only call
+  it "an operational log". `pruneOldClientErrors()` now runs at the end of
+  each scheduled crawl (after the two archive prunes) and deletes rows whose
+  `logged_at` is older than `CLIENT_ERROR_RETENTION_DAYS` (30). Rows are
+  stamped server-side at write time so the expired ones are a contiguous
+  prefix under the header — one `deleteRows` call, no rewrite — and the scan
+  stops at the first unexpired or undateable row. Brief script lock so it
+  can't interleave with `handleClientError`'s reserve-then-write; busy or
+  failing it returns 0 and the next crawl reattempts; never throws.
+  `tests/unit/backend/client_error_retention.test.js` covers the prefix,
+  the stop conditions, the missing column, a busy lock and a sheet error.
 
 ### 1.27.0 — 2026-10-09
 - **Sessions can be revoked, and can't be renewed forever (SEC2/BE15).**
