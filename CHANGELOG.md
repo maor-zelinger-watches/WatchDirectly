@@ -21,6 +21,26 @@ that component's heading.
 
 ## Frontend
 
+### 1.36.0 — 2026-10-09
+- **Sign out now signs you out everywhere, and a session the server has
+  revoked no longer leaves the page stuck.** Sign-out used to delete the
+  session from this browser only; the token kept working anywhere else it
+  had been read. `signOut()` now also fires the backend's new `signOut`
+  action (best-effort, fire-and-forget), which retires every outstanding
+  session for the account. And because a token can look valid locally (its
+  `exp` hasn't passed) while the backend refuses it — revoked elsewhere,
+  blocked, past the 90-day absolute age, or minted before sessions carried a
+  version — the sign-in bootstrap gets one recovery (`bootstrap.js`): on
+  "Invalid authentication token" / "Session too old" / "You have been
+  blocked" it calls `refreshToken()` (silent renewal, then Google One Tap
+  with auto-select, which is usually invisible for a live Google session),
+  retries once if that yields a token, and otherwise signs out so the UI
+  matches the server. Previously the page sat "signed in" while every
+  action failed. Transport errors are left to the reconcilers as before.
+  `tests/unit/bootstrap_reauth.test.js` covers retry, sign-out, no-loop and
+  the non-auth case. Needs backend ≥ 1.27.0 for the revoke; against an older
+  backend the call fails harmlessly.
+
 ### 1.35.1 — 2026-10-09
 - **The privacy policy now says what the code does.** Three claims on
   `privacy.html` were wrong: §2.2 said the Google authentication token is
@@ -894,6 +914,31 @@ that component's heading.
   fullscreen watch-and-discuss overlay, Google Sign-In.
 
 ## Backend
+
+### 1.27.0 — 2026-10-09
+- **Sessions can be revoked, and can't be renewed forever (SEC2/BE15).**
+  Session tokens now carry a per-user session version `v` that
+  `verifySessionToken` must match; the version lives in META as
+  `sv_<email>` (absent = 0, so existing users cost no rows until something
+  bumps them). Bumping it retires every outstanding token for that account
+  at once. Three things bump it: the new signed POST action `signOut`
+  (called by Frontend 1.36.0's sign-out; returns ok even for an invalid
+  token, there's nothing to revoke), the editor function `blockUser(email)`
+  (adds the BLOCKED row AND revokes — a hand-added row alone used to leave
+  the live session working until it expired), and `bumpSessionVersion(email)`
+  run directly. Renewals carry the ORIGINAL sign-in `iat` forward and `exp`
+  is capped at `iat + SESSION_MAX_AGE_DAYS` (90), and `handleSession`
+  refuses a renewal past that age, so sliding the 30-day window can no
+  longer extend one Google sign-in indefinitely. Blocked users can't mint a
+  session or read `bootstrap`. `runSessionSelfTest` gains stale-version,
+  legacy-token, max-age, iat-carry and sign-out cases (note: it writes one
+  `sv_test@example.com` row to META). **Cutover: tokens minted before this
+  release have no `v` and are rejected, so every signed-in user is signed in
+  again once** — silently via One Tap where their Google session is live,
+  else with the sign-in prompt. Ship Frontend 1.36.0 first so that path is
+  in place. Originally built 2026-08-27 on `fix/be-session-revocation`;
+  cherry-picked onto today's main (the GET→POST `refresh` part had already
+  shipped in 1.23.0).
 
 ### 1.26.2 — 2026-10-08
 - **A request still gets its error JSON when the Spreadsheet service is what

@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.26.2';
+const VERSION = '1.27.0';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -291,6 +291,7 @@ const SIGNATURE_MAX_SKEW_MS = 5 * 60 * 1000;
 const SIGNED_ACTIONS = {
   comment: true, vote: true, star: true, bookmark: true, emailConsent: true, feedback: true,
   myVotes: true, myStars: true, myBookmarks: true, session: true, bootstrap: true,
+  signOut: true,
 };
 
 // Meta toggle gating ENFORCEMENT. While absent/anything-but-'true', a missing or

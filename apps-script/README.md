@@ -154,7 +154,7 @@ Send a `POST` to the web-app URL with a JSON body:
 
 Kicks off a full crawl right now instead of waiting for the 4-hour schedule.
 Useful right after adding channels, to see their content appear immediately.
-(POST-only since backend 1.15.0 — the old `?action=refresh&token=…` link put
+(POST-only since backend 1.23.0 — the old `?action=refresh&token=…` link put
 the admin token in the URL, where it lands in browser history and proxy logs.)
 
 ### 📋 Read the diagnostic logs
