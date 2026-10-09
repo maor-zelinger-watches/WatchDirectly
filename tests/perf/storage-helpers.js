@@ -10,24 +10,8 @@ import { expect } from '@playwright/test';
 
 export const FLAG_KEY = 'wd_storage_engine';
 
-/**
- * A latency budget that means what it says: `locator` must be visible within
- * `ms`, checked every 25 ms.
- *
- * Why not `expect(locator).toBeVisible({ timeout: ms })`: locator assertions
- * re-check on a backoff (~0, 100, 350, 850, 1850 ms…), not continuously, so the
- * effective budget is the last check BEFORE the timeout. Measured: an element
- * appearing at 1000, 1200 or 1400 ms FAILS a 1500 ms toBeVisible (it passes at
- * 800). expect.poll with a fine interval is still a native, retrying assertion
- * whose timeout is the budget — just without the dead zone.
- */
-export async function expectVisibleWithin(locator, ms) {
-  await expect.poll(() => locator.isVisible(), {
-    timeout: ms,
-    intervals: [25],
-    message: `visible within ${ms}ms`,
-  }).toBe(true);
-}
+// Latency-budget assertion shared with the rest of the perf suite.
+export { expectVisibleWithin } from './helpers.js';
 
 /**
  * Pins the storage mode for every load of this page: 'idb' | 'legacy', or

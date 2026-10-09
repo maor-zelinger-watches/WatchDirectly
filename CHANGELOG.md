@@ -1558,6 +1558,24 @@ that component's heading.
 
 ## Repo
 
+### 1.2.11 — 2026-10-09
+- **Perf budgets now mean the number written in the test.** Playwright's
+  locator assertions re-check on a backoff (~0, 100, 350, 850, 1850 ms) and
+  fail at the timeout without a final check, so a `toBeVisible({ timeout:
+  1500 })` budget was really ~850 ms: an element appearing at 1000–1450 ms
+  failed it. Budgets were stricter than written and flaky near the edge.
+  `tests/perf/helpers.js` gains `expect*Within` helpers (expect.poll every
+  25 ms, still a native assertion whose timeout is the budget) and every
+  budgeted toBeVisible / toHaveClass / toHaveCount / toHaveText in the perf
+  suite uses them; the journey's scroll `toPass` gets the same intervals.
+  Budget numbers are unchanged and the 10 s setup waits stay plain
+  assertions. `storage-helpers.js` re-exports the shared helper instead of
+  keeping its own copy. One trap found on the way: Playwright's poller pops
+  the last entry off the intervals array it is handed, so a shared `[25]`
+  constant was empty after the first assertion and every later budget
+  silently reverted to the 1 s default backoff — the intervals are now built
+  fresh per call (`budgetIntervals()`).
+
 ### 1.2.10 — 2026-10-06
 - **No more daily CI run against production.** The `schedule` trigger
   (09:17 UTC) is gone from `ci.yml`; the live smoke + perf job now runs only
