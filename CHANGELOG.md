@@ -1602,6 +1602,16 @@ that component's heading.
 
 ## Repo
 
+### 1.2.12 — 2026-10-09
+- **The 20 shipped fix plans under `docs/fix-plans/` are gone.** Each was the
+  working plan for one `fix/*` branch of the 2026-08 external-review
+  remediation; every one of those branches is merged, and the CHANGELOG entry
+  that shipped it is the record from then on. A plan that outlives its fix
+  reads as open work (the deploy skill's Step 0b rule). The two remediation
+  items still open — session revocation and secrets hardening — keep their
+  plans on their own branches, not on `main`. Also pruned four worktrees and
+  branches that were at zero commits ahead of `main`.
+
 ### 1.2.11 — 2026-10-09
 - **Perf budgets now mean the number written in the test.** Playwright's
   locator assertions re-check on a backoff (~0, 100, 350, 850, 1850 ms) and
