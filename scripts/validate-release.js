@@ -75,8 +75,11 @@ function classify(path) {
   // not backend runtime — the deploy hash only covers Code.gs + appsscript.json.
   if (/(^|\/)\.clasp[^/]*\.json$/.test(path)) return 'Repo';
   if (path.startsWith('apps-script/')) return 'Backend';
+  // assets/ holds runtime files GitHub Pages serves (favicons, og-image,
+  // self-hosted fonts) — frontend, exactly like css/ and js/.
   if (path.endsWith('.html')
-      || path.startsWith('css/') || path.startsWith('js/')) return 'Frontend';
+      || path.startsWith('css/') || path.startsWith('js/')
+      || path.startsWith('assets/')) return 'Frontend';
   if (path.startsWith('tests/')) return 'RideAlong';
   if (path === 'CHANGELOG.md') return null; // the release notes themselves
   return 'Repo';

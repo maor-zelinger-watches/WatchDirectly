@@ -1688,6 +1688,16 @@ that component's heading.
 
 ## Repo
 
+### 1.2.13 — 2026-10-09
+- **`assets/**` now counts as Frontend in the release gate.** `assets/` holds
+  runtime files GitHub Pages serves — favicon, og-image, apple-touch-icon and,
+  since Frontend 1.37.0, the eight self-hosted Poppins woff2 files — so it
+  belongs to the Frontend component exactly like `css/**` and `js/**`. The
+  classifier in `scripts/validate-release.js` had no rule for it, so those
+  font files fell through to the Repo bucket and the 1.37.0 ship produced a
+  spurious "Repo changed but version still 1.2.12" warning. The deploy skill's
+  Step 0 table lists `assets/` on the frontend track to match.
+
 ### 1.2.12 — 2026-10-09
 - **The 20 shipped fix plans under `docs/fix-plans/` are gone.** Each was the
   working plan for one `fix/*` branch of the 2026-08 external-review
