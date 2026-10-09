@@ -8,33 +8,56 @@
  * card instant.
  */
 
-import { state } from './state.js';
+import { state, patchVideoEverywhere } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
 import { buildCommentTree, createCommentThread, createCommentHtml } from './comments.js';
 import { isSignedIn, getCurrentUser, renderSignInButton, ensureToken } from './auth.js';
-import { saveFeedCache } from './cache.js';
 import { showToast } from './toast.js';
+import { cssEscape, sanitizeHtml } from './utils.js';
+
+/**
+ * Sets the comment count on a toggle button. The button holds a flat SVG
+ * icon plus a count span, so callers must never assign textContent (that
+ * wipes the icon) — every count update goes through here.
+ */
+export function setCommentsToggleCount(toggleBtn, count) {
+  if (!toggleBtn) return;
+  const countEl = toggleBtn.querySelector('.media-card__comments-count');
+  if (countEl) countEl.textContent = `${count} comments`;
+}
 
 export function toggleComments(videoId) {
-  const body = document.querySelector(`.media-card__comments-body[data-video-id="${videoId}"]`);
+  const body = document.querySelector(`.media-card__comments-body[data-video-id="${cssEscape(videoId)}"]`);
   if (!body) return;
 
+  const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${videoId}"]`);
   const isExpanded = body.style.display !== 'none';
   if (isExpanded) {
     body.style.display = 'none';
     state.expandedComments.delete(videoId);
+    if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'false');
   } else {
     body.style.display = '';
     state.expandedComments.add(videoId);
+    if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'true');
     loadInlineComments(videoId);
     updateInlineCommentFormUI(videoId);
     setupInlineCommentForm(videoId);
   }
 }
 
+/**
+ * Cheap order-sensitive change signature for a comment list — one
+ * `comment_id:created_at` pair per comment. An add, a removal, or a reorder
+ * all change it, without serializing whole trees on every expand (FE12).
+ */
+function commentsSignature(comments) {
+  return comments.map(c => `${c.comment_id}:${c.created_at}`).join('|');
+}
+
 async function loadInlineComments(videoId) {
-  const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${videoId}"]`);
+  const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${cssEscape(videoId)}"]`);
   if (!listEl) return;
 
   // 1. Instantly render cached data if available (Stale-while-revalidate pattern)
@@ -52,8 +75,7 @@ async function loadInlineComments(videoId) {
     const tree = buildCommentTree(comments);
 
     // Check if the fresh data is actually different from our cache
-    // A simple length check or full serialization works. For robustness, compare length or specific IDs.
-    const hasChanged = !cached || cached.comments.length !== comments.length || JSON.stringify(cached.tree) !== JSON.stringify(tree);
+    const hasChanged = !cached || commentsSignature(cached.comments) !== commentsSignature(comments);
 
     // Update cache
     state.commentsCache[videoId] = { comments, tree };
@@ -63,6 +85,11 @@ async function loadInlineComments(videoId) {
         // If it was cached, do a smooth CSS fade transition
         listEl.classList.add('is-updating');
         setTimeout(() => {
+          // The card may have collapsed or been rebuilt (revalidation diff,
+          // view switch) during the fade — rendering into a detached node
+          // would silently lose the fresh comments (FE12). The cache above
+          // already holds them; the next expand renders from it.
+          if (!listEl.isConnected) return;
           renderComments(videoId, listEl, comments, tree);
           requestAnimationFrame(() => listEl.classList.remove('is-updating'));
         }, 300); // matches CSS transition duration
@@ -83,8 +110,8 @@ async function loadInlineComments(videoId) {
  * Renders comments into the DOM for a given video.
  */
 function renderComments(videoId, listEl, comments, tree) {
-  const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${videoId}"]`);
-  if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
+  const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(videoId)}"]`);
+  setCommentsToggleCount(toggleBtn, comments.length);
 
   if (tree.length === 0) {
     listEl.innerHTML = '<p class="comments-empty">No comments yet. Be the first!</p>';
@@ -146,13 +173,13 @@ export function prefetchComments(videos) {
 
           // If the user already expanded this card while we were fetching, render now
           if (state.expandedComments.has(id)) {
-            const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${id}"]`);
+            const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${cssEscape(id)}"]`);
             if (listEl) renderComments(id, listEl, comments, tree);
           }
 
           // Update the comment count badge from real data
-          const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${id}"]`);
-          if (toggleBtn) toggleBtn.textContent = `💬 ${comments.length} comments`;
+          const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(id)}"]`);
+          setCommentsToggleCount(toggleBtn, comments.length);
         }
 
         // Stagger next batch to stay under rate limits
@@ -165,8 +192,8 @@ export function prefetchComments(videos) {
 }
 
 export function updateInlineCommentFormUI(videoId) {
-  const authPrompt = document.querySelector(`.media-card__auth-prompt[data-video-id="${videoId}"]`);
-  const form = document.querySelector(`.media-card__comment-form[data-video-id="${videoId}"]`);
+  const authPrompt = document.querySelector(`.media-card__auth-prompt[data-video-id="${cssEscape(videoId)}"]`);
+  const form = document.querySelector(`.media-card__comment-form[data-video-id="${cssEscape(videoId)}"]`);
   if (!authPrompt || !form) return;
 
   if (getCurrentUser()) {
@@ -189,8 +216,8 @@ export function updateInlineCommentFormUI(videoId) {
 }
 
 function setupInlineCommentForm(videoId) {
-  const form = document.querySelector(`.media-card__comment-form[data-video-id="${videoId}"]`);
-  const textarea = document.querySelector(`.media-card__textarea[data-video-id="${videoId}"]`);
+  const form = document.querySelector(`.media-card__comment-form[data-video-id="${cssEscape(videoId)}"]`);
+  const textarea = document.querySelector(`.media-card__textarea[data-video-id="${cssEscape(videoId)}"]`);
   if (!form || !textarea || form.dataset.bound) return;
   form.dataset.bound = 'true';
 
@@ -203,28 +230,6 @@ function setupInlineCommentForm(videoId) {
     e.preventDefault();
     await submitInlineComment(videoId, '', textarea);
   });
-}
-
-/**
- * Update comment_count everywhere a copy of the row lives — the feed list
- * (+ its localStorage cache), the Top This Week list, and the search index —
- * after a successful comment post. Any list missing here would re-render
- * with a stale count (that's exactly how search cards lost their counts).
- */
-function updateCachedCommentCount(videoId, newCount) {
-  const video = state.videos.find(v => v.video_id === videoId);
-  if (video) {
-    video.comment_count = newCount;
-    saveFeedCache(state.videos, state.totalVideos);
-  }
-  if (state.topVideos) {
-    const tv = state.topVideos.find(v => v.video_id === videoId);
-    if (tv) tv.comment_count = newCount;
-  }
-  if (state.searchIndex) {
-    const sv = state.searchIndex.find(v => v.video_id === videoId);
-    if (sv) sv.comment_count = newCount;
-  }
 }
 
 async function submitInlineComment(videoId, parentId, textarea) {
@@ -273,7 +278,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
       repliesContainer.insertAdjacentHTML('beforeend', html);
     }
   } else {
-    const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${videoId}"]`);
+    const listEl = document.querySelector(`.media-card__comments-list[data-video-id="${cssEscape(videoId)}"]`);
     if (listEl) {
       const empty = listEl.querySelector('.comments-empty');
       if (empty) empty.remove();
@@ -282,11 +287,11 @@ async function submitInlineComment(videoId, parentId, textarea) {
   }
 
   // Update comment count
-  const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${videoId}"]`);
+  const toggleBtn = document.querySelector(`.media-card__comments-toggle[data-video-id="${cssEscape(videoId)}"]`);
   let previousCount = 0;
   if (toggleBtn) {
     previousCount = parseInt(toggleBtn.textContent.replace(/[^0-9]/g, '')) || 0;
-    toggleBtn.textContent = `💬 ${previousCount + 1} comments`;
+    setCommentsToggleCount(toggleBtn, previousCount + 1);
   }
 
   // Hide reply form or clear textarea
@@ -317,7 +322,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
       if (!parentId) {
         const actions = el.querySelector('.comment__actions');
         if (actions) {
-          actions.innerHTML = `<button class="comment__reply-btn reply-btn" data-comment-id="${response.comment_id}">↩ Reply</button>`;
+          actions.innerHTML = `<button class="comment__reply-btn reply-btn" data-comment-id="${sanitizeHtml(response.comment_id)}">↩ Reply</button>`;
           attachReplyHandlers(videoId);
         }
       }
@@ -325,8 +330,8 @@ async function submitInlineComment(videoId, parentId, textarea) {
 
     if (replyForm) replyForm.remove();
 
-    // Update localStorage cache with the new comment count
-    updateCachedCommentCount(videoId, previousCount + 1);
+    // New count onto every cached copy of the row (+ localStorage) — FE13.
+    patchVideoEverywhere(videoId, { comment_count: previousCount + 1 });
   } catch (error) {
     console.error('Failed to post comment:', error);
 
@@ -341,9 +346,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
       }
     }
 
-    if (toggleBtn) {
-      toggleBtn.textContent = `💬 ${previousCount} comments`;
-    }
+    setCommentsToggleCount(toggleBtn, previousCount);
 
     if (replyForm) {
       replyForm.style.display = '';
@@ -360,7 +363,7 @@ async function submitInlineComment(videoId, parentId, textarea) {
 }
 
 function attachReplyHandlers(videoId) {
-  const card = document.querySelector(`.media-card[data-video-id="${videoId}"]`);
+  const card = document.querySelector(`.media-card[data-video-id="${cssEscape(videoId)}"]`);
   if (!card) return;
 
   card.querySelectorAll('.reply-btn').forEach(btn => {
@@ -373,7 +376,7 @@ function attachReplyHandlers(videoId) {
 }
 
 function toggleReplyForm(videoId, commentId) {
-  const card = document.querySelector(`.media-card[data-video-id="${videoId}"]`);
+  const card = document.querySelector(`.media-card[data-video-id="${cssEscape(videoId)}"]`);
   if (card) card.querySelectorAll('.reply-form').forEach(f => f.remove());
 
   if (!isSignedIn()) {

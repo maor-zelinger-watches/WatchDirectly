@@ -2,24 +2,36 @@
  * votes.js — Upvotes: optimistic toggling and sign-in reconciliation.
  *
  * The server is the source of truth for counts; the UI flips instantly
- * and rolls back on failure. voteEpoch orders local mutations against
- * the fetchMyVotes snapshot so a slow fetch can't clobber a vote the
- * user just cast.
+ * and rolls back on failure. The 'votes' epoch orders local mutations
+ * against the fetchMyVotes snapshot so a slow fetch can't clobber a vote
+ * the user just cast.
  */
 
-import { state } from './state.js';
+import { state, patchVideoEverywhere, epoch } from './state.js';
 import { api } from './api-client.js';
 import { isSignedIn, getToken, isTokenExpired, refreshToken, ensureToken } from './auth.js';
-import { saveFeedCache } from './cache.js';
 import { showToast } from './toast.js';
+import { cssEscape } from './utils.js';
 
-// Bumped on every local vote mutation so a slow fetchMyVotes snapshot
-// can't clobber a vote the user just cast.
-let voteEpoch = 0;
+// Video ids with a vote request in flight. A double-click (or double-tap on
+// mobile) fires two clicks in quick succession; without this the second would
+// issue a second toggle POST, landing the user back where they started and
+// racing two optimistic flips. Re-entrant clicks are ignored until the first
+// request settles.
+const votesInFlight = new Set();
+
+// Fires after a server-confirmed vote lands (count patched into every cached
+// row copy). app.js registers the Top This Week re-rank here — same shape as
+// stars.js's setOnStarsChanged, keeping votes.js view-agnostic.
+let onVotesChanged = () => {};
+
+export function setOnVotesChanged(fn) {
+  onVotesChanged = fn;
+}
 
 /** Updates every vote button for a video (both views may have one rendered). */
 function setVoteButtons(videoId, voted, count) {
-  document.querySelectorAll(`.media-card__vote[data-video-id="${videoId}"]`).forEach(btn => {
+  document.querySelectorAll(`.media-card__vote[data-video-id="${cssEscape(videoId)}"]`).forEach(btn => {
     btn.classList.toggle('media-card__vote--active', voted);
     btn.setAttribute('aria-pressed', voted ? 'true' : 'false');
     if (count != null) {
@@ -27,25 +39,6 @@ function setVoteButtons(videoId, voted, count) {
       if (countEl) countEl.textContent = String(count);
     }
   });
-}
-
-/** Keeps vote counts in cached state + localStorage in sync after a vote. */
-function updateCachedVoteCount(videoId, count) {
-  const v = state.videos.find(x => x.video_id === videoId);
-  if (v) {
-    v.vote_count = count;
-    saveFeedCache(state.videos, state.totalVideos);
-  }
-  if (state.topVideos) {
-    const tv = state.topVideos.find(x => x.video_id === videoId);
-    if (tv) tv.vote_count = count;
-  }
-  // The search index holds its own copy of every row — without this, a
-  // search re-render paints the count as it was when the index was built.
-  if (state.searchIndex) {
-    const sv = state.searchIndex.find(x => x.video_id === videoId);
-    if (sv) sv.vote_count = count;
-  }
 }
 
 /**
@@ -58,13 +51,18 @@ export async function toggleVote(videoId) {
     return;
   }
 
+  // In-flight guard (FE19): one gesture, one toggle. Ignore a repeat click for
+  // the same video until its request settles (released in `finally` below).
+  if (votesInFlight.has(videoId)) return;
+  votesInFlight.add(videoId);
+
   const wasVoted = state.myVotes.has(videoId);
-  const sample = document.querySelector(`.media-card__vote[data-video-id="${videoId}"] .media-card__vote-count`);
+  const sample = document.querySelector(`.media-card__vote[data-video-id="${cssEscape(videoId)}"] .media-card__vote-count`);
   const prevCount = sample ? (parseInt(sample.textContent, 10) || 0) : 0;
   const optimisticCount = Math.max(0, prevCount + (wasVoted ? -1 : 1));
 
   // Optimistic flip
-  voteEpoch++;
+  epoch.bump('votes');
   if (wasVoted) state.myVotes.delete(videoId); else state.myVotes.add(videoId);
   setVoteButtons(videoId, !wasVoted, optimisticCount);
 
@@ -73,24 +71,42 @@ export async function toggleVote(videoId) {
     const res = await api.vote(videoId, token);
 
     // Reconcile with server truth
-    voteEpoch++;
+    epoch.bump('votes');
     if (res.voted) state.myVotes.add(videoId); else state.myVotes.delete(videoId);
     setVoteButtons(videoId, res.voted, res.vote_count);
-    updateCachedVoteCount(videoId, res.vote_count);
+    // Every cached copy of the row (+ localStorage, coalesced) — FE13.
+    patchVideoEverywhere(videoId, { vote_count: res.vote_count });
+    // The new count may move this video within the Top This Week ranking.
+    onVotesChanged();
   } catch (error) {
+    if (error.resultLost && isSignedIn()) {
+      // The toggle reached the server and ran; only Google's result hop failed
+      // (api.js `resultLost`). Re-sending would toggle it back, and rolling back
+      // would show the opposite of what the server now holds. Keep the
+      // optimistic flip — the likeliest truth — persist its count, and confirm
+      // the voted flag from the server's own list in the background.
+      console.warn('Vote result lost in transit — reconciling from myVotes');
+      patchVideoEverywhere(videoId, { vote_count: optimisticCount });
+      onVotesChanged();
+      loadMyVotes().catch(() => { /* best-effort; the next sign-in bootstrap reconciles */ });
+      return;
+    }
     console.error('Failed to vote:', error);
     // Rollback — unless the failure signed the user out, in which case
     // clearVoteMarkings already put the UI in the right state.
     if (isSignedIn()) {
-      voteEpoch++;
+      epoch.bump('votes');
       if (wasVoted) state.myVotes.add(videoId); else state.myVotes.delete(videoId);
       // Undo exactly our optimistic delta from whatever count is displayed
       // NOW — a concurrent update may have replaced prevCount already.
-      const countEl = document.querySelector(`.media-card__vote[data-video-id="${videoId}"] .media-card__vote-count`);
+      const countEl = document.querySelector(`.media-card__vote[data-video-id="${cssEscape(videoId)}"] .media-card__vote-count`);
       const shownCount = countEl ? (parseInt(countEl.textContent, 10) || 0) : optimisticCount;
       setVoteButtons(videoId, wasVoted, Math.max(0, shownCount - (wasVoted ? -1 : 1)));
     }
     showToast(error.message || 'Failed to vote. Please try again.', 'error');
+  } finally {
+    // Release the guard on every path so the next genuine click is honored.
+    votesInFlight.delete(videoId);
   }
 }
 
@@ -116,11 +132,11 @@ export async function loadMyVotes() {
  * @param {Promise<{video_ids?: string[]}>} fetchPromise
  */
 export async function reconcileMyVotes(fetchPromise) {
-  const epoch = voteEpoch;
+  const e = epoch.observe('votes');
   try {
     const data = await fetchPromise;
     // A vote cast while this was in flight beats the older snapshot
-    if (epoch !== voteEpoch) return;
+    if (!e.current()) return;
 
     state.myVotes = new Set(data.video_ids || []);
     document.querySelectorAll('.media-card__vote').forEach(btn => {

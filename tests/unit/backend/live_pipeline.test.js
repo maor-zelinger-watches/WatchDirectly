@@ -28,7 +28,22 @@ function makeSheet(rows) {
   return {
     _grid: grid,
     getDataRange: () => ({ getValues: () => grid.map((r) => r.slice()) }),
-    getRange: (row, col) => ({
+    getRange: (row, col, numRows, numCols) => ({
+      // Faithful block read (real Sheets implements this): the batched crawl
+      // flush reads the view_count column and the live-state trio via
+      // getRange(...).getValues() before writing them back.
+      getValues() {
+        const nr = numRows || 1;
+        const nc = numCols || 1;
+        const out = [];
+        for (let i = 0; i < nr; i++) {
+          const r = grid[row - 1 + i] || [];
+          const outRow = [];
+          for (let j = 0; j < nc; j++) outRow.push(r[col - 1 + j] !== undefined ? r[col - 1 + j] : '');
+          out.push(outRow);
+        }
+        return out;
+      },
       setValue(v) {
         while (grid.length < row) grid.push([]);
         const r = grid[row - 1];
@@ -36,7 +51,7 @@ function makeSheet(rows) {
         r[col - 1] = v;
       },
       // Faithful block write (real Sheets implements this): the crawl batches
-      // the contiguous live-state trio into a single 1x3 setValues call.
+      // the contiguous live-state trio into a single setValues call.
       setValues(values) {
         for (let i = 0; i < values.length; i++) {
           while (grid.length < row + i) grid.push([]);

@@ -36,6 +36,10 @@ let appTest;
 
 beforeEach(async () => {
   vi.stubGlobal('IntersectionObserver', FakeIO);
+  // The non-destructive merge persists through the coalesced write
+  // (saveFeedCacheSoon); route requestIdleCallback onto a 0ms timer so
+  // `await flush()` picks the deferred save up deterministically.
+  vi.stubGlobal('requestIdleCallback', (cb) => setTimeout(cb, 0));
   vi.stubGlobal('fetch', vi.fn(() =>
     Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok', videos: [], total: 0 }) })));
   document.body.innerHTML = `
@@ -85,7 +89,7 @@ function seed(state, videos, total, extra = {}) {
     loading: false, revalidating: false, initialLoadComplete: true, view: 'latest',
     filter: { query: '', types: [] }, prefetchBuffer: [], prefetching: false,
     prefetchToken: 0, pendingFetchPage: 0, expandedComments: new Set(),
-    commentsCache: {}, renderToken: 0, nextCursor: 'tail-cursor',
+    commentsCache: {}, nextCursor: 'tail-cursor',
     fullscreenVideoId: null, ...extra,
   });
 }
@@ -152,7 +156,7 @@ describe('revalidateFeed reconciles a multi-page feed without losing the tail', 
     expect(ids[0]).toBe('new1');
     // Live cursor kept (points past the tail) — not rewound to page 1's.
     expect(state.nextCursor).not.toBe('page1-cursor');
-    // Whole merged feed persisted.
+    // Whole merged feed persisted (once, via the coalesced deferred write).
     expect(JSON.parse(localStorage.getItem('wd_feed_cache')).videos).toHaveLength(16);
   });
 

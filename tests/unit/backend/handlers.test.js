@@ -29,9 +29,10 @@ function spreadsheetReturning(sheet) {
 function blankSheet(overrides = {}) {
   return {
     getDataRange: () => ({ getValues: () => [[]] }),
-    getRange: () => ({ setValue() {}, setValues() {}, setNumberFormat() {} }),
+    getRange: () => ({ setValue() {}, setValues() {}, setNumberFormat() {}, clearContent() {}, getValues: () => [[]] }),
     appendRow: () => {},
     getLastRow: () => 0,
+    getLastColumn: () => 0,
     ...overrides,
   };
 }
@@ -88,7 +89,7 @@ function loadBackend(mocks = {}) {
     'verifyGoogleToken', 'toIsoDate', 'handleAddComment', 'decodeHtmlEntities',
     'handleFeed', 'handleBootstrap', 'kickoffRefresh',
     'getVideos', 'updateVoteCount', 'updateCommentCount', 'handleTopWeek',
-    'handleGetChannels', 'extractDomain',
+    'invalidateTopWeek', 'handleGetChannels', 'extractDomain',
   ];
   const factory = new Function(...Object.keys(globals), `${SRC}\nreturn { ${names.join(', ')} };`);
   return factory(...Object.values(globals));
@@ -290,7 +291,7 @@ describe('handleBootstrap (batched votes + stars, one token check)', () => {
     ] }),
   });
 
-  it("returns the user's votes and stars, verifying the token once", () => {
+  it("returns the user's votes, stars, and bookmarks, verifying the token once", () => {
     let tokenFetches = 0;
     const be = loadBackend({
       sheet: combinedSheet(),
@@ -300,6 +301,7 @@ describe('handleBootstrap (batched votes + stars, one token check)', () => {
     expect(res.status).toBe('ok');
     expect(res.video_ids).toEqual(['vidA', 'vidB']);
     expect(res.channels).toEqual(['ChanX']);          // deduped
+    expect(res.bookmark_ids).toEqual(['vidA', 'vidB']); // same mock sheet backs Bookmarks
     expect(tokenFetches).toBe(1);                     // ONE tokeninfo call for the batch
   });
 
@@ -397,11 +399,15 @@ describe('getVideos feed-head cache (skip the sheet scan on early pages)', () =>
     expect(second.next_cursor).toBe(first.next_cursor);
   });
 
-  it('cursor requests always take the live path', () => {
+  it('cursor requests resolve against the cached whole catalog, not a fresh scan', () => {
+    // Cursor resolution needs the full sorted catalog. Before the whole-catalog cache
+    // that meant a sheet scan per cursor page (every scrolled page, every
+    // read-ahead prefetch); now the scan that populated the head also cached
+    // the whole catalog, and the cursor page is served from it.
     const { be, reads } = countingSetup();
-    be.getVideos(1, 10, '');                          // populates the head
+    be.getVideos(1, 10, '');                          // populates the head + catalog
     const res = be.getVideos(2, 1, '2026-01-02T00:00:00.000Z|vid1');
-    expect(reads()).toBe(2);                          // cursor resolution needs the full catalog
+    expect(reads()).toBe(1);                          // no second scan
     expect(res.videos.map((v) => v.video_id)).toEqual(['vid2']);
   });
 
@@ -443,15 +449,18 @@ describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
   const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
 
   /** A videos sheet that counts full reads — the scan the cache exists to skip. */
-  function setup(rows) {
+  function setup(rows, headers = HEADERS) {
     let reads = 0;
     const sheet = blankSheet({
-      getDataRange: () => ({ getValues: () => { reads++; return [HEADERS, ...rows]; } }),
+      getDataRange: () => ({ getValues: () => { reads++; return [headers, ...rows]; } }),
     });
     const cacheService = memoryCache();
     const be = loadBackend({ sheet, CacheService: cacheService });
     return { be, cacheService, reads: () => reads };
   }
+
+  // Rows for the view-weighted tests carry a view_count column.
+  const VIEW_HEADERS = [...HEADERS, 'view_count'];
 
   it('pulls items from across the entire 7-day window and excludes older ones', () => {
     // One video per day for the last 7 days (0..6 days old), each with more votes
@@ -467,6 +476,73 @@ describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
     expect(ids).not.toContain('old');                   // 99 votes can't override the window
     expect(ids).toContain('d6');                        // the ~6-day-old edge item is still pulled
     expect(ids).toEqual(['d6', 'd5', 'd4', 'd3', 'd2', 'd1', 'd0']); // votes desc
+  });
+
+  it('counts every 5000 views as one upvote in the ranking score', () => {
+    const rows = [
+      ['votes', 'https://a', daysAgo(1), 5, 0, 'Chan', 0],
+      // 2 votes + floor(20000/5000) = 6 — outranks 5 raw votes.
+      ['views', 'https://b', daysAgo(2), 2, 0, 'Chan', 20000],
+    ];
+    const { be } = setup(rows, VIEW_HEADERS);
+    const res = be.handleTopWeek({ limit: 50 });
+    expect(res.videos.map((v) => v.video_id)).toEqual(['views', 'votes']);
+  });
+
+  it('floors the view weight — 4999 views add nothing, 5000 add one vote', () => {
+    const rows = [
+      // Equal 3-point scores at 4999 views: the newer plain item wins on recency.
+      ['almost', 'https://a', daysAgo(3), 3, 0, 'Chan', 4999],
+      ['plain', 'https://b', daysAgo(1), 3, 0, 'Chan', 0],
+    ];
+    const { be } = setup(rows, VIEW_HEADERS);
+    expect(be.handleTopWeek({ limit: 50 }).videos.map((v) => v.video_id))
+      .toEqual(['plain', 'almost']);
+
+    // One more view crosses the threshold: 3 + 1 = 4 beats 3.
+    rows[0][6] = 5000;
+    const { be: be2 } = setup(rows, VIEW_HEADERS);
+    expect(be2.handleTopWeek({ limit: 50 }).videos.map((v) => v.video_id))
+      .toEqual(['almost', 'plain']);
+  });
+
+  it('a crawl view refresh reorders the ranking once the cache is invalidated', () => {
+    // The crawl writes fresh view counts and then calls invalidateTopWeek —
+    // the next read must re-rank from the sheet, not serve the cached order.
+    const rows = [
+      ['a', 'https://a', daysAgo(1), 5, 0, 'Chan', 0],
+      ['b', 'https://b', daysAgo(2), 3, 0, 'Chan', 0],
+    ];
+    const { be } = setup(rows, VIEW_HEADERS);
+    expect(be.handleTopWeek({ limit: 50 }).videos.map((v) => v.video_id))
+      .toEqual(['a', 'b']);                             // cached: a (5) over b (3)
+
+    rows[1][6] = 15000;                                 // b: 3 + 3 = 6 now beats a's 5
+    be.invalidateTopWeek();
+    expect(be.handleTopWeek({ limit: 50 }).videos.map((v) => v.video_id))
+      .toEqual(['b', 'a']);
+  });
+
+  it('pages by cursor with no gaps when scores come from views', () => {
+    // 25 items, zero votes each — the score is pure view weight, every one
+    // distinct, so cursor resumption must key off the score, not raw votes.
+    const rows = [];
+    for (let i = 0; i < 25; i++) {
+      rows.push(['v' + i, 'https://x/' + i, daysAgo(1), 0, 0, 'Chan', (25 - i) * 5000]);
+    }
+    const { be } = setup(rows, VIEW_HEADERS);
+
+    const seen = [];
+    let cursor = '';
+    for (let guard = 0; guard < 10; guard++) {
+      const res = be.handleTopWeek({ limit: 10, cursor });
+      expect(res.total).toBe(25);
+      seen.push(...res.videos.map((v) => v.video_id));
+      cursor = res.next_cursor;
+      if (!cursor) break;
+    }
+    expect(seen).toEqual(rows.map((r) => r[0]));        // v0 (125k views) .. v24 (5k)
+    expect(new Set(seen).size).toBe(25);
   });
 
   it('serves a repeat request from cache without re-scanning the sheet', () => {
@@ -515,9 +591,11 @@ describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
     expect(res.videos.map((v) => v.video_id)).toEqual(['a']); // no ghost
   });
 
-  it('falls through to a live scan when the request exceeds the cached slice', () => {
+  it('falls through to the whole-catalog snapshot when the request exceeds the cached slice', () => {
     // Populate a cache of TOP_WEEK_CACHE_COUNT rows against a larger window, then
-    // ask for more than the cap: the cache can't satisfy it, so re-scan.
+    // ask for more than the cap: the ranked slice can't satisfy it, so the
+    // window is re-derived — from the cached whole catalog (the whole-catalog cache),
+    // which the first scan populated, so still no second sheet read.
     const rows = [];
     for (let i = 0; i < 60; i++) rows.push(['v' + i, 'https://x/' + i, daysAgo(1), 60 - i, 0, 'Chan']);
     const { be, reads } = setup(rows);
@@ -526,12 +604,12 @@ describe('handleTopWeek (rolling 7-day window, vote-ranked, cached)', () => {
     expect(reads()).toBe(1);
     expect(first.total).toBe(60);
 
-    const big = be.handleTopWeek({ limit: 60 });        // 60 > cached 50 → live scan
-    expect(reads()).toBe(2);
+    const big = be.handleTopWeek({ limit: 60 });        // 60 > cached 50 → re-derive from the catalog
+    expect(reads()).toBe(1);
     expect(big.videos.length).toBe(60);
 
     const small = be.handleTopWeek({ limit: 50 });      // satisfiable from cache again
-    expect(reads()).toBe(2);                            // no extra scan
+    expect(reads()).toBe(1);                            // no extra scan
     expect(small.videos.length).toBe(50);
   });
 
@@ -666,5 +744,41 @@ describe('handleGetChannels (Channels tab + search host-matching data)', () => {
     const rows = [['A', 'Host A', '', '', true]];
     const be = loadBackend({ sheet: channelsSheet(rows) });
     expect(be.handleGetChannels().channels[0].avatar).toBe('');
+  });
+
+  it('classifies platform from the public url: youtube vs. article (article is the default)', () => {
+    const rows = [
+      ['Nico Leonard', '', 'https://www.youtube.com/@NicoLeonard', '', true],
+      ['Worn & Wound', '', 'https://www.wornandwound.com', '', true],
+      ['No URL', '', '', '', true],
+    ];
+    const be = loadBackend({ sheet: channelsSheet(rows) });
+    const channels = be.handleGetChannels().channels;
+    expect(channels[0].platform).toBe('youtube');
+    expect(channels[1].platform).toBe('article');
+    // No YouTube link anywhere = article, so nothing ships unclassified
+    expect(channels[2].platform).toBe('article');
+  });
+
+  it('falls back to feed_url for platform and favicon when url is blank', () => {
+    const HEADERS_WITH_FEED = ['channel_name', 'host', 'url', 'avatar', 'feed_url', 'enabled'];
+    const sheet = blankSheet({
+      getDataRange: () => ({ getValues: () => [
+        HEADERS_WITH_FEED,
+        // Onboarded from a pasted feed URL — url column never filled
+        ['Fratello', '', '', '', 'https://www.fratellowatches.com/feed/', true],
+        ['YT via feed', '', '', '', 'https://www.youtube.com/feeds/videos.xml?channel_id=UCabc', true],
+      ] }),
+    });
+    const be = loadBackend({ sheet });
+    const channels = be.handleGetChannels().channels;
+
+    expect(channels[0].platform).toBe('article');
+    expect(channels[0].avatar).toBe('https://www.google.com/s2/favicons?domain=fratellowatches.com&sz=128');
+    // feed_url stays private even though it was consulted
+    expect(channels[0].feed_url).toBeUndefined();
+
+    expect(channels[1].platform).toBe('youtube');
+    expect(channels[1].avatar).toBe(''); // no generic YouTube favicon
   });
 });

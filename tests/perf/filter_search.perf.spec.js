@@ -21,6 +21,9 @@ import {
   cardIds,
   scrollToBottom,
   sleep,
+  expectVisibleWithin,
+  expectClassWithin,
+  expectCountWithin,
   SEARCH_RENDER_LIMIT,
 } from './helpers.js';
 
@@ -57,8 +60,8 @@ test.describe('PERF · filter & search', () => {
     // applied (articles/shorts hidden) within budget. Pure CSS visibility
     // filter — must feel instant; the 1500ms timeout IS the budget.
     await chip(page, 'Videos').click();
-    await expect(chip(page, 'Videos')).toHaveClass(/chip--active/, { timeout: 1500 });
-    await expect(page.locator('#feed-container')).toHaveClass(/feed--hide-article/, { timeout: 1500 });
+    await expectClassWithin(chip(page, 'Videos'), /chip--active/, 1500);
+    await expectClassWithin(page.locator('#feed-container'), /feed--hide-article/, 1500);
 
     // Invariant: nothing re-rendered and no fetch fired by the toggle.
     const idsAfter = await cardIds(page);
@@ -87,7 +90,7 @@ test.describe('PERF · filter & search', () => {
 
     await chip(page, 'Articles').click();
     // Top-up pulls pages 2 & 3; all 6 articles become visible within budget.
-    await expect(visibleCards(page)).toHaveCount(6, { timeout: 4000 });
+    await expectCountWithin(visibleCards(page), 6, 4000);
 
     const lt = await longTaskStats(page);
     console.log(`[T7] long tasks during top-up: max=${lt.max}ms total=${lt.total}ms`);
@@ -107,7 +110,7 @@ test.describe('PERF · filter & search', () => {
     // 120ms debounce + filter work — comfortably under a second. The filtered
     // render replaces the feed with matches; the 1000ms timeout IS the budget.
     await page.fill('#search-input', 'Rolex');
-    await expect(page.locator('.media-card:visible').first()).toBeVisible({ timeout: 1000 });
+    await expectVisibleWithin(page.locator('.media-card:visible').first(), 1000);
 
     // It's a real filter, not the whole feed: a nonsense query empties it.
     await page.fill('#search-input', 'zzzznomatchqq');
@@ -130,7 +133,7 @@ test.describe('PERF · filter & search', () => {
     // Partial results paint quickly — before all three chunks have landed.
     // The 2000ms timeout IS the budget.
     await page.fill('#search-input', 'deep');
-    await expect(page.locator('.media-card:visible').first()).toBeVisible({ timeout: 2000 });
+    await expectVisibleWithin(page.locator('.media-card:visible').first(), 2000);
 
     // The full index eventually builds (all chunks requested).
     await expect

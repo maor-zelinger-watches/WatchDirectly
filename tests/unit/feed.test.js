@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { createMediaCard, sortVideos, filterVideos, isShort, mediaType, dedupeVideos, mergeTopRanking } from '../../js/feed.js';
+import { createMediaCard, sortVideos, sortTopRanking, filterVideos, isShort, mediaType, dedupeVideos, mergeTopRanking, searchFields } from '../../js/feed.js';
 
 const mockVideo = {
   video_id: 'abc12345678',
@@ -142,6 +142,38 @@ describe('isShort', () => {
   it('handles missing url and null items', () => {
     expect(isShort({ ...mockVideo, url: undefined })).toBe(false);
     expect(isShort(null)).toBe(false);
+  });
+});
+
+describe('createMediaCard (bookmark button + flat icons)', () => {
+  it('renders a bookmark button in the action bar, unsaved by default', () => {
+    const html = createMediaCard(mockVideo);
+    expect(html).toContain('media-card__bookmark');
+    expect(html).toContain('data-video-id="abc12345678"');
+    expect(html).toContain('aria-label="Bookmark Top 10 Watches Under $500"');
+    expect(html).toContain('icon--bookmark');
+    expect(html).not.toContain('media-card__bookmark--active');
+  });
+
+  it('draws every action icon as a flat inline SVG — no colored emoji', () => {
+    for (const item of [mockVideo, mockArticle]) {
+      const html = createMediaCard(item);
+      expect(html).toContain('icon--comment');
+      expect(html).toContain('icon--share');
+      expect(html).toContain('icon--bookmark');
+      expect(html).not.toMatch(/💬|🔗|📰|🎬/u);
+    }
+  });
+
+  it('marks the channel with the flat platform icon: play lozenge vs newspaper', () => {
+    expect(createMediaCard(mockVideo)).toContain('icon--video');
+    expect(createMediaCard(mockVideo)).not.toContain('icon--article');
+    expect(createMediaCard(mockArticle)).toContain('icon--article');
+  });
+
+  it('keeps the comment count in a span the icon-safe updater can target', () => {
+    const html = createMediaCard(mockVideo);
+    expect(html).toContain('<span class="media-card__comments-count">12 comments</span>');
   });
 });
 
@@ -350,6 +382,91 @@ describe('sortVideos', () => {
   });
 });
 
+describe('sortTopRanking (mirror of the backend compareTopWeek order)', () => {
+  const v = (id, votes, publishedAt) => ({
+    video_id: id, vote_count: votes, published_at: publishedAt,
+  });
+
+  it('ranks by vote_count descending', () => {
+    const list = [
+      v('low', 2, '2026-05-07T08:00:00Z'),
+      v('hi', 9, '2026-05-05T08:00:00Z'),
+      v('mid', 5, '2026-05-06T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['hi', 'mid', 'low']);
+  });
+
+  it('breaks vote ties by published_at descending (newest first)', () => {
+    const list = [
+      v('older', 3, '2026-05-05T08:00:00Z'),
+      v('newer', 3, '2026-05-07T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['newer', 'older']);
+  });
+
+  it('breaks vote+time ties by video_id descending, matching the server', () => {
+    const list = [
+      v('aaa', 3, '2026-05-07T08:00:00Z'),
+      v('bbb', 3, '2026-05-07T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['bbb', 'aaa']);
+  });
+
+  it('treats a missing or non-numeric vote_count as zero', () => {
+    const list = [
+      { video_id: 'none', published_at: '2026-05-07T08:00:00Z' },
+      v('one', 1, '2026-05-05T08:00:00Z'),
+      { video_id: 'junk', vote_count: 'n/a', published_at: '2026-05-06T08:00:00Z' },
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['one', 'none', 'junk']);
+  });
+
+  it('sorts invalid dates oldest within a vote tier', () => {
+    const list = [
+      v('undated', 2, 'not-a-date'),
+      v('dated', 2, '2026-05-07T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['dated', 'undated']);
+  });
+
+  it('does not mutate the input array', () => {
+    const list = [v('a', 1, '2026-05-07T08:00:00Z'), v('b', 9, '2026-05-06T08:00:00Z')];
+    const ids = list.map(x => x.video_id);
+    sortTopRanking(list);
+    expect(list.map(x => x.video_id)).toEqual(ids);
+  });
+
+  it('counts every 5000 views as one upvote in the score', () => {
+    const list = [
+      { ...v('votes', 5, '2026-05-07T08:00:00Z'), view_count: 0 },
+      // 2 votes + floor(20000/5000) = 6 — outranks 5 raw votes.
+      { ...v('views', 2, '2026-05-05T08:00:00Z'), view_count: 20000 },
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['views', 'votes']);
+  });
+
+  it('floors the view weight — 4999 views add nothing', () => {
+    const list = [
+      // 3 + floor(4999/5000) = 3, older → below the newer 3-vote item.
+      { ...v('almost', 3, '2026-05-05T08:00:00Z'), view_count: 4999 },
+      { ...v('plain', 3, '2026-05-07T08:00:00Z'), view_count: 0 },
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['plain', 'almost']);
+
+    // One more view crosses the threshold: 3 + 1 = 4 beats 3.
+    list[0].view_count = 5000;
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['almost', 'plain']);
+  });
+
+  it('treats a missing view_count as zero (pure vote ranking)', () => {
+    const list = [
+      v('two', 2, '2026-05-07T08:00:00Z'),
+      v('nine', 9, '2026-05-05T08:00:00Z'),
+    ];
+    expect(sortTopRanking(list).map(x => x.video_id)).toEqual(['nine', 'two']);
+  });
+});
+
 describe('mergeTopRanking (Top This Week stale-while-revalidate reconcile)', () => {
   const v = (id, extra = {}) => ({ video_id: id, ...extra });
 
@@ -472,5 +589,36 @@ describe('createMediaCard (XSS — finding #5)', () => {
   it('leaves a normal https URL intact in the href', () => {
     const html = createMediaCard(mockVideo);
     expect(html).toContain('href="https://www.youtube.com/watch?v=abc12345678"');
+  });
+});
+
+// FE10 — the search index precomputes each row's normalized token arrays once
+// (at merge time) instead of re-tokenizing every video on every keystroke.
+describe('searchFields (FE10 token cache)', () => {
+  it('computes tokenized/normalized title + channel fields', () => {
+    const f = searchFields({ title: 'Café Racer', channel_name: 'Nico Leonard' });
+    expect(f.titleTokens).toEqual(['cafe', 'racer']); // diacritics stripped, lowercased
+    expect(f.channelTokens).toEqual(['nico', 'leonard']);
+    expect(f.titleNorm).toBe('cafe racer');
+    expect(f.channelNorm).toBe('nico leonard');
+  });
+
+  it('memoizes: the same cached object is returned on repeat calls', () => {
+    const v = { title: 'Best Budget Watches', channel_name: 'JOMW' };
+    const first = searchFields(v);
+    const second = searchFields(v);
+    expect(second).toBe(first);      // same reference — not recomputed
+    expect(v._searchFields).toBe(first);
+  });
+
+  it('does not re-tokenize once cached (filterVideos reuses the cache)', () => {
+    const v = { video_id: 'k1aaaaaaaaa', title: 'Tudor Black Bay', channel_name: 'Teddy' };
+    const cached = searchFields(v);
+    // Corrupt the raw fields; a fresh tokenize would now yield different tokens.
+    v.title = 'ZZZZZ';
+    v.channel_name = 'ZZZZZ';
+    // filterVideos still matches on the cached tokens, proving no re-tokenize.
+    expect(filterVideos([v], { query: 'tudor' }).map(x => x.video_id)).toEqual(['k1aaaaaaaaa']);
+    expect(searchFields(v)).toBe(cached);
   });
 });

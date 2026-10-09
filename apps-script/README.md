@@ -12,16 +12,26 @@ see) needs no operator action once deployed — it reads from the backend.
 
 ## How the data is stored
 
-Each "sheet" is a **separate Google Spreadsheet**. There are six:
+Each "sheet" is a **separate Google Spreadsheet**. There are eight:
 
 | Spreadsheet | What it holds | Do you edit it? |
 |---|---|---|
 | **CHANNELS** | The list of channels/sites the app pulls from | ✅ Yes — this is where you add channels |
-| **VIDEOS** | Every fetched video/article (filled automatically) | ❌ No — the crawl manages it |
+| **VIDEOS** | Every fetched video/article (filled automatically; Archive tab for aged-out items) | ❌ No — the crawl manages it |
 | **META** | Settings & secrets (see the config table below) | ✅ Yes — for settings/keys |
 | **BLOCKED** | Users banned from commenting | ✅ Yes — for moderation |
 | **COMMENTS** | User comments (filled automatically) | ❌ No |
+| **CUSTOMERS** | Everything per signed-in user: the **Customers** tab (account + email consent) plus the **Votes**, **Stars**, and **Bookmarks** tabs — and the **Feedback** tab (what signed-in users send from the site's feedback button) | ❌ No — the app manages it |
 | **LOGS** | Diagnostic log (filled automatically) | ❌ No |
+| **CLIENT_ERRORS** | Frontend error reports (filled automatically) | ❌ No |
+
+> **CUSTOMERS is the one user-data spreadsheet.** Exporting or deleting
+> everything about a user happens there (plus their public comments). Because
+> the activity tabs live in the same file, **don't share the spreadsheet to
+> hand off a mailing list** — export the Customers tab instead. (The
+> Votes/Stars/Bookmarks tabs moved here from COMMENTS; the move is automatic
+> on first use after deploying, and the old COMMENTS tabs are left in place —
+> delete them by hand once you've confirmed stars/bookmarks still work.)
 
 ---
 
@@ -33,25 +43,63 @@ Each "sheet" is a **separate Google Spreadsheet**. There are six:
 2. Paste the channel link into the **`url`** column. Leave `channel_name`,
    `channel_id`, `feed_url`, and `avatar` blank.
    - Works with a **YouTube** link (`youtube.com/@handle`, `/channel/UC…`, `/c/…`,
-     `/user/…`, or the RSS feed URL), or any **news / blog** site link.
+     `/user/…`, or the RSS feed URL), or any **news / blog** site link — either
+     the site's homepage or its RSS/Atom **feed URL pasted directly** (e.g.
+     `hodinkee.com/articles/rss.xml`); the feed's own title becomes the name.
    - Optionally set `tier` and `category` yourself — those are editorial and
      can't be guessed from the link.
-3. Run the **`enrichChannels`** function (see [Editor functions](#things-you-do-in-the-apps-script-editor) below).
+3. **That's it.** The next scheduled refresh (within 4 hours) enriches the row
+   and the channel goes live. In a hurry? Run the **`enrichChannels`** function
+   yourself (see [Editor functions](#things-you-do-in-the-apps-script-editor)
+   below), then force a refresh.
 
 It visits the link and fills in the rest automatically:
-- **YouTube** → `channel_id`, `feed_url`, `channel_name`, `avatar`.
-- **News/blog** → `feed_url` and `channel_name`; the icon is pulled from the
-  site's favicon automatically, so `avatar` stays blank.
+- **YouTube** → `channel_id`, `feed_url`, `channel_name`, `avatar` (and the
+  canonical channel `url` if you pasted a feed URL).
+- **News/blog** → `feed_url`, `channel_name`, the site `url` (from the feed,
+  if you pasted a feed URL), and `avatar`: the site's apple-touch-icon when it
+  has one, else the image the feed itself declares, else blank — a blank
+  avatar falls back to the site's favicon automatically when served.
 
 It also flips the channel **on** (`enabled` → TRUE) so it starts being crawled.
 You can paste several rows and run once. It **only fills blank cells**, so
 re-running is always safe and never overwrites your edits.
+
+### 🤝 Letting a co-editor add channels (no script access needed)
+
+Two ways, both without touching the Apps Script editor:
+
+- **The add-channel page (easiest):** `add-channel.html` on the live site is a
+  small password-protected form — paste the link, enter the add-channel
+  password (the `add_channel_password` value in META), done. It fills in
+  everything, refuses duplicates, and kicks off a crawl so the content shows
+  up within minutes. The password is deliberately separate from `admin_token`,
+  so you can share the page URL and password with whoever should be able to
+  add channels without also handing them the admin powers. Until you add that
+  row to META, the page refuses everyone.
+- **The spreadsheet:** share the **CHANNELS** spreadsheet with their Google
+  account as **Editor** (Share → their email — the spreadsheet only, not the
+  script). They paste URLs into the `url` column exactly as above, and the
+  next scheduled refresh enriches and enables the rows automatically.
+
+Either way, enrichment **only fills blank cells**, so nothing curated by hand
+is ever overwritten.
 
 ### ⏸️ Pause or remove a channel
 
 Set the channel's **`enabled`** cell to **`FALSE`**. It immediately stops being
 crawled and disappears from the site's Channels tab. Set it back to `TRUE` to
 resume. (Deleting the row also works, but disabling keeps its history.)
+
+### 📣 Read user feedback
+
+Open the **CUSTOMERS** spreadsheet, **Feedback** tab. Every message sent from
+the site's floating feedback button lands there as one row: when it was sent,
+who sent it (`email` + `name` from their Google sign-in — the button only
+shows to signed-in users), the message, and the page/app version/browser it
+came from, so a bug report is reproducible. Nothing to configure — the tab is
+created on the first submission. Spam guards: a 2,000-character cap, a 30s
+spacing per sender, and blocked users (below) can't send.
 
 ### 🚫 Block a user from commenting
 
@@ -74,7 +122,7 @@ authorize permissions once.
 
 | Function | What it does | When to run it |
 |---|---|---|
-| **`enrichChannels`** | Fills in missing info for channels you added by URL (see above) | Every time you add channel URLs to the sheet |
+| **`enrichChannels`** | Fills in missing info for channels you added by URL (see above) | Optional — only to make a freshly pasted URL live immediately; the every-4-hours refresh runs it automatically |
 | **`setupScheduledRefresh`** | Installs the automatic every-4-hours refresh | **Once**, after first deploying (or if the trigger was removed) |
 | **`runSessionSelfTest`** | Checks the login/session signing is healthy | Rarely — only when debugging sign-in issues |
 
@@ -117,17 +165,35 @@ Send a `POST` to the web-app URL with a JSON body:
 
 Returns recent log entries. (Sent as POST so the token never lands in a URL.)
 
+### ➕ Run channel enrichment remotely
+
+Send a `POST` to the web-app URL with a JSON body:
+
+```json
+{ "action": "enrich", "token": "YOUR_ADMIN_TOKEN" }
+```
+
+Runs `enrichChannels` — the same backfill as the editor's Run button (fills
+names, feeds, avatars, urls for rows that are missing them) — and returns its
+summary (`processed`, `filled`, per-row `results`). Useful after pasting new
+channel URLs into the CHANNELS sheet when you don't have editor access; pair
+with `refresh` to crawl the new channels immediately.
+
 ---
 
 ## Things that happen automatically (no action needed)
 
 - **Every 4 hours:** all enabled channels are crawled for new content (once
-  `setupScheduledRefresh` has been run once).
+  `setupScheduledRefresh` has been run once). Right before each crawl, any new
+  CHANNELS row holding just a pasted `url` is enriched and enabled, so it's
+  included in that same crawl.
 - **On demand:** if a visitor loads the site and the data is stale, a refresh is
   kicked off in the background — the visitor still sees cached content instantly.
 - **Retention:** videos older than 60 days are moved to an Archive tab so the
-  live catalog stays fast. Nothing is deleted; archived items still power search
-  and history.
+  live catalog stays fast; archived items still power search and history.
+  Archive rows older than a year are dropped, and duplicate archive rows for
+  the same item are collapsed automatically (keeping the copy with the
+  votes/comments), so the tab stays bounded with no manual cleanup.
 
 ---
 
@@ -138,6 +204,7 @@ Each row is a `key` in column A and its `value` in column B.
 | Key | What it controls | Example |
 |---|---|---|
 | `admin_token` | Secret that unlocks the admin actions above. **Keep private.** If unset, admin actions are fully disabled. | `a-long-random-string` |
+| `add_channel_password` | Password for the `add-channel.html` page. Separate from `admin_token` on purpose — shareable with a co-editor without granting admin actions. If unset, the page is disabled. | `a-different-random-string` |
 | `youtube_api_key` | YouTube Data API key. Enables live/premiere detection and fresh view counts. Without it, the app still works from plain RSS. | `AIza…` |
 | `refresh_interval_hours` | How stale (in hours) data can get before a refresh is triggered | `4` |
 | `log_level` | How much detail to log: `DEBUG`, `INFO`, `WARN`, or `ERROR` | `ERROR` |
@@ -152,7 +219,8 @@ Each row is a `key` in column A and its `value` in column B.
 
 | Goal | Do this |
 |---|---|
-| Add a YouTube channel or news site | Paste its URL into CHANNELS → run `enrichChannels` |
+| Add a YouTube channel or news site | Use the `add-channel.html` page (`add_channel_password` from META) — or paste its URL into CHANNELS, live on the next refresh (≤4h) |
+| Let someone else add channels | Give them the `add-channel.html` link + the add-channel password, or share the CHANNELS spreadsheet as Editor |
 | Stop pulling from a channel | Set its `enabled` cell to `FALSE` |
 | See new content right now | `?action=refresh&token=…` |
 | Ban a commenter | Add their email to the BLOCKED sheet |

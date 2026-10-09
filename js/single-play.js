@@ -59,6 +59,17 @@ export function pauseOthers(playing) {
  * any non-YouTube / non-JSON noise.
  */
 export function playerStateFrom(data) {
+  // Cheap guard before the parse. The IFrame API streams `infoDelivery`
+  // envelopes several times a second (currentTime, buffering, …), almost all
+  // of them irrelevant here — JSON.parsing every one just to discard it is the
+  // hot path. Only a message that names a player state can yield one, so skip
+  // the parse for any string that mentions neither. (Non-string data — an
+  // already-parsed object — falls through to the object handling below.)
+  if (typeof data === 'string' &&
+      data.indexOf('playerState') === -1 &&
+      data.indexOf('onStateChange') === -1) {
+    return null;
+  }
   let msg;
   try {
     msg = typeof data === 'string' ? JSON.parse(data) : data;

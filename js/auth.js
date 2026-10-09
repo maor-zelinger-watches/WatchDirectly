@@ -1,13 +1,15 @@
 /**
  * auth.js — Google Sign-In integration for How You Watch
  *
- * Uses Google Identity Services (GIS) for one-tap sign-in. On first sign-in we
- * verify the Google ID token once, then exchange it for a long-lived, app-issued
- * session token (see apps-script/Code.gs). From then on `currentUser.token` holds
- * that session token: page loads and authenticated calls reuse it, and it renews
- * itself with a silent fetch — so a returning visitor never sees the One Tap
- * overlay flash on open. GIS is only re-invoked if the session lapses entirely
- * (an absence longer than the session lifetime).
+ * Uses Google Identity Services (GIS). Sign-in happens through the button in
+ * the auth overlay (auth-overlay.js) — there is no automatic One Tap for
+ * signed-out visitors. On first sign-in we verify the Google ID token once,
+ * then exchange it for a long-lived, app-issued session token (see
+ * apps-script/Code.gs). From then on `currentUser.token` holds that session
+ * token: page loads and authenticated calls reuse it, and it renews itself
+ * with a silent fetch — so a returning visitor never sees any Google UI on
+ * open. GIS's One Tap is only re-invoked if the session lapses entirely (an
+ * absence longer than the session lifetime).
  */
 
 import { api } from './api-client.js';
@@ -55,8 +57,43 @@ let currentUser = null;
 /** @type {string} */
 let _clientId = '';
 
+/**
+ * In-flight token refresh, memoized so concurrent callers share ONE refresh.
+ * @type {Promise<string|null>|null}
+ */
+let _refreshPromise = null;
+
 /** @type {Function[]} */
 const listeners = [];
+
+// --- guarded localStorage primitives — never throw ------------------
+// auth.js owns the `wd_user` key (a credential, not a cache — see cache.js's
+// header). Persistence is best-effort: Safari private mode and a full quota
+// make setItem throw, but a throw here must never abort a sign-in that already
+// succeeded in memory, so every access is wrapped and failures degrade to
+// "not persisted" rather than crashing the caller.
+function readStored(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function removeStored(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch (e) { /* nothing to heal */ }
+}
 
 /**
  * Initializes Google Sign-In.
@@ -73,13 +110,13 @@ export function initAuth(clientId) {
   }
 
   // Restore session from localStorage (GIS doesn't persist across refresh)
-  const saved = localStorage.getItem('wd_user');
+  const saved = readStored('wd_user');
   if (saved) {
     try {
       currentUser = JSON.parse(saved);
       notifyListeners();
     } catch (e) {
-      localStorage.removeItem('wd_user');
+      removeStored('wd_user');
     }
   }
 
@@ -89,12 +126,11 @@ export function initAuth(clientId) {
     auto_select: true,
   });
 
-  // Only show the one-tap prompt if user isn't already signed in. A restored
-  // session token keeps currentUser set, so a returning visitor never triggers
-  // the overlay here.
-  if (!currentUser) {
-    google.accounts.id.prompt();
-  } else {
+  // Deliberately NO automatic One Tap for signed-out visitors: the only
+  // Google UI on the page is the button inside the sign-in overlay (opened
+  // from the header's Sign in pill). One Tap remains solely the last-resort
+  // re-auth path for a lapsed session (interactiveRefresh).
+  if (currentUser) {
     // Signed in from a restored session — if the token is getting old, slide it
     // forward in the background. Fire-and-forget and fully silent (no UI); it
     // never blocks first paint.
@@ -123,23 +159,22 @@ async function maybeSlideSession() {
 }
 
 /**
- * Renders the Google Sign-In button in a container element.
- * 
+ * Renders the Google Sign-In button in a container element. Always the full
+ * "Sign in with Google" pill: its only home is the auth overlay's dialog,
+ * which has room on every viewport — the icon-only compact mode existed for
+ * the cramped mobile header the button no longer lives in.
+ *
  * @param {HTMLElement} container - DOM element to render the button in
  */
 export function renderSignInButton(container) {
   if (typeof google === 'undefined' || !google.accounts) return;
 
-  // Icon-only on narrow screens — the full "Sign in with Google" pill
-  // overflows the mobile header and gets clipped
-  const compact = window.innerWidth < 480;
-
   google.accounts.id.renderButton(container, {
     theme: 'filled_black',
-    size: 'medium',
+    size: 'large',
     shape: 'pill',
     text: 'signin_with',
-    type: compact ? 'icon' : 'standard',
+    type: 'standard',
   });
 }
 
@@ -179,12 +214,20 @@ async function handleCredentialResponse(response) {
 
     currentUser = { ...identity, token };
 
-    // Persist to localStorage so session survives refresh
-    localStorage.setItem('wd_user', JSON.stringify(currentUser));
+    // Persist to localStorage so session survives refresh. Guarded: a storage
+    // failure (Safari private mode, quota full from the search index) must NOT
+    // reach the outer catch — the user IS signed in, so we always notify
+    // listeners regardless of whether persistence succeeded. A non-persisted
+    // session simply won't survive a refresh.
+    writeStored('wd_user', JSON.stringify(currentUser));
 
     notifyListeners();
   } catch (error) {
-    console.error('Failed to decode credential:', error);
+    // Log only the error name, never the error object: the console.error hook
+    // in error-reporter.js ships every arg to the backend sheet, and a
+    // JSON.parse SyntaxError message can embed fragments of the user's token
+    // (SEC8). The name (e.g. "SyntaxError") is enough to triage.
+    console.error('Failed to decode credential:', error && error.name);
     showToast('Sign-in failed. Please try again.', 'error');
   }
 }
@@ -197,7 +240,7 @@ export function signOut() {
     google.accounts.id.disableAutoSelect();
   }
   currentUser = null;
-  localStorage.removeItem('wd_user');
+  removeStored('wd_user');
   notifyListeners();
 }
 
@@ -270,7 +313,7 @@ export function isTokenExpired() {
 function updateSessionToken(newToken) {
   if (!currentUser || !newToken) return;
   currentUser.token = newToken;
-  localStorage.setItem('wd_user', JSON.stringify(currentUser));
+  writeStored('wd_user', JSON.stringify(currentUser));
 }
 
 /**
@@ -282,6 +325,18 @@ function updateSessionToken(newToken) {
  * @returns {Promise<string|null>} Fresh token or null
  */
 export async function refreshToken() {
+  // In-flight dedupe: rapid mutations after expiry (e.g. multi-vote) each call
+  // refreshToken; without this each would issue its own createSession, and the
+  // last-write-wins response orphans the other freshly minted tokens. Memoize
+  // a single promise and clear it once it settles, so a later expiry refreshes
+  // anew rather than returning a stale resolved value.
+  if (_refreshPromise) return _refreshPromise;
+  _refreshPromise = doRefreshToken();
+  _refreshPromise.finally(() => { _refreshPromise = null; });
+  return _refreshPromise;
+}
+
+async function doRefreshToken() {
   const current = getToken();
 
   // Silent renewal — works whenever the backend still accepts the token
@@ -315,9 +370,26 @@ function interactiveRefresh() {
       return;
     }
 
+    // This re-initializes GIS with a one-shot closure to capture the fresh
+    // token. Once we settle we MUST restore the global callback to
+    // handleCredentialResponse — otherwise the stale closure stays wired as the
+    // GIS callback, and a later One Tap (auto_select on the next prompt) would
+    // resolve THIS already-settled promise instead of signing the user in.
+    let settled = false;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      google.accounts.id.initialize({
+        client_id: _clientId,
+        callback: handleCredentialResponse,
+        auto_select: true,
+      });
+      resolve(value);
+    };
+
     // Set a timeout — if GIS doesn't respond in 5s, give up
     const timeout = setTimeout(() => {
-      resolve(null);
+      settle(null);
     }, 5000);
 
     // Temporarily override the callback to capture the fresh token
@@ -326,7 +398,7 @@ function interactiveRefresh() {
       callback: async (response) => {
         clearTimeout(timeout);
         await handleCredentialResponse(response); // exchanges for a session token
-        resolve(currentUser ? currentUser.token : null);
+        settle(currentUser ? currentUser.token : null);
       },
       auto_select: true,
     });
@@ -335,7 +407,7 @@ function interactiveRefresh() {
       // If prompt was dismissed or skipped, resolve null
       if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
         clearTimeout(timeout);
-        resolve(null);
+        settle(null);
       }
     });
   });

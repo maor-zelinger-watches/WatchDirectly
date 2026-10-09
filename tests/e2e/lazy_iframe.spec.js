@@ -9,6 +9,7 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { CACHE_VERSION } from '../../js/cache.js';
 
 const now = Date.now();
 
@@ -103,10 +104,10 @@ test.describe('Lazy iframe promotion after revalidation', () => {
   };
 
   test.beforeEach(async ({ page }) => {
-    await page.addInitScript((feed) => {
+    await page.addInitScript((cache) => {
       window.localStorage.clear();
-      window.localStorage.setItem('wd_feed_cache', JSON.stringify({ videos: feed.videos, total: feed.total }));
-    }, MOCK_FEED);
+      window.localStorage.setItem('wd_feed_cache', JSON.stringify(cache));
+    }, { videos: MOCK_FEED.videos, total: MOCK_FEED.total, version: CACHE_VERSION, savedAt: Date.now() });
 
     await page.route('**/macros/**', async (route) => {
       const url = route.request().url();

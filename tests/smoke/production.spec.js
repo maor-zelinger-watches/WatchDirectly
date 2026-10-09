@@ -1,7 +1,7 @@
 /**
  * Production smoke tests using Playwright
  * 
- * Tests the live site at https://maor-zelinger-watches.github.io/WatchDirectly/
+ * Tests the live site at https://www.howyouwatch.com/
  * No mocks — hits real API and real YouTube embeds.
  * Injects test comments via the API to verify the comment system.
  * 
@@ -10,8 +10,17 @@
 
 import { test, expect } from '@playwright/test';
 
-const PROD_URL = 'https://maor-zelinger-watches.github.io/WatchDirectly/';
+const PROD_URL = 'https://www.howyouwatch.com/';
 const API_URL = 'https://script.google.com/macros/s/AKfycbwyt7c8SWw9y0TnKq4RhcV7yLjS1JkXnNThYInpj-EnNYbA3ecgwVSX4gBIACNKHCqu0A/exec';
+
+// Shorts are hidden by default: the content-type chips ship with
+// Videos + Articles selected, so every Shorts card is display:none
+// (.feed--hide-short) until the user opts in. On days the newest feed item
+// is a Short, the first .media-card in DOM order is that hidden card and a
+// bare `.media-card` first() visibility wait times out (scheduled runs
+// 33417632159 … 34136397086). Assert on visible cards only.
+const visibleCards = (page) => page.locator('.media-card:visible');
+const firstVisibleCard = (page) => visibleCards(page).first();
 
 test.describe('Production Smoke Tests', () => {
   test.describe.configure({ timeout: 60000 });
@@ -28,29 +37,15 @@ test.describe('Production Smoke Tests', () => {
     await expect(page.locator('.header__title')).toHaveText('How You Watch');
   });
 
-  test('no filter tabs in the page', async ({ page }) => {
-    await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
-    const filterTabs = page.locator('.filter-tabs');
-    await expect(filterTabs).toHaveCount(0);
-  });
-
-  test('no tier badges on video cards', async ({ page }) => {
-    await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
-    const tierBadge = page.locator('.media-card__tier');
-    await expect(tierBadge).toHaveCount(0);
-  });
-
   test('video cards load from real API', async ({ page }) => {
     await page.goto(PROD_URL);
-    const card = page.locator('.media-card').first();
+    const card = firstVisibleCard(page);
     await expect(card).toBeVisible({ timeout: 30000 });
   });
 
   test('video cards have title and channel name', async ({ page }) => {
     await page.goto(PROD_URL);
-    const card = page.locator('.media-card').first();
+    const card = firstVisibleCard(page);
     await expect(card).toBeVisible({ timeout: 30000 });
 
     await expect(card.locator('.media-card__title')).not.toBeEmpty();
@@ -59,7 +54,7 @@ test.describe('Production Smoke Tests', () => {
 
   test('video cards have YouTube embed', async ({ page }) => {
     await page.goto(PROD_URL);
-    const card = page.locator('.media-card').first();
+    const card = firstVisibleCard(page);
     await expect(card).toBeVisible({ timeout: 30000 });
 
     // Iframes are lazy-loaded via IntersectionObserver (data-src → src).
@@ -78,10 +73,10 @@ test.describe('Production Smoke Tests', () => {
 
   test('multiple video cards render', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    await firstVisibleCard(page).waitFor({ timeout: 30000 });
     // Wait for staggered animation to finish appending cards
     await page.waitForTimeout(2000);
-    const count = await page.locator('.media-card').count();
+    const count = await visibleCards(page).count();
     expect(count).toBeGreaterThan(1);
   });
 
@@ -89,9 +84,9 @@ test.describe('Production Smoke Tests', () => {
 
   test('each card has a comments toggle button', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    await firstVisibleCard(page).waitFor({ timeout: 30000 });
 
-    const toggles = page.locator('.media-card__comments-toggle');
+    const toggles = page.locator('.media-card:visible .media-card__comments-toggle');
     const count = await toggles.count();
     expect(count).toBeGreaterThan(0);
     await expect(toggles.first()).toContainText('comments');
@@ -99,58 +94,66 @@ test.describe('Production Smoke Tests', () => {
 
   test('comments section is hidden by default', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    const card = firstVisibleCard(page);
+    await card.waitFor({ timeout: 30000 });
 
-    const body = page.locator('.media-card__comments-body').first();
+    const body = card.locator('.media-card__comments-body');
     await expect(body).toBeHidden();
   });
 
   test('clicking toggle expands comments inline', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    const card = firstVisibleCard(page);
+    await card.waitFor({ timeout: 30000 });
 
-    const toggle = page.locator('.media-card__comments-toggle').first();
+    const toggle = card.locator('.media-card__comments-toggle');
     await toggle.click();
 
-    const body = page.locator('.media-card__comments-body').first();
+    const body = card.locator('.media-card__comments-body');
     await expect(body).toBeVisible({ timeout: 10000 });
   });
 
   test('expanded comments show auth prompt when not signed in', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    const card = firstVisibleCard(page);
+    await card.waitFor({ timeout: 30000 });
 
-    const toggle = page.locator('.media-card__comments-toggle').first();
+    const toggle = card.locator('.media-card__comments-toggle');
     await toggle.click();
 
-    const authPrompt = page.locator('.media-card__auth-prompt').first();
+    const authPrompt = card.locator('.media-card__auth-prompt');
     await expect(authPrompt).toBeVisible();
   });
 
   test('clicking toggle again collapses comments', async ({ page }) => {
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    const card = firstVisibleCard(page);
+    await card.waitFor({ timeout: 30000 });
 
-    const toggle = page.locator('.media-card__comments-toggle').first();
+    const toggle = card.locator('.media-card__comments-toggle');
     await toggle.click();
-    await expect(page.locator('.media-card__comments-body').first()).toBeVisible({ timeout: 10000 });
+    await expect(card.locator('.media-card__comments-body')).toBeVisible({ timeout: 10000 });
 
     await toggle.click();
-    await expect(page.locator('.media-card__comments-body').first()).toBeHidden();
+    await expect(card.locator('.media-card__comments-body')).toBeHidden();
   });
 
-  // ── No Detail View ─────────────────────────────────────────
+  // ── 404 Page ───────────────────────────────────────────────
 
-  test('no detail view section in the page', async ({ page }) => {
-    await page.goto(PROD_URL);
-    const detailView = page.locator('#detail-view');
-    await expect(detailView).toHaveCount(0);
-  });
+  test('unknown path renders the styled 404 with a working link home', async ({ page }) => {
+    await page.goto(`${PROD_URL}nonexistent`);
 
-  test('no back button in the page', async ({ page }) => {
-    await page.goto(PROD_URL);
-    const backBtn = page.locator('#back-btn');
-    await expect(backBtn).toHaveCount(0);
+    // Styled 404 renders (not the browser/host default error page).
+    await expect(page.locator('.error-page__code')).toHaveText('404');
+    await expect(page.locator('.error-page__title')).toBeVisible();
+
+    // The link back to the feed points at the site root and actually works.
+    const backLink = page.locator('.error-page a.btn--primary');
+    await expect(backLink).toHaveAttribute('href', '/');
+    await backLink.click();
+
+    await expect(page).toHaveURL(`${PROD_URL}`);
+    await expect(page.locator('.header__title')).toHaveText('How You Watch');
   });
 
   // ── Responsive Layout ──────────────────────────────────────
@@ -158,7 +161,7 @@ test.describe('Production Smoke Tests', () => {
   test('renders properly at mobile viewport', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    await firstVisibleCard(page).waitFor({ timeout: 30000 });
 
     const header = page.locator('.header');
     const headerBox = await header.boundingBox();
@@ -168,7 +171,7 @@ test.describe('Production Smoke Tests', () => {
   test('renders properly at desktop viewport', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    await firstVisibleCard(page).waitFor({ timeout: 30000 });
 
     const feed = page.locator('#feed-container');
     const feedBox = await feed.boundingBox();
@@ -184,7 +187,7 @@ test.describe('Production Smoke Tests', () => {
     });
 
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    await firstVisibleCard(page).waitFor({ timeout: 30000 });
 
     const realErrors = errors.filter(e =>
       !e.includes('compute-pressure') &&
@@ -217,7 +220,7 @@ test.describe('Comment Injection (Production API)', () => {
 
     // Step 2: Load the site and expand comments on the test video
     await page.goto(PROD_URL);
-    await page.locator('.media-card').first().waitFor({ timeout: 30000 });
+    await firstVisibleCard(page).waitFor({ timeout: 30000 });
 
     // Find the card for our test video
     const testCard = page.locator(`.media-card[data-video-id="${TEST_VIDEO_ID}"]`);

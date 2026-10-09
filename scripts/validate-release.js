@@ -5,15 +5,16 @@
  * How You Watch ships three independently-versioned components:
  *
  *   Frontend  APP_VERSION in js/config.js        → published by `git push` (GitHub Pages)
- *   Backend   VERSION     in apps-script/Code.gs  → deployed by the post-commit clasp hook
+ *   Backend   VERSION     in apps-script/Code.gs  → deployed via `npm run deploy:backend` (clasp)
  *   Repo      version     in package.json         → rides along in the commit (tooling)
  *
- * Before you commit (which deploys the backend) or push (which publishes the
- * frontend), this checks — deterministically — that every component you're
- * about to ship carries a proper version bump AND a dated CHANGELOG description.
- * It compares your working tree against what's live (origin/main), so it can
- * tell "you changed this but forgot to bump it" apart from "already bumped,
- * good to go".
+ * The deploy skill runs this gate first, and only after it passes invokes
+ * `npm run deploy:backend` and `git push` explicitly. Committing never deploys
+ * anything on its own. This checks — deterministically — that every component
+ * you're about to ship carries a proper version bump AND a dated CHANGELOG
+ * description. It compares your working tree against what's live (origin/main),
+ * so it can tell "you changed this but forgot to bump it" apart from "already
+ * bumped, good to go".
  *
  * Why the components differ in strictness:
  *   - Frontend / Backend actually go live to users. Shipping them unversioned
@@ -70,6 +71,9 @@ const COMPONENTS = {
 // Which component owns a changed path? 'RideAlong' = supporting files that never
 // require a bump of their own; null = ignored entirely.
 function classify(path) {
+  // clasp deploy config (.clasp.json / .clasp.staging.json) is deploy tooling,
+  // not backend runtime — the deploy hash only covers Code.gs + appsscript.json.
+  if (/(^|\/)\.clasp[^/]*\.json$/.test(path)) return 'Repo';
   if (path.startsWith('apps-script/')) return 'Backend';
   if (path.endsWith('.html')
       || path.startsWith('css/') || path.startsWith('js/')) return 'Frontend';

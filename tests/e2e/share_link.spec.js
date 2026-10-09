@@ -9,6 +9,7 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { CACHE_VERSION } from '../../js/cache.js';
 
 const now = Date.now();
 
@@ -170,9 +171,9 @@ test.describe('Share links', () => {
   test('a deep link to a cached video reuses the painted card, and exit still strips ?v=', async ({ page }) => {
     // Seed the page-1 feed cache so the card is painted before handleDeepLink
     // runs — the fast path, no `video` action fetch, no temp card.
-    await page.addInitScript((feed) => {
-      localStorage.setItem('wd_feed_cache', JSON.stringify({ videos: feed.videos, total: feed.total }));
-    }, MOCK_FEED);
+    await page.addInitScript((cache) => {
+      localStorage.setItem('wd_feed_cache', JSON.stringify(cache));
+    }, { videos: MOCK_FEED.videos, total: MOCK_FEED.total, version: CACHE_VERSION, savedAt: Date.now() });
 
     await page.goto('/?v=sh_vid_1000');
 

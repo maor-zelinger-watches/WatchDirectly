@@ -17,6 +17,7 @@ import {
   cardIds,
   allUnique,
   scrollToBottom,
+  expectVisibleWithin,
 } from './helpers.js';
 
 test.describe('PERF · page load', () => {
@@ -27,7 +28,7 @@ test.describe('PERF · page load', () => {
 
     await page.goto('/', { waitUntil: 'commit' });
     // Loose backstop: two 300ms page-1 fetches + render. The timeout IS the budget.
-    await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 3500 });
+    await expectVisibleWithin(page.locator('.media-card').first(), 3500);
 
     const paint = await paintMetrics(page);
     console.log(`[T1] FCP=${paint.fcp}ms LCP=${paint.lcp}ms`);
@@ -53,7 +54,7 @@ test.describe('PERF · page load', () => {
     // A card visible within 1500ms while every fetch hangs proves the paint
     // came from cache. The timeout IS the budget.
     await page.reload({ waitUntil: 'commit' });
-    await expect(page.locator('.media-card').first()).toBeVisible({ timeout: 1500 });
+    await expectVisibleWithin(page.locator('.media-card').first(), 1500);
   });
 
   test('T3 revalidation never blocks pagination', async ({ page }) => {
@@ -78,7 +79,7 @@ test.describe('PERF · page load', () => {
     // the 3s revalidation, proving pagination did not wait for it. The timeout
     // IS the budget.
     await scrollToBottom(page);
-    await expect(page.locator('.media-card').nth(19)).toBeVisible({ timeout: 2000 });
+    await expectVisibleWithin(page.locator('.media-card').nth(19), 2000);
 
     const ids = await cardIds(page);
     expect(allUnique(ids)).toBe(true); // no duplicates slipped in during the race

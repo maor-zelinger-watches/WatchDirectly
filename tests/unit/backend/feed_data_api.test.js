@@ -68,7 +68,7 @@ function load(opts = {}) {
   };
 
   const patched = SRC.replace(/META:\s*'[^']+'/, "META: 'META_ID'");
-  const names = ['extractFeedChannelId', 'fetchYouTubeUploads', 'parseYouTubeUploads', 'fetchAndParseFeed'];
+  const names = ['extractFeedChannelId', 'fetchYouTubeUploads', 'parseYouTubeUploads', 'fetchAndParseFeed', 'probeYouTubeShort', 'isShortsUrl'];
   const factory = new Function(...Object.keys(globals), `${patched}\nreturn { ${names.join(', ')} };`);
   return { ...factory(...Object.values(globals)), calls };
 }
@@ -160,6 +160,109 @@ describe('parseYouTubeUploads', () => {
 
   it('returns [] for an empty item list', () => {
     expect(be.parseYouTubeUploads('{"items":[]}', 'X', 0, 'c')).toEqual([]);
+  });
+
+  it('flags every item short_unknown — the playlist carries no Shorts signal', () => {
+    // The watch URL is provisional: crawlAllFeeds probes new items before
+    // persisting, and the RSS self-heal corrects any that slipped through.
+    expect(videos.every((v) => v.short_unknown === true)).toBe(true);
+  });
+});
+
+describe('probeYouTubeShort (Shorts classifier for the Data-API path)', () => {
+  // Response with the headers the manual redirect walk reads.
+  const redirect = (code, location) => ({
+    getResponseCode: () => code,
+    getContentText: () => '',
+    getAllHeaders: () => ({ Location: location }),
+  });
+  const okPage = () => ({ getResponseCode: () => 200, getContentText: () => '<html>', getAllHeaders: () => ({}) });
+  const status = (code) => ({ getResponseCode: () => code, getContentText: () => '', getAllHeaders: () => ({}) });
+
+  it('200 on /shorts/<id> → true (a real Short)', () => {
+    const be = load({ fetch: () => okPage() });
+    expect(be.probeYouTubeShort('8ois5twG3YY')).toBe(true);
+    expect(be.calls).toEqual(['https://www.youtube.com/shorts/8ois5twG3YY']);
+    expect(be.calls.length).toBe(1);
+  });
+
+  it('303 to /watch?v= → false (long-form)', () => {
+    const be = load({ fetch: () => redirect(303, 'https://www.youtube.com/watch?v=NKtJ7kKBFG0') });
+    expect(be.probeYouTubeShort('NKtJ7kKBFG0')).toBe(false);
+    expect(be.calls.length).toBe(1);
+  });
+
+  it("walks Apps Script's 302 to m.youtube.com, then decides from the mobile answer", () => {
+    // Short: www 302 → m.youtube.com/shorts → 200.
+    const short = load({
+      fetch: (url) => url.startsWith('https://m.youtube.com/')
+        ? okPage()
+        : redirect(302, 'https://m.youtube.com/shorts/8ois5twG3YY'),
+    });
+    expect(short.probeYouTubeShort('8ois5twG3YY')).toBe(true);
+    expect(short.calls).toEqual([
+      'https://www.youtube.com/shorts/8ois5twG3YY',
+      'https://m.youtube.com/shorts/8ois5twG3YY',
+    ]);
+
+    // Long-form: www 302 → m.youtube.com/shorts → 303 m.youtube.com/watch.
+    const longForm = load({
+      fetch: (url) => url.startsWith('https://m.youtube.com/')
+        ? redirect(303, 'https://m.youtube.com/watch?v=NKtJ7kKBFG0')
+        : redirect(302, 'https://m.youtube.com/shorts/NKtJ7kKBFG0'),
+    });
+    expect(longForm.probeYouTubeShort('NKtJ7kKBFG0')).toBe(false);
+    expect(longForm.calls.length).toBe(2);
+  });
+
+  it('resolves a relative Location against the current host', () => {
+    const be = load({
+      fetch: (url) => url.includes('?app=desktop') ? okPage() : redirect(302, '/shorts/8ois5twG3YY?app=desktop'),
+    });
+    expect(be.probeYouTubeShort('8ois5twG3YY')).toBe(true);
+    expect(be.calls[1]).toBe('https://www.youtube.com/shorts/8ois5twG3YY?app=desktop');
+  });
+
+  it('404 (unknown id) and 5xx → null, never a guess', () => {
+    expect(load({ fetch: () => status(404) }).probeYouTubeShort('zzzzzzzzzzz')).toBe(null);
+    expect(load({ fetch: () => status(500) }).probeYouTubeShort('zzzzzzzzzzz')).toBe(null);
+    expect(load({ fetch: () => status(429) }).probeYouTubeShort('zzzzzzzzzzz')).toBe(null);
+  });
+
+  it('a redirect off youtube.com, or to a non-shorts non-watch path, → null (never followed)', () => {
+    const offsite = load({ fetch: () => redirect(302, 'https://evil.example/shorts/8ois5twG3YY') });
+    expect(offsite.probeYouTubeShort('8ois5twG3YY')).toBe(null);
+    expect(offsite.calls.length).toBe(1);
+
+    const consent = load({ fetch: () => redirect(302, 'https://www.youtube.com/consent?continue=x') });
+    expect(consent.probeYouTubeShort('8ois5twG3YY')).toBe(null);
+    expect(consent.calls.length).toBe(1);
+  });
+
+  it('caps a redirect loop at a few hops → null', () => {
+    const be = load({ fetch: () => redirect(302, 'https://m.youtube.com/shorts/8ois5twG3YY') });
+    expect(be.probeYouTubeShort('8ois5twG3YY')).toBe(null);
+    expect(be.calls.length).toBeLessThanOrEqual(5);
+  });
+
+  it('a network error → null', () => {
+    const be = load({ fetch: () => { throw new Error('DNS error'); } });
+    expect(be.probeYouTubeShort('8ois5twG3YY')).toBe(null);
+  });
+
+  it('refuses anything that is not an 11-char id without fetching', () => {
+    const be = load({ fetch: () => okPage() });
+    expect(be.probeYouTubeShort('')).toBe(null);
+    expect(be.probeYouTubeShort('not-a-video-id')).toBe(null);
+    expect(be.probeYouTubeShort('../etc')).toBe(null);
+    expect(be.calls.length).toBe(0);
+  });
+
+  it('isShortsUrl mirrors the frontend rule', () => {
+    const be = load();
+    expect(be.isShortsUrl('https://www.youtube.com/shorts/8ois5twG3YY')).toBe(true);
+    expect(be.isShortsUrl('https://www.youtube.com/watch?v=8ois5twG3YY')).toBe(false);
+    expect(be.isShortsUrl(undefined)).toBe(false);
   });
 });
 

@@ -15,6 +15,7 @@
 import { state, isFilterActive } from './state.js';
 import { api } from './api-client.js';
 import { CONFIG } from './config.js';
+import { sortVideos } from './feed.js';
 
 /** Total videos sitting in the buffer, for end-of-catalog math. */
 export function bufferedVideoCount() {
@@ -73,6 +74,129 @@ function nextPageToFetch() {
   return (last ? last.page : Math.max(state.currentPage, state.pendingFetchPage)) + 1;
 }
 
+// ============================================================
+// Feed reserve — cached cards the revalidate replaced, kept as pages
+// ============================================================
+//
+// On return after a few hours, fresh page 1 often shares nothing with the
+// cached front (the feed gains ~10 items per 6h), so revalidateFeed replaces
+// the whole cached list with fresh page 1 and re-paginates from the server.
+// Before this, the cards the visitor already had were simply thrown away and
+// re-fetched one cursor page at a time — "it doesn't load until I get to the
+// articles I already had". Now they are kept here, in feed order, and served
+// as pages the moment pagination reaches the range they cover.
+//
+// Correctness rests on one fact: the cached list was a CONTIGUOUS slice of the
+// server's feed, starting at its newest item (the `anchor`). Server pages are
+// contiguous from the cursor too. So once a server page ends at or past the
+// anchor, the server's continuation after that page IS the reserve's remaining
+// items (minus anything deleted since) — no gap is possible, and the reserve
+// can answer every following page without the network. Until a page reaches
+// the anchor there may be newer items we have never seen, so pages keep coming
+// from the server; each one trims the reserve (items the page contained, or
+// that now sit before the cursor and were therefore deleted) and never serves.
+//
+// The reserve is session-only, positional (keyed by cursor, so pagination
+// resets don't confuse it) and ignored in page-offset mode (a backend without
+// cursors), where positions are meaningless.
+
+/** Feed position of a cursor string ("<ISO time>|<video_id>"). */
+function cursorParts(cursor) {
+  const sep = cursor.indexOf('|');
+  const t = new Date(sep === -1 ? cursor : cursor.slice(0, sep)).getTime();
+  return { t: Number.isFinite(t) ? t : 0, id: sep === -1 ? '' : cursor.slice(sep + 1) };
+}
+
+/** Feed position of a video (same tiebreak the backend's cursor uses). */
+function itemParts(v) {
+  const t = new Date(v.published_at).getTime();
+  return { t: Number.isFinite(t) ? t : 0, id: String(v.video_id || '') };
+}
+
+/** True when position `a` comes strictly AFTER `b` in feed order (older). */
+function isAfter(a, b) {
+  return a.t < b.t || (a.t === b.t && a.id < b.id);
+}
+
+/**
+ * Keeps the cached list `cachedVideos` — minus whatever fresh page 1 already
+ * shows — as the reserve, then lets fresh page 1 trim it (and mark it reached
+ * when page 1 already ends inside the cached range: the partial-overlap case).
+ */
+export function stashFeedReserve(cachedVideos, freshVideos) {
+  const freshIds = new Set(freshVideos.map(v => v.video_id));
+  const ordered = sortVideos((cachedVideos || []).filter(v => v && v.video_id));
+  const videos = ordered.filter(v => !freshIds.has(v.video_id));
+  if (ordered.length === 0 || videos.length === 0) {
+    state.feedReserve = null;
+    return;
+  }
+  state.feedReserve = { videos, anchor: itemParts(ordered[0]), reached: false };
+  absorbServerPage(freshVideos);
+}
+
+export function clearFeedReserve() {
+  state.feedReserve = null;
+}
+
+/**
+ * Reconciles the reserve with a page that just came from the server: drops
+ * the items that page contained (the server copy is fresher) and the items
+ * that now sit at or before its last item (they were deleted upstream — the
+ * server would have returned them otherwise), and marks the reserve reached
+ * once the page ends at or past the anchor. Empties out to null.
+ */
+export function absorbServerPage(pageVideos) {
+  const r = state.feedReserve;
+  if (!r || !pageVideos || pageVideos.length === 0) return;
+  const last = itemParts(pageVideos[pageVideos.length - 1]);
+  const pageIds = new Set(pageVideos.map(v => v.video_id));
+  r.videos = r.videos.filter(v => !pageIds.has(v.video_id) && isAfter(itemParts(v), last));
+  if (!isAfter(r.anchor, last)) r.reached = true; // the page ends at/after the anchor
+  if (r.videos.length === 0) state.feedReserve = null;
+}
+
+/**
+ * Drop-in for api.fetchFeed on the pagination paths. Serves the next page
+ * from the reserve when it has been reached and holds items past `cursor`;
+ * otherwise fetches from the server and lets the response trim the reserve.
+ * A served page carries `fromReserve: true` and a cursor after its last item,
+ * so pagination continues seamlessly into the server once the reserve drains.
+ */
+export function fetchFeedPage(page, cursor) {
+  const r = state.feedReserve;
+  if (r && r.reached && typeof cursor === 'string' && cursor !== '') {
+    const pos = cursorParts(cursor);
+    // Anything at or before the cursor has been passed already — a page we
+    // didn't see absorbed covered it, or it was deleted. Only what lies past
+    // the cursor is servable.
+    const past = r.videos.filter(v => isAfter(itemParts(v), pos));
+    if (past.length > 0) {
+      const videos = past.slice(0, CONFIG.PAGE_SIZE);
+      r.videos = past.slice(videos.length);
+      if (r.videos.length === 0) state.feedReserve = null;
+      return Promise.resolve({
+        status: 'ok',
+        videos,
+        total: state.totalVideos,
+        page,
+        next_cursor: cursorAfter(videos),
+        fromReserve: true,
+      });
+    }
+    state.feedReserve = null;
+  }
+  const pending = api.fetchFeed(page, CONFIG.PAGE_SIZE, cursor || '');
+  // No reserve: hand back the API promise itself. The refill loop and
+  // loadNextPage race on microtask order (pendingFetchPage / token checks);
+  // an extra hop here changed which responses got discarded.
+  if (!state.feedReserve) return pending;
+  return pending.then(data => {
+    absorbServerPage(data.videos || []);
+    return data;
+  });
+}
+
 /** Drops the buffer and cancels any in-flight refill (pagination reset). */
 export function invalidatePrefetchBuffer() {
   state.prefetchBuffer = [];
@@ -120,7 +244,7 @@ export async function refillPrefetchBuffer() {
       // loadNextPage refills again once its fetch lands.
       if (typeof cursor === 'string' && state.prefetchBuffer.length === 0 && state.pendingFetchPage) return;
 
-      const data = await api.fetchFeed(page, CONFIG.PAGE_SIZE, cursor || '');
+      const data = await fetchFeedPage(page, cursor || '');
       if (token !== state.prefetchToken) return;
 
       if (data.total) state.totalVideos = data.total;

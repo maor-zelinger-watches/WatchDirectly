@@ -29,6 +29,9 @@ const MOCK_FEED = {
   page: 1,
 };
 
+// Everything is scoped to #category-chips: since Frontend 1.22.0 the Channels
+// tab's platform chips (#platform-chips) render at boot with their own active
+// "All" chip, so an unscoped .chip--active matches two elements.
 const chip = (page, label) => page.locator('#category-chips .chip', { hasText: new RegExp(`^${label}$`) });
 const visibleCards = (page) => page.locator('.media-card:visible');
 const allCards = (page) => page.locator('.media-card');
@@ -70,7 +73,7 @@ test.describe('Content-type filter chips (UI visibility)', () => {
     await expect(chip(page, 'Shorts')).toBeVisible();
 
     await expect(chip(page, 'All')).toHaveClass(/chip--active/);
-    await expect(page.locator('.chip--active')).toHaveCount(1);
+    await expect(page.locator('#category-chips .chip--active')).toHaveCount(1);
   });
 
   test('filtering hides cards without removing them from the DOM', async ({ page }) => {
@@ -113,7 +116,7 @@ test.describe('Content-type filter chips (UI visibility)', () => {
     await chip(page, 'Shorts').click();
 
     await expect(chip(page, 'All')).toHaveClass(/chip--active/);
-    await expect(page.locator('.chip--active')).toHaveCount(1);
+    await expect(page.locator('#category-chips .chip--active')).toHaveCount(1);
     await expect(visibleCards(page)).toHaveCount(4);
   });
 
@@ -124,7 +127,7 @@ test.describe('Content-type filter chips (UI visibility)', () => {
     await chip(page, 'Videos').click(); // toggle it back off
 
     await expect(chip(page, 'All')).toHaveClass(/chip--active/);
-    await expect(page.locator('.chip--active')).toHaveCount(1);
+    await expect(page.locator('#category-chips .chip--active')).toHaveCount(1);
     await expect(visibleCards(page)).toHaveCount(4);
   });
 
@@ -135,7 +138,7 @@ test.describe('Content-type filter chips (UI visibility)', () => {
     await chip(page, 'All').click();
 
     await expect(chip(page, 'All')).toHaveClass(/chip--active/);
-    await expect(page.locator('.chip--active')).toHaveCount(1);
+    await expect(page.locator('#category-chips .chip--active')).toHaveCount(1);
     await expect(visibleCards(page)).toHaveCount(4);
   });
 
@@ -231,7 +234,7 @@ test.describe('Content-type filter default & persistence', () => {
     await expect(allCards(page)).toHaveCount(4);
 
     await expect(chip(page, 'All')).toHaveClass(/chip--active/);
-    await expect(page.locator('.chip--active')).toHaveCount(1);
+    await expect(page.locator('#category-chips .chip--active')).toHaveCount(1);
     await expect(visibleCards(page)).toHaveCount(4);
   });
 });
