@@ -21,6 +21,29 @@ that component's heading.
 
 ## Frontend
 
+### 1.34.0 — 2026-10-09
+- **Cold loads on a slow connection reach the first card about three seconds
+  sooner.** The app ships 30 unbundled ES modules with an import chain 11
+  deep, and the browser only discovers each level once the one above it has
+  arrived — 11 round trips, 5.6s on Chrome's Slow 4G profile, while the feed
+  data had been sitting ready since 1.8s. `index.html` now lists a
+  `<link rel="modulepreload">` for every module reachable from `js/app.js`
+  and `js/error-reporter.js`, so they all go out in one wave as the HTML
+  parses; `tests/unit/module_preload.test.js` derives the reachable set from
+  the import graph and fails when the list drifts. Three smaller first-screen
+  fixes ride along: the first two cards of a fresh paint into an empty feed
+  load their preview image eagerly with `fetchpriority="high"` (the LCP
+  candidate no longer queues behind the images below it) while the rest stay
+  lazy; article sites behind Cloudflare Image Resizing (`/cdn-cgi/image/`)
+  get a 640w/1280w `srcset` with `fit=scale-down,format=auto` (172KB → 39KB
+  JPEG / 19KB AVIF at 640px; other hosts keep the stored URL untouched); and
+  `js/analytics.js` is `defer`red, since as a blocking `<head>` script it
+  held the parser one round trip before the stylesheet and feed requests
+  could start. Measured 2026-10-07, cold, Slow 4G, HTTP/2, backend mocked at
+  a fixed 2.5s: last module 6.3s → 3.5s, first card 8.9s → 6.0s, LCP
+  9.9s → 7.0s, sixth first-screen image 14.7s → 9.6s. Unthrottled, the
+  module wave drops from 301ms to 46ms. No behavior change otherwise.
+
 ### 1.33.0 — 2026-10-06
 - **Coming back after a few hours no longer re-fetches the cards you already
   had.** On return, the cached Latest feed paints and fresh page 1 is fetched.
