@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.26.1';
+const VERSION = '1.26.2';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -81,6 +81,12 @@ const FEED_HEAD_CACHE_SECONDS = 300;
 // every writer that changes a row bumps the generation, which stales both.
 const CATALOG_CACHE_KEY = 'catalog_sorted_v1';
 const CATALOG_CACHE_SECONDS = 300;
+// Longest a request waits for another execution's in-flight rebuild of a
+// cached sorted list before scanning the sheet itself (see cachedSortedList).
+// Well past a normal scan (2-4s) so waiters coalesce onto one rebuild even on
+// a slow day, but short of the 6-minute execution limit so a wedged holder
+// can never take the waiters down with it.
+const SORTED_LIST_REBUILD_LOCK_MS = 30000;
 // Chunk size for cached values. Chunks are ASCII-escaped before splitting so
 // one char is one byte, keeping each piece comfortably under the 100KB cap.
 const CACHE_CHUNK_CHARS = 90000;
@@ -419,7 +425,11 @@ function doGet(e) {
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
   } catch (error) {
-    log('ERROR', 'doGet', error.message);
+    // Nothing between here and the response may throw: the log write touches
+    // the Meta and LOGS sheets, and the failure being reported is very often
+    // the Spreadsheet service itself. log() guards its own sheet access, but
+    // the response must not depend on that holding for every future edit.
+    try { log('ERROR', 'doGet', error.message); } catch (e) { /* response first */ }
     // Generic message to the client — the detail is in the log, not the wire.
     return jsonResponse({ status: 'error', message: 'Request failed. Please try again.' });
   }
@@ -497,7 +507,8 @@ function doPost(e) {
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
   } catch (error) {
-    log('ERROR', 'doPost', error.message);
+    // Same contract as doGet: the response never depends on the log write.
+    try { log('ERROR', 'doPost', error.message); } catch (e) { /* response first */ }
     // Generic message to the client — the detail is in the log, not the wire.
     return jsonResponse({ status: 'error', message: 'Request failed. Please try again.' });
   }
@@ -3278,17 +3289,55 @@ function cachedSortedList(key, ttlSeconds, producer, options) {
   });
   if (cached) return cached;
 
-  // Capture the generation BEFORE reading the sheet: an invalidate that lands
-  // during the scan advances it past this value, and putCachedSortedList then
-  // refuses the now-stale snapshot.
-  var gen = currentCacheGeneration();
-  var videos = producer();
-  var cap = options.cap || 0;
-  var payload = { videos: cap > 0 ? videos.slice(0, cap) : videos, gen: gen };
-  if (options.total) payload.total = videos.length;
-  putCachedSortedList(key, ttlSeconds, payload, gen);
-  payload.fresh = true; // this call paid the scan (never persisted — set after the put)
-  return payload;
+  // Stampede guard. A miss is shared by every request in flight at that
+  // moment — one visitor's landing is feed + Top Week + comments, a search
+  // focus is 4 parallel chunk pages — and before this each of them ran its own
+  // full sheet scan. Those concurrent scans are what tripped "Too many
+  // simultaneous invocations: Spreadsheets" (1,200+ failures, 2026-10-03..08)
+  // and, once the service was saturated, wedged executions at the 6-minute
+  // limit. So: take the script lock, re-check the cache (the holder before us
+  // most likely populated it), and scan only if it is still a miss. Waiting on
+  // the lock touches no sheet, so waiters cost the Spreadsheet service nothing.
+  //
+  // Bounded and best-effort: if the lock can't be had within
+  // SORTED_LIST_REBUILD_LOCK_MS the request falls through to its own scan, which
+  // is exactly the pre-guard behaviour — never worse, just unshared. The lock is
+  // the same script lock the writers use, and LockService is not reentrant, so
+  // this must only ever run on the read-only paths (getVideos, handleTopWeek,
+  // handleVideo, handleArchive), none of which hold it. A writer that lands
+  // while a scan holds the lock waits a normal scan's few seconds at most.
+  var lock = null;
+  try {
+    lock = LockService.getScriptLock();
+    lock.waitLock(SORTED_LIST_REBUILD_LOCK_MS);
+  } catch (e) {
+    lock = null; // contended past the bound (or no LockService): scan unshared
+  }
+  try {
+    if (lock) {
+      cached = readCachedSortedList(key, {
+        requireTotal: !!options.total,
+        checkExpiry: !!options.checkExpiry,
+      });
+      if (cached) return cached;
+    }
+
+    // Capture the generation BEFORE reading the sheet: an invalidate that lands
+    // during the scan advances it past this value, and putCachedSortedList then
+    // refuses the now-stale snapshot.
+    var gen = currentCacheGeneration();
+    var videos = producer();
+    var cap = options.cap || 0;
+    var payload = { videos: cap > 0 ? videos.slice(0, cap) : videos, gen: gen };
+    if (options.total) payload.total = videos.length;
+    putCachedSortedList(key, ttlSeconds, payload, gen);
+    payload.fresh = true; // this call paid the scan (never persisted — set after the put)
+    return payload;
+  } finally {
+    if (lock) {
+      try { lock.releaseLock(); } catch (e) { /* already released or lost — nothing to hold */ }
+    }
+  }
 }
 
 /**
@@ -5798,7 +5847,19 @@ function getLogLevel() {
 }
 
 function log(level, source, message) {
-  var configLevel = getLogLevel();
+  // getLogLevel() opens the Meta sheet on its first call of the execution. When
+  // the Spreadsheet service itself is what just failed ("Too many simultaneous
+  // invocations: Spreadsheets", 2026-10-03..08), that open throws again — and
+  // log() is what doGet/doPost's catch blocks call, so the second throw
+  // escaped the handler and the execution died as "Failed" with Google's HTML
+  // error page instead of the generic JSON. A logger must never be the reason
+  // a request has no response: fall back to the ERROR-only threshold.
+  var configLevel;
+  try {
+    configLevel = getLogLevel();
+  } catch (e) {
+    configLevel = 'ERROR';
+  }
   // Presence, not truthiness: LOG_LEVELS.DEBUG is 0, so `||` fallbacks here
   // would read a configured DEBUG as "unset" and filter at ERROR instead,
   // silently dropping every DEBUG/INFO line in the one configuration meant

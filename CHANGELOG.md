@@ -851,6 +851,32 @@ that component's heading.
 
 ## Backend
 
+### 1.26.2 — 2026-10-08
+- **A request still gets its error JSON when the Spreadsheet service is what
+  failed.** Every "Failed" `doGet` row in the Apps Script console over
+  2026-10-03..08 had the same stack: the handler threw "Too many simultaneous
+  invocations: Spreadsheets", the catch block called `log()`, `log()` opened
+  the Meta sheet to read `log_level`, the Spreadsheet service threw *again*,
+  and that second throw escaped `doGet`. The execution died as Failed and the
+  client got Google's HTML error page instead of the `{status:'error'}` JSON
+  it knows how to retry. `log()` now falls back to the ERROR-only threshold
+  when the level can't be read, and both `doGet` and `doPost` wrap the log
+  call so the response never depends on it.
+- **A whole-catalog cache miss is rebuilt once, not once per request in
+  flight.** 1.26.1 made every request *after* a scan cheap, but the miss
+  itself was shared by everything that landed on it — a cold landing is feed
+  + Top Week + comments, a search focus is four parallel chunk pages — and
+  each of those ran its own full Videos-sheet scan. Those concurrent scans
+  were the 1,200+ "Too many simultaneous invocations: Spreadsheets" failures
+  in Cloud Logging and, once the service was saturated, the `doGet`
+  executions wedged at the 6-minute limit. `cachedSortedList` now takes the
+  script lock on a miss, re-checks the cache (the holder ahead of it has
+  usually just populated it), and scans only if it is still a miss; waiting
+  on the lock touches no sheet. The wait is bounded
+  (`SORTED_LIST_REBUILD_LOCK_MS`, 30s) and best-effort — past the bound a
+  request scans unshared, exactly the 1.26.1 behaviour. Only the read-only
+  paths reach the guard, none of which hold the (non-reentrant) lock.
+
 ### 1.26.1 — 2026-10-06
 - **The whole sorted catalog is cached, so feed pages past the head and
   search chunks stop re-scanning the Videos sheet.** Every request the 50-row
