@@ -29,7 +29,7 @@
  * flaky near the edge. The expect*Within helpers below are expect.poll with a
  * 25 ms interval: still a native assertion whose timeout IS the budget, just
  * without the dead zone, so the number in the test is the number enforced.
- * (toPass has the same backoff — pass `intervals: BUDGET_INTERVALS` to it.)
+ * (toPass has the same backoff — pass `intervals: budgetIntervals()` to it.)
  * Setup waits (`timeout: 10000` "page loaded" gates) aren't budgets and stay
  * plain locator assertions.
  */
@@ -48,10 +48,16 @@ export const SEARCH_RENDER_LIMIT = CONFIG.SEARCH_RENDER_LIMIT;
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Re-check interval for latency budgets — fine enough that the budget is the timeout. */
-export const BUDGET_INTERVALS = [25];
+/**
+ * Re-check intervals for latency budgets — fine enough that the budget is the
+ * timeout. A function, not a shared constant: Playwright's poller pops the
+ * last entry off the array it is handed, so one shared `[25]` is empty after
+ * the first assertion and every later budget silently reverts to the 1 s
+ * default backoff (found 2026-10-09 when storage T17/T18 failed on merge).
+ */
+export const budgetIntervals = () => [25];
 
-const within = (ms, what) => ({ timeout: ms, intervals: BUDGET_INTERVALS, message: `${what} within ${ms}ms` });
+const within = (ms, what) => ({ timeout: ms, intervals: budgetIntervals(), message: `${what} within ${ms}ms` });
 
 // Non-waiting reads of a single element (null unless exactly one matches, the
 // same strictness as the locator assertions these replace), so each poll is

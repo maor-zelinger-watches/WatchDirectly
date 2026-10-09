@@ -26,7 +26,7 @@ import {
   expectClassWithin,
   expectNoClassWithin,
   expectTextWithin,
-  BUDGET_INTERVALS,
+  budgetIntervals,
 } from './helpers.js';
 
 const chip = (page, label) =>
@@ -54,7 +54,7 @@ async function runJourney(page, budgets) {
   await expect(async () => {
     await scrollToBottom(page);
     expect(await page.locator('.media-card').count()).toBeGreaterThanOrEqual(30);
-  }).toPass({ timeout: budgets.scroll, intervals: BUDGET_INTERVALS });
+  }).toPass({ timeout: budgets.scroll, intervals: budgetIntervals() });
 
   // Stage 3 — apply a content-type filter (pure CSS): chip goes active.
   await chip(page, 'Videos').click();
