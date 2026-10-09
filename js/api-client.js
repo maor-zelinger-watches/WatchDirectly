@@ -9,4 +9,6 @@
 import { createApiClient } from './api.js';
 import { CONFIG } from './config.js';
 
-export const api = createApiClient(CONFIG.APPS_SCRIPT_URL);
+export const api = createApiClient(CONFIG.APPS_SCRIPT_URL, {
+  retryDelaysMs: CONFIG.API_RETRY_DELAYS_MS,
+});

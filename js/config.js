@@ -7,7 +7,7 @@
  */
 
 export const CONFIG = {
-  APP_VERSION: '1.28.2',      // frontend version (npm semver) — bump on every
+  APP_VERSION: '1.34.0',      // frontend version (npm semver) — bump on every
                               // user-visible change; shown in the header and
                               // logged at boot. Backend has its own VERSION
                               // in apps-script/Code.gs; package.json tracks
@@ -29,6 +29,10 @@ export const CONFIG = {
                               // TOP_WEEK_VIEWS_PER_VOTE in apps-script/Code.gs
                               // — keep the two in sync.
   COMMENT_BATCH_SIZE: 10,     // ids per commentsBatch request (backend caps at 20)
+  API_RETRY_DELAYS_MS: [400, 1200], // backoff before each retry of a request that
+                              // failed transiently on Google's side (the /exec →
+                              // googleusercontent echo hop intermittently 404s;
+                              // see api.js requestOnce). One entry per retry.
   SEARCH_CHUNK_SIZE: 100,     // page size for building the search index; the
                               // catalog is fetched in parallel chunks of this
                               // size so results paint as each chunk lands.
@@ -52,6 +56,13 @@ export const CONFIG = {
                               // pulls — a near-empty type must not fetch the
                               // whole catalog in one burst; scrolling (or the
                               // next chip click) continues from where it left off
+  STORAGE_ENGINE_DEFAULT: 'idb', // which engine persists the large cache
+                              // snapshots when a browser has no explicit
+                              // wd_storage_engine flag (js/flags.js):
+                              // 'legacy' = localStorage (the proven path),
+                              // 'idb' = IndexedDB. Rolling IndexedDB out to
+                              // everyone is flipping this one value; browsers
+                              // that set the flag explicitly keep their choice
   FILTER_ZERO_YIELD_MAX_PAGES: 5, // consecutive fetched pages that add NO card
                               // the active content-type chip leaves visible
                               // before the sentinel-retrigger parks. The chips

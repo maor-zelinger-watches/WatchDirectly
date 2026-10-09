@@ -23,9 +23,9 @@ import { observeLazyIframe } from './lazy-iframe.js';
  * observing must happen after insertion so the first intersection
  * snapshot already sees an attached, visible element.
  */
-export function buildCard(video) {
+export function buildCard(video, opts) {
   const wrapper = document.createElement('div');
-  wrapper.innerHTML = createMediaCard(video);
+  wrapper.innerHTML = createMediaCard(video, opts);
   const card = wrapper.firstElementChild;
 
   // Cache the parsed publish time on the element (FE17). Chronological insert
@@ -159,12 +159,25 @@ export function insertCardChronologically(container, card) {
  * animated shorts reveal is reserved for the Latest feed's network loads
  * (appendCards in app.js).
  */
+/**
+ * How many cards of a fresh paint load their preview image eagerly at high
+ * fetch priority (createMediaCard `priority`). Two covers the first screen on
+ * a phone with margin; the rest stay lazy so a slow link spends its bandwidth
+ * on what is visible first. Measured 2026-10-07 on Slow 4G: the LCP image
+ * took 1.3s after the cards appeared while sharing the link with five others.
+ */
+export const FIRST_PAINT_PRIORITY_CARDS = 2;
+
 export function renderList(container, videos) {
-  for (const video of videos) {
-    const card = buildCard(video);
+  // A fresh paint into an empty container: its first cards are the first
+  // screen, so their preview images load eagerly at high priority (the LCP
+  // candidate). Re-renders into a populated container get no such head start.
+  const priorityUntil = container.childElementCount === 0 ? FIRST_PAINT_PRIORITY_CARDS : 0;
+  videos.forEach((video, i) => {
+    const card = buildCard(video, { priority: i < priorityUntil });
     container.appendChild(card);
     observeLazyIframe(card);
-  }
+  });
 }
 
 /**

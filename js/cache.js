@@ -1,9 +1,9 @@
 /**
  * cache.js — Client-side persistence for How You Watch
  *
- * Single owner of every localStorage key the feed writes. Import from
- * here instead of touching localStorage directly, so cache behavior is
- * testable in isolation and storage failures are handled in one place.
+ * Single owner of every key the feed persists. Import from here instead of
+ * touching storage directly, so cache behavior is testable in isolation and
+ * storage failures are handled in one place.
  *
  * Guarantees:
  * - Reads self-heal: a corrupt or invalid payload is cleared and reported
@@ -11,16 +11,35 @@
  * - Writes never throw: quota errors and private-browsing restrictions
  *   degrade to "no cache" (the app re-fetches), not a crash.
  *
- * Keys owned here:
- * - wd_feed_cache   — page-1 feed snapshot {videos, total} (stale-while-revalidate)
- * - wd_search_index — full catalog for search {videos} (stale-while-revalidate)
- * - wd_top_cache    — Top This Week first-page snapshot {videos, total, cursor}
- * - wd_channels     — curated creator list {creators} (small, fully cached)
- * - wd_my_stars     — starred channel names, instant paint before server reconcile
- * - wd_my_bookmarks — bookmarked video ids, instant paint before server reconcile
- * - wd_filter_types — persisted content-type chip selection ([] = "All")
- * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.)
+ * Two tiers:
+ * - Large snapshots are ASYNC and live in the engine the storage-engine flag
+ *   picks for this page load (js/flags.js): localStorage in 'legacy' mode (the
+ *   default), IndexedDB in 'idb' mode, falling back to localStorage when
+ *   IndexedDB won't open or stalls (storage.js):
+ *   - wd_feed_cache   — the feed the user scrolled {videos, total} (stale-while-revalidate)
+ *   - wd_search_index — full catalog for search {videos} (stale-while-revalidate)
+ *   - wd_top_cache    — Top This Week first-page snapshot {videos, total, cursor}
+ *   - wd_channels     — curated creator list {creators}
+ * - Small preferences stay in localStorage and stay SYNCHRONOUS: they're a few
+ *   bytes, and the first paint needs them before any await (star/bookmark
+ *   marks on the very first cards, the chip selection before the first render):
+ *   - wd_my_stars     — starred channel names, instant paint before server reconcile
+ *   - wd_my_bookmarks — bookmarked video ids, instant paint before server reconcile
+ *   - wd_filter_types — persisted content-type chip selection ([] = "All")
+ * ('wd_user' is the auth session, owned by auth.js — a credential, not a cache.
+ * 'wd_storage_engine' is the engine flag, owned by flags.js — never a cache, so
+ * no cache clear may touch it.)
+ *
+ * Why IndexedDB exists: localStorage's per-origin cap varies by browser,
+ * and in WebKit (Safari's engine) the full search index — 3.4M characters on
+ * production in Sep 2026 — exceeded it. write() swallows the quota error by
+ * design, so the index silently never persisted there and every returning
+ * session re-walked the whole catalog (43 requests). IndexedDB stores it by
+ * structured clone, under a quota that's a share of the disk.
  */
+
+import { pickEngine } from './storage.js';
+import { storageEngine } from './flags.js';
 
 export const CACHE_KEYS = {
   FEED: 'wd_feed_cache',
@@ -90,53 +109,186 @@ function isFresh(data) {
     && (Date.now() - data.savedAt) <= CACHE_MAX_AGE_MS;
 }
 
-// --- feed cache (stale-while-revalidate snapshot) --------------------
 
-/**
- * Loads the cached page-1 feed.
- * Returns {videos, total} or null. Payloads that are corrupt JSON, stale
- * (wrong version or older than the TTL), or invalid (non-array videos,
- * missing/zero total — pagination math needs it) are cleared and reported
- * as absent.
- */
-export function loadFeedCache() {
-  const raw = read(CACHE_KEYS.FEED);
-  if (!raw) return null;
+// --- snapshot storage (IndexedDB or localStorage, async) -------------
 
+// Which engines each mode may use, most preferred first (storage.js
+// pickEngine). The mode is the per-browser flag in js/flags.js, read once per
+// page load.
+//
+//   legacy — localStorage only: exactly the storage that shipped before the
+//            IndexedDB engine. IndexedDB is never probed, opened or created,
+//            which is what makes this mode a safe kill switch.
+//   idb    — IndexedDB, falling back to localStorage for the rest of the page
+//            load when IndexedDB won't open or stalls (storage.js).
+export const LEGACY_PREFERENCE = Object.freeze(['local']);
+export const IDB_PREFERENCE = Object.freeze(['idb', 'local']);
+
+/** The engine preference for this page load's storage mode. */
+export function enginePreference() {
+  return storageEngine().engine === 'idb' ? IDB_PREFERENCE : LEGACY_PREFERENCE;
+}
+
+// Per-key operation queue. Saves are fire-and-forget, so two in flight for the
+// same key (a page save, then a vote's coalesced save) could otherwise land out
+// of order and persist the older snapshot. Chaining every read, write and
+// clear of a key keeps them in call order: last call wins, and a load always
+// sees the writes issued before it. Every engine call is time-bounded
+// (storage.js), so one stuck call can't wedge the queue behind it.
+const queues = new Map();
+
+function serialize(key, op) {
+  const run = (queues.get(key) || Promise.resolve()).then(op);
+  queues.set(key, run.then(() => {}, () => {}));
+  return run;
+}
+
+// Seam for unit tests: resolves once every queued snapshot operation settles.
+export const __test__ = {
+  settled: () => Promise.all([...queues.values()]),
+};
+
+const CORRUPT = Symbol('corrupt');
+const TIMED_OUT = Symbol('timed-out');
+
+function parseLegacy(text) {
   try {
-    const data = JSON.parse(raw);
-    if (!isFresh(data)) {
-      remove(CACHE_KEYS.FEED);
-      return null;
-    }
-    const videos = Array.isArray(data.videos) ? data.videos : [];
-    if (videos.length === 0 || typeof data.total !== 'number' || data.total === 0) {
-      remove(CACHE_KEYS.FEED);
-      return null;
-    }
-    return { videos, total: data.total };
+    return JSON.parse(text);
   } catch (e) {
-    remove(CACHE_KEYS.FEED);
-    return null;
+    return CORRUPT;
   }
 }
 
-/** Saves the page-1 feed snapshot. Best-effort — quota failures are silent. */
+/**
+ * Loads one snapshot and runs it through `normalize`, which returns the value
+ * to hand back or null when the payload is stale or invalid. Anything that
+ * doesn't normalize is deleted so the next load starts clean.
+ *
+ * When the engine in use is IndexedDB, a copy found in localStorage is always
+ * the NEWER one: this mode deletes it on every load and save of the key, so it
+ * can only be there because legacy mode (after a flag flip, or in another tab)
+ * or an older build wrote it since. It wins, is written through to IndexedDB,
+ * and is removed from localStorage only once that write has landed — a failed
+ * migration keeps the copy for the next load instead of losing it.
+ *
+ * A read that times out is "no snapshot this load", never corruption: nothing
+ * is deleted over it.
+ *
+ * @param {string} key
+ * @param {function(Object): (any|null)} normalize
+ * @returns {Promise<any|null>}
+ */
+function loadSnapshot(key, normalize) {
+  return serialize(key, async () => {
+    const engine = await pickEngine(enginePreference());
+    if (!engine) return null;
+
+    if (engine.name !== 'local') {
+      const text = read(key);
+      if (text !== null) {
+        const legacy = parseLegacy(text);
+        const result = legacy === CORRUPT ? null : normalize(legacy);
+        if (result !== null) {
+          try {
+            await engine.set(key, legacy);
+            remove(key);
+          } catch (e) {
+            /* keep the localStorage copy — the next load retries */
+          }
+          return result;
+        }
+        remove(key); // corrupt or stale — nothing worth keeping
+      }
+    }
+
+    let data;
+    try {
+      data = await engine.get(key);
+    } catch (e) {
+      data = e && e.name === 'StorageTimeoutError' ? TIMED_OUT : CORRUPT;
+    }
+    if (data === null || data === TIMED_OUT) return null;
+
+    const result = data === CORRUPT ? null : normalize(data);
+    if (result === null) {
+      await engine.del(key).catch(() => {});
+      return null;
+    }
+    return result;
+  }).catch(() => null);
+}
+
+/** Persists one snapshot. Resolves true once written, false on any failure. */
+function saveSnapshot(key, value) {
+  return serialize(key, async () => {
+    const engine = await pickEngine(enginePreference());
+    if (!engine) return false;
+    await engine.set(key, value);
+    if (engine.name !== 'local') remove(key); // never leave a stale copy behind
+    return true;
+  }).catch(() => false);
+}
+
+/**
+ * Deletes one snapshot from localStorage and, in idb mode, from IndexedDB.
+ * Legacy mode never touches IndexedDB, not even to delete.
+ */
+function removeSnapshot(key) {
+  return serialize(key, async () => {
+    remove(key);
+    const engine = await pickEngine(enginePreference());
+    if (engine && engine.name !== 'local') await engine.del(key);
+  }).catch(() => {});
+}
+
+/**
+ * Rows persisted without the memoized search tokens. feed.js searchFields()
+ * caches each row's tokens on the row itself (`_searchFields`) as an ordinary
+ * property, so it would otherwise be stored alongside every row — roughly
+ * doubling the payload for data that is recomputed on demand anyway.
+ */
+function persistableRows(videos) {
+  if (!Array.isArray(videos)) return videos;
+  return videos.map((v) => {
+    if (!v || typeof v !== 'object' || !('_searchFields' in v)) return v;
+    const { _searchFields, ...row } = v;
+    return row;
+  });
+}
+
+// --- feed cache (stale-while-revalidate snapshot) --------------------
+
+/**
+ * Loads the cached feed.
+ * Resolves {videos, total} or null. Payloads that are corrupt, stale (wrong
+ * version or older than the TTL), or invalid (non-array videos, missing/zero
+ * total — pagination math needs it) are cleared and reported as absent.
+ */
+export function loadFeedCache() {
+  return loadSnapshot(CACHE_KEYS.FEED, (data) => {
+    if (!isFresh(data)) return null;
+    const videos = Array.isArray(data.videos) ? data.videos : [];
+    if (videos.length === 0 || typeof data.total !== 'number' || data.total === 0) return null;
+    return { videos, total: data.total };
+  });
+}
+
+/** Saves the feed snapshot. Best-effort — resolves false on any failure. */
 export function saveFeedCache(videos, total) {
-  return write(CACHE_KEYS.FEED, JSON.stringify(stamp({ videos, total })));
+  return saveSnapshot(CACHE_KEYS.FEED, stamp({ videos: persistableRows(videos), total }));
 }
 
 export function clearFeedCache() {
-  remove(CACHE_KEYS.FEED);
   cancelPendingFeedSnapshot();
+  return removeSnapshot(CACHE_KEYS.FEED);
 }
 
 // Coalesced, capped feed-cache write for the hot path (votes/comments).
 //
-// A full JSON.stringify of the accumulated feed on every vote/comment (twice
-// per vote, counting the reconcile) is wasted work: the restore only needs the
-// top pages, and back-to-back mutations each re-serialize the whole list. So
-// this defers the write to an idle callback (falling back to a trailing timer),
+// Serializing the accumulated feed on every vote/comment (twice per vote,
+// counting the reconcile) is wasted work: the restore only needs the top
+// pages, and back-to-back mutations each re-serialize the whole list. So this
+// defers the write to an idle callback (falling back to a trailing timer),
 // keeps only the LATEST snapshot, and caps it to the first N items.
 export const FEED_CACHE_SNAPSHOT_MAX = 60; // ~6 pages at PAGE_SIZE 10; the deep
                                            // tail re-fetches on scroll
@@ -192,122 +344,87 @@ export function saveFeedCacheSoon(videos, total) {
 
 /**
  * Loads the cached search index (the whole catalog).
- * Returns an array of videos, or null when absent/corrupt/stale. A payload
+ * Resolves an array of videos, or null when absent/corrupt/stale. A payload
  * that's the wrong version, older than the TTL, or non-array/empty is cleared
  * and reported as absent so search rebuilds. (A stale-version catalog would
  * otherwise run the whole session as the search corpus — see the module doc.)
  */
 export function loadSearchIndex() {
-  const raw = read(CACHE_KEYS.SEARCH_INDEX);
-  if (!raw) return null;
-
-  try {
-    const data = JSON.parse(raw);
-    if (!isFresh(data)) {
-      remove(CACHE_KEYS.SEARCH_INDEX);
-      return null;
-    }
+  return loadSnapshot(CACHE_KEYS.SEARCH_INDEX, (data) => {
+    if (!isFresh(data)) return null;
     const videos = Array.isArray(data.videos) ? data.videos : null;
-    if (!videos || videos.length === 0) {
-      remove(CACHE_KEYS.SEARCH_INDEX);
-      return null;
-    }
-    return videos;
-  } catch (e) {
-    remove(CACHE_KEYS.SEARCH_INDEX);
-    return null;
-  }
+    return videos && videos.length > 0 ? videos : null;
+  });
 }
 
 /**
- * Saves the full search index. Best-effort — the catalog can be large, so a
- * quota failure just leaves search to rebuild from the network next session.
+ * Saves the full search index. Best-effort — resolves false on any failure,
+ * which just leaves search to rebuild from the network next session.
  */
 export function saveSearchIndex(videos) {
-  if (!Array.isArray(videos) || videos.length === 0) return false;
-  return write(CACHE_KEYS.SEARCH_INDEX, JSON.stringify(stamp({ videos })));
+  if (!Array.isArray(videos) || videos.length === 0) return Promise.resolve(false);
+  return saveSnapshot(CACHE_KEYS.SEARCH_INDEX, stamp({ videos: persistableRows(videos) }));
 }
 
 export function clearSearchIndex() {
-  remove(CACHE_KEYS.SEARCH_INDEX);
+  return removeSnapshot(CACHE_KEYS.SEARCH_INDEX);
 }
 
 // --- Top This Week (first-page snapshot, stale-while-revalidate) -----
 
 /**
  * Loads the cached Top This Week first page.
- * Returns {videos, total, cursor} or null. Only the first ranked page is
+ * Resolves {videos, total, cursor} or null. Only the first ranked page is
  * cached — deeper pages are re-fetched on scroll — so the payload stays small
  * and the revalidate can fully reconcile (add/remove/reorder) the window it
- * covers. Invalid payloads (corrupt JSON, empty videos) are cleared.
+ * covers. Invalid payloads (corrupt, empty videos) are cleared.
  * `cursor` may be '' (end of the week) or a string; both are valid.
  */
 export function loadTopCache() {
-  const raw = read(CACHE_KEYS.TOP);
-  if (!raw) return null;
-
-  try {
-    const data = JSON.parse(raw);
+  return loadSnapshot(CACHE_KEYS.TOP, (data) => {
     const videos = Array.isArray(data.videos) ? data.videos : [];
-    if (videos.length === 0) {
-      remove(CACHE_KEYS.TOP);
-      return null;
-    }
+    if (videos.length === 0) return null;
     return {
       videos,
       total: typeof data.total === 'number' ? data.total : videos.length,
       cursor: typeof data.cursor === 'string' ? data.cursor : undefined,
     };
-  } catch (e) {
-    remove(CACHE_KEYS.TOP);
-    return null;
-  }
+  });
 }
 
-/** Saves the Top first-page snapshot. Best-effort — quota failures are silent. */
+/** Saves the Top first-page snapshot. Best-effort — resolves false on failure. */
 export function saveTopCache(videos, total, cursor) {
-  if (!Array.isArray(videos) || videos.length === 0) return false;
-  return write(CACHE_KEYS.TOP, JSON.stringify({ videos, total, cursor }));
+  if (!Array.isArray(videos) || videos.length === 0) return Promise.resolve(false);
+  return saveSnapshot(CACHE_KEYS.TOP, { videos: persistableRows(videos), total, cursor });
 }
 
 export function clearTopCache() {
-  remove(CACHE_KEYS.TOP);
+  return removeSnapshot(CACHE_KEYS.TOP);
 }
 
 // --- Channels (curated creator list, fully cached) -------------------
 
 /**
  * Loads the cached creator list.
- * Returns an array of creators, or null when absent/corrupt. The list is
+ * Resolves an array of creators, or null when absent/corrupt. The list is
  * small and curated, so the whole thing is cached; a non-array or empty
  * payload is cleared and reported as absent so the tab rebuilds from network.
  */
 export function loadChannelsCache() {
-  const raw = read(CACHE_KEYS.CHANNELS);
-  if (!raw) return null;
-
-  try {
-    const data = JSON.parse(raw);
+  return loadSnapshot(CACHE_KEYS.CHANNELS, (data) => {
     const creators = Array.isArray(data) ? data : (Array.isArray(data.creators) ? data.creators : null);
-    if (!creators || creators.length === 0) {
-      remove(CACHE_KEYS.CHANNELS);
-      return null;
-    }
-    return creators;
-  } catch (e) {
-    remove(CACHE_KEYS.CHANNELS);
-    return null;
-  }
+    return creators && creators.length > 0 ? creators : null;
+  });
 }
 
-/** Saves the creator list. Best-effort — quota failures are silent. */
+/** Saves the creator list. Best-effort — resolves false on failure. */
 export function saveChannelsCache(creators) {
-  if (!Array.isArray(creators) || creators.length === 0) return false;
-  return write(CACHE_KEYS.CHANNELS, JSON.stringify({ creators }));
+  if (!Array.isArray(creators) || creators.length === 0) return Promise.resolve(false);
+  return saveSnapshot(CACHE_KEYS.CHANNELS, { creators });
 }
 
 export function clearChannelsCache() {
-  remove(CACHE_KEYS.CHANNELS);
+  return removeSnapshot(CACHE_KEYS.CHANNELS);
 }
 
 // --- starred creators (instant paint, reconciled by the server) ------

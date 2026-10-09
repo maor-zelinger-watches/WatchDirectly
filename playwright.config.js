@@ -30,6 +30,17 @@ export default defineConfig({
 
   use: {
     baseURL: 'http://localhost:3099',
+    // Every context starts with the cookie banner already answered, so the
+    // fixed banner never sits over cards/buttons the specs click. The banner
+    // itself is covered by tests/unit/analytics.test.js and
+    // tests/e2e/cookie_banner.spec.js (which opts back out of this).
+    storageState: {
+      cookies: [],
+      origins: [{
+        origin: 'http://localhost:3099',
+        localStorage: [{ name: 'wd_analytics_consent', value: 'denied' }],
+      }],
+    },
     viewport: { width: 375, height: 812 }, // iPhone X — mobile-first
     actionTimeout: 5000,
     // Diagnostics kept cheap: full artifacts only when a test actually fails.
@@ -70,6 +81,19 @@ export default defineConfig({
       name: 'smoke',
       testMatch: ['smoke/**/*.spec.js'],
       use: { browserName: 'chromium', video: 'retain-on-failure' },
+    },
+    {
+      // The storage-engine flag's e2e + perf specs on WebKit — Safari's engine,
+      // where localStorage's cap bites first (it halves for non-Latin-1 text).
+      // Explicit only: npm run test:storage:webkit. CI installs Chromium alone,
+      // so no CI job or deploy gate runs this project.
+      name: 'webkit-storage',
+      testMatch: ['e2e/storage_flag.spec.js', 'perf/storage.perf.spec.js'],
+      retries: 0,
+      use: {
+        browserName: 'webkit',
+        viewport: { width: 1280, height: 720 },
+      },
     },
     {
       // Performance suite — desktop viewport, run serially (npm run test:perf).

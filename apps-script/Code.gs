@@ -38,7 +38,7 @@ const SPREADSHEET_IDS = {
 // every JSON response and served via ?action=version, so the live deployment
 // is always identifiable. The frontend has its own APP_VERSION in
 // js/config.js; see CHANGELOG.md at the repo root.
-const VERSION = '1.24.1';
+const VERSION = '1.26.2';
 
 const DEFAULT_REFRESH_HOURS = 4;
 const DEFAULT_PAGE_LIMIT = 20;
@@ -68,8 +68,31 @@ const FEED_HEAD_COUNT = 50;
 const FEED_HEAD_CACHE_KEY = 'feed_head_v1';
 const FEED_HEAD_CACHE_SECONDS = 300;
 
+// Whole-catalog cache: the ENTIRE sorted live catalog, so every request the
+// head cannot answer — cursor pages (page 2+ of the feed), offset pages past
+// the head, and the search index's limit=100 chunks — is a cache read instead
+// of a full Videos-sheet scan + sort. Measured 2026-10-06: a browser's first
+// search focus fired 22 limit=100 feed pages, each a full scan of ~2100 rows
+// (2.4-7.7s, 30s+ under contention); together with every scrolled cursor page
+// those scans were most of the ~590k executions/week that drove the project
+// to Google's simultaneous-executions limit. The payload (~1.2MB) is far past
+// CacheService's 100KB/key cap, so the shared sorted-list cache splits big
+// values into chunks (see cachePutChunked). Same TTL/invalidation as the head:
+// every writer that changes a row bumps the generation, which stales both.
+const CATALOG_CACHE_KEY = 'catalog_sorted_v1';
+const CATALOG_CACHE_SECONDS = 300;
+// Longest a request waits for another execution's in-flight rebuild of a
+// cached sorted list before scanning the sheet itself (see cachedSortedList).
+// Well past a normal scan (2-4s) so waiters coalesce onto one rebuild even on
+// a slow day, but short of the 6-minute execution limit so a wedged holder
+// can never take the waiters down with it.
+const SORTED_LIST_REBUILD_LOCK_MS = 30000;
+// Chunk size for cached values. Chunks are ASCII-escaped before splitting so
+// one char is one byte, keeping each piece comfortably under the 100KB cap.
+const CACHE_CHUNK_CHARS = 90000;
+
 // Short-lived "no such video" marker for the single-video lookup (BE11). A shared
-// deep link to a bogus id otherwise forces handleVideo through readAllVideos() AND
+// deep link to a bogus id otherwise forces handleVideo through readSortedCatalog() AND
 // readSortedArchive() — two full scans — on every hit; a repeated bogus id would
 // re-run both each time. Caching the miss for a few seconds lets a burst of the
 // same bad id short-circuit to not-found without touching the sheets.
@@ -261,7 +284,7 @@ const SIGNATURE_MAX_SKEW_MS = 5 * 60 * 1000;
 // unauthenticated `clientError` telemetry endpoint is likewise omitted (it has
 // its own budgeted rate limits).
 const SIGNED_ACTIONS = {
-  comment: true, vote: true, star: true, bookmark: true, emailConsent: true,
+  comment: true, vote: true, star: true, bookmark: true, emailConsent: true, feedback: true,
   myVotes: true, myStars: true, myBookmarks: true, session: true, bootstrap: true,
 };
 
@@ -402,7 +425,11 @@ function doGet(e) {
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
   } catch (error) {
-    log('ERROR', 'doGet', error.message);
+    // Nothing between here and the response may throw: the log write touches
+    // the Meta and LOGS sheets, and the failure being reported is very often
+    // the Spreadsheet service itself. log() guards its own sheet access, but
+    // the response must not depend on that holding for every future edit.
+    try { log('ERROR', 'doGet', error.message); } catch (e) { /* response first */ }
     // Generic message to the client — the detail is in the log, not the wire.
     return jsonResponse({ status: 'error', message: 'Request failed. Please try again.' });
   }
@@ -437,6 +464,8 @@ function doPost(e) {
         return jsonResponse(handleMyBookmarks(data));
       case 'emailConsent':
         return jsonResponse(handleEmailConsent(data));
+      case 'feedback':
+        return jsonResponse(handleFeedback(data));
       case 'bootstrap':
         return jsonResponse(handleBootstrap(data));
       case 'session':
@@ -478,7 +507,8 @@ function doPost(e) {
         return jsonResponse({ status: 'error', message: 'Unknown action: ' + action });
     }
   } catch (error) {
-    log('ERROR', 'doPost', error.message);
+    // Same contract as doGet: the response never depends on the log write.
+    try { log('ERROR', 'doPost', error.message); } catch (e) { /* response first */ }
     // Generic message to the client — the detail is in the log, not the wire.
     return jsonResponse({ status: 'error', message: 'Request failed. Please try again.' });
   }
@@ -621,12 +651,53 @@ function scheduleRefresh() {
     ScriptApp.newTrigger('kickoffRefresh').timeBased().after(1000).create();
     log('INFO', 'scheduleRefresh', 'Async refresh scheduled');
   } catch (e) {
-    // Log the exception NAME too: a missing script.scriptapp OAuth scope surfaces
-    // here as a permission error, and without the name that failure is invisible —
-    // the async auto-refresh would silently never install its trigger.
-    log('ERROR', 'scheduleRefresh', (e && e.name ? e.name + ': ' : '') + (e && e.message ? e.message : e));
+    var msg = (e && e.message) ? String(e.message) : String(e);
+    // A missing script.scriptapp scope surfaces here as a permission error, and
+    // on this deployment that is the PERMANENT state, not an incident: adding
+    // the scope to oauthScopes puts the ANONYMOUS web app into a
+    // re-authorization state and 403s the live /exec (backend 1.14.3, reverted
+    // in 1.14.4). handleFeed calls scheduleRefresh on EVERY request while the
+    // feed is stale, so logging per occurrence buried the log under one ERROR
+    // per visitor. Report it once an hour at WARN and stay quiet in between.
+    // Match on the scope URL — it is the one part of the message Google does
+    // NOT localize (the text arrives in the script owner's locale, e.g.
+    // Hebrew).
+    if (msg.indexOf('script.scriptapp') !== -1) {
+      if (firstInWindow_('scheduleRefresh:no-scriptapp-scope', 3600)) {
+        log('WARN', 'scheduleRefresh', 'Async refresh unavailable: this deployment has no ' +
+          'script.scriptapp scope, so no refresh trigger can be installed. The 4h scheduled ' +
+          'crawl is unaffected. Suppressing for 1h. (' + msg + ')');
+      }
+      return;
+    }
+    // Anything else: one ERROR per occurrence, with the exception NAME too —
+    // without it a permission failure is invisible and the async auto-refresh
+    // would silently never install its trigger.
+    log('ERROR', 'scheduleRefresh', (e && e.name ? e.name + ': ' : '') + msg);
   } finally {
     lock.releaseLock();
+  }
+}
+
+/**
+ * True the first time `key` is seen in a `seconds`-long window, false for every
+ * call until that window expires — a log-rate limiter for a condition that
+ * recurs on every request. Cache-backed, so it is best-effort by design: an
+ * eviction or a CacheService outage just lets one extra line through, which is
+ * the right direction to fail for a log.
+ *
+ * @param {string} key
+ * @param {number} seconds
+ * @returns {boolean}
+ */
+function firstInWindow_(key, seconds) {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (cache.get(key)) return false;
+    cache.put(key, '1', seconds);
+    return true;
+  } catch (e) {
+    return true; // never let the rate limiter swallow what it is limiting
   }
 }
 
@@ -736,7 +807,18 @@ function scheduledFetchAllFeeds() {
 // RSS FEED FETCHING
 // ============================================================
 
-function fetchAllFeeds() {
+/**
+ * Crawls every enabled channel, or — when onlyFeedUrl is given — just the one
+ * channel whose feed_url matches. The single-feed form backs handleAddChannel:
+ * it is bounded work (one feed fetch) that fits inside a web-app request, so a
+ * newly added channel has content immediately instead of waiting for the 4h
+ * trigger. It shares this function's one-crawl-at-a-time marker, so it can
+ * never append against the same stale dedup snapshot as a running full crawl.
+ *
+ * @param {string} [onlyFeedUrl] - restrict the crawl to this feed_url
+ * @returns {{new_videos:number, errors:number, skipped?:boolean}}
+ */
+function fetchAllFeeds(onlyFeedUrl) {
   // One crawl at a time. Concurrent runs (scheduled trigger + stale-feed
   // web requests) raced each other: both self-initialized columns, both
   // appended rows against the same stale dedup snapshot, and both wrote
@@ -763,7 +845,7 @@ function fetchAllFeeds() {
   }
 
   try {
-    return crawlAllFeeds();
+    return crawlAllFeeds(onlyFeedUrl);
   } finally {
     setMeta('fetch_in_progress', '');
   }
@@ -845,9 +927,15 @@ function handleGetChannels() {
   return { status: 'ok', channels: channels };
 }
 
-function crawlAllFeeds() {
+/**
+ * @param {string} [onlyFeedUrl] - when set, every channel whose feed_url differs
+ *   is skipped, and the whole-catalog bookkeeping (resume index, last_fetch,
+ *   retention pruning) is left to the full crawl that owns it.
+ */
+function crawlAllFeeds(onlyFeedUrl) {
   // Wall-clock deadline (production runtime timing — NOT a test stopwatch).
   var crawlStartMs = new Date().getTime();
+  var targetFeed = onlyFeedUrl ? String(onlyFeedUrl).trim() : '';
 
   var channelsSheet = getSheet('CHANNELS');
   var videosSheet = getSheet('VIDEOS');
@@ -863,6 +951,7 @@ function crawlAllFeeds() {
   // Get existing video IDs for deduplication
   var existingVideos = {};
   var existingRowById = {}; // video_id -> 1-based sheet row, for view-count refresh
+  var existingUrlById = {}; // video_id -> stored url, for the Shorts URL self-heal
   // Existing normalized URLs, keyed exactly as dedupeByUrl keys them
   // (trim().toLowerCase()). A feed that normally parses as XML but hits the
   // regex fallback once produces a DIFFERENT id for every item (parseRss2 hashes
@@ -925,6 +1014,7 @@ function crawlAllFeeds() {
         existingRowById[videoData[i][videoIdCol]] = i + 1;
         if (urlCol0 !== -1 && videoData[i][urlCol0]) {
           existingUrls[String(videoData[i][urlCol0]).trim().toLowerCase()] = true;
+          existingUrlById[videoData[i][videoIdCol]] = String(videoData[i][urlCol0]);
         }
       }
     }
@@ -976,6 +1066,8 @@ function crawlAllFeeds() {
   var pendingNewRows = [];              // rows to append in one batch
   var pendingViewCounts = {};           // 1-based row -> fresh view_count
   var pendingLiveState = {};            // 1-based row -> [live_status, scheduled_start, expires_at]
+  var pendingUrlFixes = {};             // 1-based row -> corrected url (watch?v= -> /shorts/)
+  var videoUrlCol = vHeaders.indexOf('url');
 
   // Resume from where the last budget-truncated crawl left off, wrapping around
   // the channel list, so a slow/dead channel near index 0 can't perpetually
@@ -1023,6 +1115,10 @@ function crawlAllFeeds() {
       continue;
     }
 
+    // Single-feed crawl: skip before the fetch (and before the politeness
+    // sleep at the bottom of the loop), so the pass costs one HTTP request.
+    if (targetFeed && String(feedUrl).trim() !== targetFeed) continue;
+
     try {
       var videos = fetchAndParseFeed(feedUrl, channelName, tier, category);
 
@@ -1035,6 +1131,18 @@ function crawlAllFeeds() {
         var normUrl = video.url ? String(video.url).trim().toLowerCase() : '';
         var urlKnown = normUrl !== '' && existingUrls[normUrl];
         if (!existingVideos[video.video_id] && !urlKnown) {
+          // A Data-API-sourced item carries a synthesized watch URL because
+          // playlistItems.list has no Shorts flag, and the frontend files a
+          // Short purely by its /shorts/ URL. Ask YouTube once, here, for
+          // genuinely new items only — never the whole 15-item window per
+          // crawl. An inconclusive probe keeps the watch URL; the self-heal
+          // below corrects it the next time the RSS feed is reachable.
+          if (video.short_unknown && video.media_type === 'video'
+              && probeYouTubeShort(video.video_id) === true) {
+            video.url = 'https://www.youtube.com/shorts/' + video.video_id;
+            normUrl = video.url.toLowerCase();
+          }
+
           // Post-dedup enrichment: resolve og:image ONLY now that the id/url
           // dedup has confirmed this item is genuinely new. The parsers leave
           // preview_image '' for imageless articles precisely so this page fetch
@@ -1098,6 +1206,15 @@ function crawlAllFeeds() {
             pendingLiveState[existingRow] =
               [video.live_status, video.scheduled_start || '', video.expires_at || ''];
           }
+          // Self-heal: a Short first ingested through the Data API fallback
+          // (RSS blocked that crawl) was stored with a watch URL and so never
+          // files as a Short. When the RSS feed now says /shorts/ for the same
+          // id, upgrade the stored URL in place. Never the reverse — the Data
+          // API path emits watch URLs for everything, so a watch URL arriving
+          // for a stored Short carries no information.
+          if (videoUrlCol !== -1 && isShortsUrl(video.url) && !isShortsUrl(existingUrlById[video.video_id])) {
+            pendingUrlFixes[existingRow] = video.url;
+          }
         }
       }
 
@@ -1147,6 +1264,21 @@ function crawlAllFeeds() {
       vcRange.setValues(vcVals);
     }
 
+    // Shorts URL self-heal: same read-overlay-write as view counts. Text-format
+    // first so the url column can never be written as a live formula (BE9).
+    var ufRows = Object.keys(pendingUrlFixes);
+    if (ufRows.length > 0 && videoUrlCol !== -1) {
+      var ufRange = videosSheet.getRange(2, videoUrlCol + 1, origDataRows, 1);
+      var ufVals = ufRange.getValues();
+      for (var ui = 0; ui < ufRows.length; ui++) {
+        var ufRow = parseInt(ufRows[ui], 10);
+        ufVals[ufRow - 2][0] = pendingUrlFixes[ufRows[ui]];
+      }
+      ufRange.setNumberFormat('@');
+      ufRange.setValues(ufVals);
+      log('INFO', 'fetchAllFeeds', 'Upgraded ' + ufRows.length + ' stored watch URL(s) to /shorts/');
+    }
+
     var lsRows = Object.keys(pendingLiveState);
     if (lsRows.length > 0 && liveStatusCol !== -1) {
       if (scheduledStartCol === liveStatusCol + 1 && expiresAtCol === liveStatusCol + 2) {
@@ -1172,26 +1304,36 @@ function crawlAllFeeds() {
   }
   // ---- end BE6 batched flush ------------------------------------------------
 
-  // Persist where the next crawl should resume: the first channel we didn't
-  // reach when the budget cut us off, or 0 after a completed full pass. This is
-  // normal end-of-crawl finalization (it runs whether we finished or stopped
-  // early — only a hard kill skips it, which is exactly the case the budget
-  // check exists to avoid).
-  setMeta(CRAWL_RESUME_KEY, String(nextResumeIndex));
+  // Whole-catalog bookkeeping, and therefore the full crawl's alone. A
+  // single-feed crawl visited exactly one channel: it has no opinion on where
+  // the next full pass should resume, and last_fetch — which handleFeed reads
+  // as "every feed crawled at" — is still false. Writing either from the
+  // add-channel path would make the next full crawl skip channels and suppress
+  // the staleness signal.
+  var archived = 0;
+  var retired = 0;
+  if (!targetFeed) {
+    // Persist where the next crawl should resume: the first channel we didn't
+    // reach when the budget cut us off, or 0 after a completed full pass. This
+    // is normal end-of-crawl finalization (it runs whether we finished or
+    // stopped early — only a hard kill skips it, which is exactly the case the
+    // budget check exists to avoid).
+    setMeta(CRAWL_RESUME_KEY, String(nextResumeIndex));
 
-  // Update last_fetch timestamp
-  setMeta('last_fetch', new Date().toISOString());
+    // Update last_fetch timestamp
+    setMeta('last_fetch', new Date().toISOString());
 
-  // Archive videos past the retention window so the every-request scan in
-  // readAllVideos stays bounded. Runs before the cache invalidations below so
-  // the head/top-week caches repopulate against the pruned totals.
-  var archived = pruneOldVideos();
+    // Archive videos past the retention window so the every-request scan in
+    // readAllVideos stays bounded. Runs before the cache invalidations below so
+    // the head/top-week caches repopulate against the pruned totals.
+    archived = pruneOldVideos();
 
-  // Second-stage retention: drop archived rows past the hard age cap so the
-  // Archive tab itself stays bounded (pruneOldVideos only ever appends to it).
-  // Takes its own lock, like pruneOldVideos, and invalidates the archive cache
-  // when it removes anything.
-  var retired = pruneOldArchive();
+    // Second-stage retention: drop archived rows past the hard age cap so the
+    // Archive tab itself stays bounded (pruneOldVideos only ever appends to it).
+    // Takes its own lock, like pruneOldVideos, and invalidates the archive cache
+    // when it removes anything.
+    retired = pruneOldArchive();
+  }
 
   // The crawl appended rows and refreshed view counts / live state in place —
   // the cached head and the cached top-week window no longer reflect the sheet.
@@ -1540,7 +1682,10 @@ function extractFeedChannelId(feedUrl) {
  *
  * Produces the same item objects as parseAtom so the rest of crawlAllFeeds is
  * unchanged; view_count is left 0 here and recovered by enrichLiveMetadata
- * (which the crawl already runs on every batch).
+ * (which the crawl already runs on every batch). Unlike the RSS feed, the
+ * playlist carries no Shorts signal, so every item gets a watch URL plus a
+ * short_unknown flag; crawlAllFeeds probes genuinely new ones (see
+ * probeYouTubeShort) and the self-heal corrects the rest on a later RSS crawl.
  *
  * @param {string} channelId - 'UC…' channel id.
  * @param {string} channelName
@@ -1628,7 +1773,10 @@ function parseYouTubeUploads(jsonText, channelName, tier, category) {
       media_type: 'video',
       channel_name: channelName,
       title: title,
+      // Provisional: the playlist can't tell a Short from a long-form upload.
+      // short_unknown asks crawlAllFeeds to probe before persisting a new row.
       url: 'https://www.youtube.com/watch?v=' + videoId,
+      short_unknown: true,
       preview_image: thumb.url || ('https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg'),
       published_at: toIsoDate(published),
       tier: tier,
@@ -1638,6 +1786,54 @@ function parseYouTubeUploads(jsonText, channelName, tier, category) {
   }
 
   return videos;
+}
+
+/** True when a feed/stored URL is YouTube's Shorts form — the frontend's own test. */
+function isShortsUrl(url) {
+  return typeof url === 'string' && url.indexOf('/shorts/') !== -1;
+}
+
+/**
+ * Asks YouTube whether a video is a Short. The Data API exposes no such flag,
+ * but youtube.com/shorts/<id> answers 200 for a real Short and 303s to
+ * /watch?v=<id> for anything else (Apps Script's user agent first gets a 302
+ * to m.youtube.com, which then answers the same way; an unknown id is a 404).
+ * Redirects are walked manually, one hop at a time, so the Location header is
+ * what decides and the fetch can never be steered off youtube.com.
+ *
+ * Costs one or two UrlFetchApp calls. The caller runs it only for genuinely
+ * new Data-API items, never for the whole upload window on every crawl.
+ *
+ * @param {string} videoId - 11-char YouTube id.
+ * @returns {boolean|null} true = Short, false = not a Short, null = unknown
+ *   (404, 5xx, unexpected redirect, network error) — caller leaves the URL alone.
+ */
+function probeYouTubeShort(videoId) {
+  if (!/^[\w-]{11}$/.test(String(videoId || ''))) return null;
+  var url = 'https://www.youtube.com/shorts/' + videoId;
+  var maxHops = 3;
+  try {
+    for (var hop = 0; hop <= maxHops; hop++) {
+      var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: false });
+      var code = response.getResponseCode();
+      if (code === 200) return true;
+      if (code < 300 || code >= 400) return null;
+
+      var headers = response.getAllHeaders() || {};
+      var location = headers['Location'] || headers['location'] || '';
+      if (Array.isArray(location)) location = location[0] || '';
+      if (location.charAt(0) === '/' && location.charAt(1) !== '/') {
+        location = url.match(/^https:\/\/[^/?#]+/i)[0] + location;
+      }
+      if (!/^https:\/\/(www\.|m\.)?youtube\.com\//i.test(location)) return null;
+      if (/\/watch(\?|$)/.test(location)) return false;
+      if (!isShortsUrl(location)) return null;
+      url = location;
+    }
+  } catch (e) {
+    log('WARN', 'probeYouTubeShort', videoId + ': ' + e.message);
+  }
+  return null;
 }
 
 function extractYouTubeId(url) {
@@ -2700,12 +2896,12 @@ function parseRegex(xml, channelName, tier, category) {
  *
  * Resolves the submitted URL through the same SSRF-guarded resolver the sheet
  * flow uses, refuses duplicates (by channel id, feed URL, or site URL), appends
- * one fully-enriched, enabled row, and schedules an async crawl so the new
- * channel's content shows up within minutes instead of at the next 4h cycle.
+ * one fully-enriched, enabled row, and crawls that one feed inline so the new
+ * channel's content is there immediately instead of at the next 4h cycle.
  *
  * @param {{url:string}} data
- * @returns {Object} { status:'ok', channel:{channel_name, platform, feed_url,
- *   avatar} } on success, else { status:'error', message }
+ * @returns {Object} { status:'ok', new_items:number, channel:{channel_name,
+ *   platform, feed_url, avatar} } on success, else { status:'error', message }
  */
 function handleAddChannel(data) {
   var rawUrl = String(data.url || '').trim();
@@ -2757,11 +2953,31 @@ function handleAddChannel(data) {
   log('INFO', 'handleAddChannel', 'Added ' + (info.channel_name || normUrl) +
     ' (' + (info.media_type === 'video' ? 'youtube' : 'article') + ')');
 
-  // Best-effort: the row is saved either way; the 4h cycle covers a failure.
-  try { scheduleRefresh(); } catch (e) { /* logged inside scheduleRefresh */ }
+  // Crawl JUST this feed, inline, so the channel has content the moment it is
+  // added. This used to call scheduleRefresh(), but that path has never worked
+  // on this deployment: installing a trigger needs the script.scriptapp scope,
+  // which the ANONYMOUS web app deliberately does not carry (see
+  // scheduleRefresh), so every add silently fell through to the 4h trigger.
+  // One feed fetch is bounded work, well inside the request budget, and
+  // fetchAllFeeds' own in-progress marker keeps this off a running full crawl.
+  // Best-effort: the row is saved either way, and the 4h cycle still covers a
+  // failure or a skip.
+  var newItems = 0;
+  try {
+    // The row was appended through the Sheets API above; flush so the crawl's
+    // own read of CHANNELS sees it rather than a pre-append snapshot.
+    SpreadsheetApp.flush();
+    var crawl = fetchAllFeeds(info.feed_url);
+    newItems = (crawl && crawl.new_videos) || 0;
+    log('INFO', 'handleAddChannel', 'Initial crawl of ' + info.feed_url + ': ' +
+      (crawl && crawl.skipped ? 'skipped (a crawl is already running)' : newItems + ' new item(s)'));
+  } catch (e) {
+    log('ERROR', 'handleAddChannel', 'Initial crawl failed for ' + info.feed_url + ': ' + e.message);
+  }
 
   return {
     status: 'ok',
+    new_items: newItems,
     channel: {
       channel_name: info.channel_name || '',
       platform: info.media_type === 'video' ? 'youtube' : 'article',
@@ -2783,6 +2999,30 @@ function handleAddChannel(data) {
 function readAllVideos() {
   var sheet = getSheet('VIDEOS');
   return normalizeVideoRows(sheet.getDataRange().getValues());
+}
+
+/**
+ * The whole live catalog, sorted newest-first, from the chunked CacheService
+ * snapshot — or from one sheet scan that then populates it for every caller
+ * in the next CATALOG_CACHE_SECONDS. This is what the read-only handlers
+ * (feed pages past the head, cursor pages, search chunks, Top This Week's
+ * window, deep-link lookups) read instead of readAllVideos(), so a burst of
+ * requests costs one scan rather than one scan each.
+ *
+ * Returns the cached payload shape: { videos, total, gen, [fresh] }. `fresh`
+ * is set only on the call that produced the snapshot (never persisted), so a
+ * caller can refresh derived caches — the feed head — exactly once per scan.
+ * Expired provisional rows (a premiere/live item whose expires_at lapsed)
+ * make the snapshot a miss, like the head: the scan drops them.
+ *
+ * @returns {{videos: Object[], total: number, gen: number, fresh?: boolean}}
+ */
+function readSortedCatalog() {
+  return cachedSortedList(CATALOG_CACHE_KEY, CATALOG_CACHE_SECONDS, function() {
+    var videos = readAllVideos();
+    videos.sort(compareVideos);
+    return videos;
+  }, { total: true, checkExpiry: true });
 }
 
 /**
@@ -2905,7 +3145,7 @@ function bumpCacheGeneration() {
 function readCachedSortedList(key, options) {
   options = options || {};
   try {
-    var raw = CacheService.getScriptCache().get(key);
+    var raw = cacheGetChunked(CacheService.getScriptCache(), key);
     if (!raw) return null;
     var payload = JSON.parse(raw);
     if (!payload || !Array.isArray(payload.videos)) return null;
@@ -2944,11 +3184,86 @@ function putCachedSortedList(key, ttlSeconds, payload, capturedGen) {
   try {
     if (capturedGen !== currentCacheGeneration()) return false;
     payload.gen = capturedGen;
-    CacheService.getScriptCache().put(key, JSON.stringify(payload), ttlSeconds);
+    cachePutChunked(CacheService.getScriptCache(), key, JSON.stringify(payload), ttlSeconds, capturedGen);
     return true;
   } catch (e) {
     return false;
   }
+}
+
+/**
+ * Stores a JSON string in CacheService, splitting values past the 100KB/key cap
+ * into chunks. Small values go under `key` as-is (so nothing changes for the
+ * feed head and Top This Week). A big value is first escaped to pure ASCII so
+ * one char is one byte (CacheService counts bytes; a Hebrew or emoji title is
+ * 2-4 bytes per char), cut into CACHE_CHUNK_CHARS pieces stored under
+ * `key.<tag>.<i>`, and then — last, so a reader never sees a manifest before
+ * its chunks exist — a manifest `{__chunks, tag, len}` goes under `key`. The
+ * tag (the generation the payload was stamped with) is part of the chunk keys,
+ * so a reader can never stitch chunks from two different snapshots together.
+ * Chunks from a superseded snapshot just age out with their TTL. Throws on
+ * failure like a plain put; callers already treat that as "not cached".
+ */
+function cachePutChunked(cache, key, json, ttlSeconds, tag) {
+  if (json.length <= CACHE_CHUNK_CHARS && !/[\u007f-\uffff]/.test(json)) {
+    cache.put(key, json, ttlSeconds);
+    return;
+  }
+  var ascii = json.replace(/[\u007f-\uffff]/g, function(c) {
+    return '\\u' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4);
+  });
+  if (ascii.length <= CACHE_CHUNK_CHARS) {
+    cache.put(key, ascii, ttlSeconds);
+    return;
+  }
+  var n = Math.ceil(ascii.length / CACHE_CHUNK_CHARS);
+  var parts = {};
+  for (var i = 0; i < n; i++) {
+    parts[chunkKey_(key, tag, i)] = ascii.substr(i * CACHE_CHUNK_CHARS, CACHE_CHUNK_CHARS);
+  }
+  if (typeof cache.putAll === 'function') {
+    cache.putAll(parts, ttlSeconds);
+  } else {
+    for (var k in parts) cache.put(k, parts[k], ttlSeconds);
+  }
+  cache.put(key, JSON.stringify({ __chunks: n, tag: tag, len: ascii.length }), ttlSeconds);
+}
+
+/**
+ * Reads a value stored by cachePutChunked: a plain value comes back as-is; a
+ * manifest is expanded by fetching its chunks (one getAll) and checking every
+ * piece is present and the total length matches. Any gap — a chunk evicted
+ * early, a half-written snapshot — yields null, which every caller treats as
+ * a miss and re-derives from the sheet.
+ */
+function cacheGetChunked(cache, key) {
+  var raw = cache.get(key);
+  if (!raw) return null;
+  if (raw.indexOf('{"__chunks"') !== 0) return raw;
+  var manifest = JSON.parse(raw);
+  var n = manifest.__chunks;
+  if (typeof n !== 'number' || n < 1) return null;
+  var keys = [];
+  for (var i = 0; i < n; i++) keys.push(chunkKey_(key, manifest.tag, i));
+  var parts;
+  if (typeof cache.getAll === 'function') {
+    parts = cache.getAll(keys) || {};
+  } else {
+    parts = {};
+    for (var j = 0; j < keys.length; j++) parts[keys[j]] = cache.get(keys[j]);
+  }
+  var out = '';
+  for (var m = 0; m < keys.length; m++) {
+    var piece = parts[keys[m]];
+    if (typeof piece !== 'string' || !piece) return null;
+    out += piece;
+  }
+  if (typeof manifest.len === 'number' && out.length !== manifest.len) return null;
+  return out;
+}
+
+function chunkKey_(key, tag, i) {
+  return key + '.' + String(tag) + '.' + i;
 }
 
 /**
@@ -2974,16 +3289,55 @@ function cachedSortedList(key, ttlSeconds, producer, options) {
   });
   if (cached) return cached;
 
-  // Capture the generation BEFORE reading the sheet: an invalidate that lands
-  // during the scan advances it past this value, and putCachedSortedList then
-  // refuses the now-stale snapshot.
-  var gen = currentCacheGeneration();
-  var videos = producer();
-  var cap = options.cap || 0;
-  var payload = { videos: cap > 0 ? videos.slice(0, cap) : videos, gen: gen };
-  if (options.total) payload.total = videos.length;
-  putCachedSortedList(key, ttlSeconds, payload, gen);
-  return payload;
+  // Stampede guard. A miss is shared by every request in flight at that
+  // moment — one visitor's landing is feed + Top Week + comments, a search
+  // focus is 4 parallel chunk pages — and before this each of them ran its own
+  // full sheet scan. Those concurrent scans are what tripped "Too many
+  // simultaneous invocations: Spreadsheets" (1,200+ failures, 2026-10-03..08)
+  // and, once the service was saturated, wedged executions at the 6-minute
+  // limit. So: take the script lock, re-check the cache (the holder before us
+  // most likely populated it), and scan only if it is still a miss. Waiting on
+  // the lock touches no sheet, so waiters cost the Spreadsheet service nothing.
+  //
+  // Bounded and best-effort: if the lock can't be had within
+  // SORTED_LIST_REBUILD_LOCK_MS the request falls through to its own scan, which
+  // is exactly the pre-guard behaviour — never worse, just unshared. The lock is
+  // the same script lock the writers use, and LockService is not reentrant, so
+  // this must only ever run on the read-only paths (getVideos, handleTopWeek,
+  // handleVideo, handleArchive), none of which hold it. A writer that lands
+  // while a scan holds the lock waits a normal scan's few seconds at most.
+  var lock = null;
+  try {
+    lock = LockService.getScriptLock();
+    lock.waitLock(SORTED_LIST_REBUILD_LOCK_MS);
+  } catch (e) {
+    lock = null; // contended past the bound (or no LockService): scan unshared
+  }
+  try {
+    if (lock) {
+      cached = readCachedSortedList(key, {
+        requireTotal: !!options.total,
+        checkExpiry: !!options.checkExpiry,
+      });
+      if (cached) return cached;
+    }
+
+    // Capture the generation BEFORE reading the sheet: an invalidate that lands
+    // during the scan advances it past this value, and putCachedSortedList then
+    // refuses the now-stale snapshot.
+    var gen = currentCacheGeneration();
+    var videos = producer();
+    var cap = options.cap || 0;
+    var payload = { videos: cap > 0 ? videos.slice(0, cap) : videos, gen: gen };
+    if (options.total) payload.total = videos.length;
+    putCachedSortedList(key, ttlSeconds, payload, gen);
+    payload.fresh = true; // this call paid the scan (never persisted — set after the put)
+    return payload;
+  } finally {
+    if (lock) {
+      try { lock.releaseLock(); } catch (e) { /* already released or lost — nothing to hold */ }
+    }
+  }
 }
 
 /**
@@ -3094,7 +3448,8 @@ function handleVideo(params) {
 
   // Not-found short-circuit (BE11): a recent lookup that resolved to nothing is
   // remembered briefly, so a burst of the same bogus id can't repeatedly force
-  // the full readAllVideos() + readSortedArchive() scans below. Best-effort, and
+  // the readSortedCatalog() + readSortedArchive() reads below (each a sheet
+  // scan when its cache is cold). Best-effort, and
   // only for ids short enough to be a safe cache key. Keyed by id — a video that
   // later appears is a cache miss until this marker's short TTL lapses, which is
   // acceptable for a deep-link lookup.
@@ -3121,7 +3476,7 @@ function handleVideo(params) {
 
   var head = readFeedHead();
   var video = head ? findIn(head.videos) : null;
-  if (!video) video = findIn(readAllVideos());
+  if (!video) video = findIn(readSortedCatalog().videos);
   if (!video) video = findIn(readSortedArchive());
 
   // Cache the miss so the next lookup of this id skips both full scans.
@@ -3226,26 +3581,27 @@ function getVideos(page, limit, cursor) {
     }
   }
 
-  // Capture the generation BEFORE the sheet read so a vote/comment/crawl that
-  // invalidates mid-scan advances it past this value; putCachedSortedList then
-  // refuses to install this now-stale head for the full TTL (the BE2 race).
-  var gen = currentCacheGeneration();
-  var videos = readAllVideos();
+  // Everything the head can't answer comes from the whole-catalog snapshot:
+  // one sheet scan + sort per CATALOG_CACHE_SECONDS (or per invalidation),
+  // shared by every cursor page, deep offset page and search chunk in flight.
+  // The snapshot carries the generation captured before its scan, so the head
+  // populate below stays guarded against a concurrent invalidate (BE2 race).
+  var catalog = readSortedCatalog();
+  var videos = catalog.videos;
 
   if (videos.length === 0) {
     return { status: 'ok', videos: [], total: 0, page: page, next_cursor: '' };
   }
 
-  // Sort by published_at descending (newest first), video_id tiebreak
-  videos.sort(compareVideos);
-
-  // Read-through populate: any full-path request refreshes the head for the
-  // next caller, stamped with the generation captured above so a snapshot read
-  // before a concurrent invalidate can't be re-installed. Best-effort.
-  putCachedSortedList(FEED_HEAD_CACHE_KEY, FEED_HEAD_CACHE_SECONDS, {
-    videos: videos.slice(0, FEED_HEAD_COUNT),
-    total: videos.length,
-  }, gen);
+  // Read-through populate of the head: once per scan (the call that produced
+  // the snapshot), or when this request fell through a missing head. A warm
+  // cursor page must NOT rewrite the head on every call. Best-effort.
+  if (catalog.fresh || (!cursor && start + limit <= FEED_HEAD_COUNT)) {
+    putCachedSortedList(FEED_HEAD_CACHE_KEY, FEED_HEAD_CACHE_SECONDS, {
+      videos: videos.slice(0, FEED_HEAD_COUNT),
+      total: videos.length,
+    }, catalog.gen);
+  }
 
   // Cursor pagination: resume strictly after the (published_at, video_id)
   // position the client last saw. Unlike the page offset above, items
@@ -3301,7 +3657,9 @@ function readFeedHead() {
 function invalidateFeedHead() {
   bumpCacheGeneration();
   try {
-    CacheService.getScriptCache().remove(FEED_HEAD_CACHE_KEY);
+    var cache = CacheService.getScriptCache();
+    cache.remove(FEED_HEAD_CACHE_KEY);
+    cache.remove(CATALOG_CACHE_KEY); // chunks age out; the manifest is what readers key on
   } catch (e) {
     /* best-effort — the generation bump already invalidated it */
   }
@@ -3329,7 +3687,12 @@ function readTopWeek() {
 function invalidateTopWeek() {
   bumpCacheGeneration();
   try {
-    CacheService.getScriptCache().remove(TOP_WEEK_CACHE_KEY);
+    var cache = CacheService.getScriptCache();
+    cache.remove(TOP_WEEK_CACHE_KEY);
+    // The ranking is derived from the whole-catalog snapshot, and every writer
+    // that re-ranks (crawl view refresh, vote/comment recount) also changed
+    // rows baked into that snapshot — drop it too, not just the ranked slice.
+    cache.remove(CATALOG_CACHE_KEY);
   } catch (e) {
     /* best-effort — the generation bump already invalidated it */
   }
@@ -3450,8 +3813,9 @@ function handleTopWeek(params) {
   // Capture the generation BEFORE the sheet read so a vote/comment/crawl that
   // invalidates mid-scan advances it past this value; putCachedSortedList then
   // refuses to install this now-stale window for the full TTL (the BE2 race).
-  var gen = currentCacheGeneration();
-  var recent = readAllVideos().filter(function(v) {
+  var catalog = readSortedCatalog();
+  var gen = catalog.gen;
+  var recent = catalog.videos.filter(function(v) {
     var t = new Date(v.published_at).getTime();
     return !isNaN(t) && t >= cutoff;
   });
@@ -4483,7 +4847,7 @@ function handleBootstrap(data) {
 //
 // SPREADSHEET_IDS.CUSTOMERS holds everything keyed to a signed-in account:
 // the Customers tab (identity + marketing consent) plus the Votes, Stars,
-// and Bookmarks activity tabs (getUserDataTab above). One place to export
+// Bookmarks and Feedback tabs (getUserDataTab above). One place to export
 // or delete a user's data — their comments, which are public content, are
 // the only per-user rows elsewhere. NOTE: because the activity tabs live
 // here, sharing this spreadsheet shares activity too — hand off a mailing
@@ -4531,7 +4895,7 @@ function getCustomersSheet() {
     var tabs = ss.getSheets();
     for (var i = 0; i < tabs.length; i++) {
       var n = tabs[i].getName();
-      if (n !== 'Votes' && n !== 'Stars' && n !== 'Bookmarks') { sheet = tabs[i]; break; }
+      if (n !== 'Votes' && n !== 'Stars' && n !== 'Bookmarks' && n !== FEEDBACK_SHEET_NAME) { sheet = tabs[i]; break; }
     }
     if (sheet) sheet.setName('Customers');
     else sheet = ss.insertSheet('Customers');
@@ -4886,6 +5250,94 @@ function readUserBookmarkIds(email) {
     if (rows[i][emailCol] === email) ids.push(String(rows[i][videoIdCol]));
   }
   return ids;
+}
+
+// ============================================================
+// FEEDBACK — the floating "Send feedback" button's submissions
+// ============================================================
+//
+// Rows land in the "Feedback" tab of the CUSTOMERS spreadsheet (the one
+// user-data file — a person's feedback is part of their data, so it lives
+// next to their account row and activity tabs). Signed-in only: every send
+// must carry a valid token, and the row is stamped with the sender's
+// verified email + name. Guards: a message length cap and the same per-user
+// spacing as comments.
+
+var FEEDBACK_SHEET_NAME = 'Feedback';
+var FEEDBACK_HEADERS = [
+  'feedback_id', 'created_at', 'email', 'name', 'message',
+  'page', 'app_version', 'user_agent',
+];
+const FEEDBACK_MAX_LENGTH = 2000;        // chars; the dialog's textarea caps at the same
+const FEEDBACK_RATE_LIMIT_SECONDS = 30;  // per sender (same as comments)
+const FEEDBACK_FIELD_LIMITS = { page: 300, appVersion: 20, userAgent: 300 };
+
+/**
+ * Gets (or creates) the "Feedback" tab of the CUSTOMERS spreadsheet.
+ * @returns {Sheet}
+ */
+function getFeedbackSheet() {
+  return getUserDataTab(FEEDBACK_SHEET_NAME, FEEDBACK_HEADERS);
+}
+
+/**
+ * Records one feedback message from a signed-in user. `message` is required
+ * (non-blank, at most FEEDBACK_MAX_LENGTH chars — over-long is REJECTED, not
+ * clipped, so the sender knows it didn't land whole); `token` is required
+ * and must verify — the row carries the sender's email + name.
+ */
+function handleFeedback(data) {
+  var message = typeof data.message === 'string' ? data.message.trim() : '';
+  if (!message || !data.token) {
+    return { status: 'error', message: 'message and token are required' };
+  }
+  if (message.length > FEEDBACK_MAX_LENGTH) {
+    return { status: 'error', message: 'Feedback is too long (max ' + FEEDBACK_MAX_LENGTH + ' characters)' };
+  }
+
+  var user = authenticateUser(data.token);
+  if (!user) {
+    log('ERROR', 'feedback', 'Invalid Google token');
+    return { status: 'error', message: 'Invalid authentication token' };
+  }
+  if (isUserBlocked(user.email)) {
+    return { status: 'error', message: 'You have been blocked' };
+  }
+  if (isActionRateLimited('feedback', user.email, FEEDBACK_RATE_LIMIT_SECONDS)) {
+    return { status: 'error', message: 'You are doing that too fast, please slow down' };
+  }
+
+  var row = [
+    Utilities.getUuid(),
+    new Date().toISOString(),
+    user.email,
+    user.name || '',
+    message,
+    clip(data.page, FEEDBACK_FIELD_LIMITS.page),
+    clip(data.appVersion, FEEDBACK_FIELD_LIMITS.appVersion),
+    clip(data.userAgent, FEEDBACK_FIELD_LIMITS.userAgent),
+  ];
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+  } catch (e) {
+    return { status: 'error', message: 'Server busy, please retry' };
+  }
+
+  try {
+    var sheet = getFeedbackSheet();
+    // '@' (plain text) before the values land: a message starting with
+    // = + - @ must never execute as a formula when the owner opens the
+    // sheet. Mirrors the Comments and clientError writers.
+    var range = sheet.getRange(sheet.getLastRow() + 1, 1, 1, FEEDBACK_HEADERS.length);
+    range.setNumberFormat('@');
+    range.setValues([row]);
+  } finally {
+    lock.releaseLock();
+  }
+
+  return { status: 'ok', feedback_id: row[0] };
 }
 
 // ============================================================
@@ -5395,9 +5847,26 @@ function getLogLevel() {
 }
 
 function log(level, source, message) {
-  var configLevel = getLogLevel();
-  var levelValue = LOG_LEVELS[level] || 0;
-  var configValue = LOG_LEVELS[configLevel] || LOG_LEVELS.ERROR;
+  // getLogLevel() opens the Meta sheet on its first call of the execution. When
+  // the Spreadsheet service itself is what just failed ("Too many simultaneous
+  // invocations: Spreadsheets", 2026-10-03..08), that open throws again — and
+  // log() is what doGet/doPost's catch blocks call, so the second throw
+  // escaped the handler and the execution died as "Failed" with Google's HTML
+  // error page instead of the generic JSON. A logger must never be the reason
+  // a request has no response: fall back to the ERROR-only threshold.
+  var configLevel;
+  try {
+    configLevel = getLogLevel();
+  } catch (e) {
+    configLevel = 'ERROR';
+  }
+  // Presence, not truthiness: LOG_LEVELS.DEBUG is 0, so `||` fallbacks here
+  // would read a configured DEBUG as "unset" and filter at ERROR instead,
+  // silently dropping every DEBUG/INFO line in the one configuration meant
+  // to surface them. An unset or unrecognized level still falls back:
+  // config → ERROR-only, and an unknown `level` argument → most verbose.
+  var levelValue = LOG_LEVELS.hasOwnProperty(level) ? LOG_LEVELS[level] : 0;
+  var configValue = LOG_LEVELS.hasOwnProperty(configLevel) ? LOG_LEVELS[configLevel] : LOG_LEVELS.ERROR;
 
   if (levelValue < configValue) return;
 

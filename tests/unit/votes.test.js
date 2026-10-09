@@ -107,3 +107,60 @@ describe('toggleVote in-flight guard (FE19)', () => {
     expect(mocks.showToast).toHaveBeenCalledWith('Please sign in to vote', 'info');
   });
 });
+
+/**
+ * A vote whose RESULT was lost in transit (api.js `resultLost`: the script ran
+ * the toggle, then Google's echo hop 404'd — reproduced in production). The
+ * server holds the flipped state, so rolling back would show the opposite of
+ * the truth and re-sending would toggle it back. The optimistic flip stays and
+ * the voted flag is confirmed from myVotes.
+ */
+describe('toggleVote when the result is lost in transit', () => {
+  const lostResult = () => Object.assign(new Error('API error: 404 Not Found'), { resultLost: true, status: 404 });
+  const button = () => document.querySelector('.media-card__vote');
+  const count = () => document.querySelector('.media-card__vote-count').textContent;
+
+  beforeEach(() => {
+    mocks.getToken.mockReturnValue('tok');
+    mocks.isTokenExpired.mockReturnValue(false);
+  });
+
+  it('keeps the optimistic flip and count, shows no error, and confirms from myVotes', async () => {
+    mocks.vote.mockRejectedValueOnce(lostResult());
+    mocks.fetchMyVotes.mockResolvedValueOnce({ video_ids: ['vid1'] });
+
+    await toggleVote('vid1');
+    await flush();
+
+    expect(state.myVotes.has('vid1')).toBe(true);
+    expect(button().getAttribute('aria-pressed')).toBe('true');
+    expect(count()).toBe('4');
+    expect(mocks.showToast).not.toHaveBeenCalled();
+    expect(mocks.vote).toHaveBeenCalledTimes(1); // never re-sent
+    expect(mocks.fetchMyVotes).toHaveBeenCalledTimes(1);
+  });
+
+  it('the myVotes confirmation wins when it disagrees with the optimistic flip', async () => {
+    mocks.vote.mockRejectedValueOnce(lostResult());
+    mocks.fetchMyVotes.mockResolvedValueOnce({ video_ids: [] }); // server says: not voted
+
+    await toggleVote('vid1');
+    await flush();
+
+    expect(state.myVotes.has('vid1')).toBe(false);
+    expect(button().getAttribute('aria-pressed')).toBe('false');
+    expect(mocks.showToast).not.toHaveBeenCalled();
+  });
+
+  it('a plain failure (not resultLost) still rolls back and toasts', async () => {
+    mocks.vote.mockRejectedValueOnce(new Error('API error: 404 Not Found'));
+
+    await toggleVote('vid1');
+
+    expect(state.myVotes.has('vid1')).toBe(false);
+    expect(button().getAttribute('aria-pressed')).toBe('false');
+    expect(count()).toBe('3');
+    expect(mocks.showToast).toHaveBeenCalledWith('API error: 404 Not Found', 'error');
+    expect(mocks.fetchMyVotes).not.toHaveBeenCalled();
+  });
+});

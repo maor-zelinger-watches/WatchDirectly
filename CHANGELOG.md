@@ -21,6 +21,146 @@ that component's heading.
 
 ## Frontend
 
+### 1.34.0 — 2026-10-09
+- **Cold loads on a slow connection reach the first card about three seconds
+  sooner.** The app ships 30 unbundled ES modules with an import chain 11
+  deep, and the browser only discovers each level once the one above it has
+  arrived — 11 round trips, 5.6s on Chrome's Slow 4G profile, while the feed
+  data had been sitting ready since 1.8s. `index.html` now lists a
+  `<link rel="modulepreload">` for every module reachable from `js/app.js`
+  and `js/error-reporter.js`, so they all go out in one wave as the HTML
+  parses; `tests/unit/module_preload.test.js` derives the reachable set from
+  the import graph and fails when the list drifts. Three smaller first-screen
+  fixes ride along: the first two cards of a fresh paint into an empty feed
+  load their preview image eagerly with `fetchpriority="high"` (the LCP
+  candidate no longer queues behind the images below it) while the rest stay
+  lazy; article sites behind Cloudflare Image Resizing (`/cdn-cgi/image/`)
+  get a 640w/1280w `srcset` with `fit=scale-down,format=auto` (172KB → 39KB
+  JPEG / 19KB AVIF at 640px; other hosts keep the stored URL untouched); and
+  `js/analytics.js` is `defer`red, since as a blocking `<head>` script it
+  held the parser one round trip before the stylesheet and feed requests
+  could start. Measured 2026-10-07, cold, Slow 4G, HTTP/2, backend mocked at
+  a fixed 2.5s: last module 6.3s → 3.5s, first card 8.9s → 6.0s, LCP
+  9.9s → 7.0s, sixth first-screen image 14.7s → 9.6s. Unthrottled, the
+  module wave drops from 301ms to 46ms. No behavior change otherwise.
+
+### 1.33.0 — 2026-10-06
+- **Coming back after a few hours no longer re-fetches the cards you already
+  had.** On return, the cached Latest feed paints and fresh page 1 is fetched.
+  When fresh page 1 shared nothing with the cached front — which happens after
+  roughly six hours away, since the feed gains about ten items in that time —
+  the revalidate replaced the whole cached list with fresh page 1 and reset
+  pagination, so every card you had scrolled through was thrown away and
+  re-fetched from the server one cursor page at a time. That read as "the
+  feed doesn't load until I reach the articles I already had". The replaced
+  cards are now kept as a *feed reserve* (`prefetch.js`). Pages keep coming
+  from the server until one ends at or past the newest card you had cached;
+  from that point the server's continuation is, by construction, exactly your
+  cached tail, so every following page is served from memory with no network
+  call and the rendered feed is identical to what the server would return.
+  Cards deleted upstream in the meantime are dropped as the server pages pass
+  them. One fetch path now serves both infinite scroll and the read-ahead
+  buffer, so the buffered pages fill instantly too. A small change (fresh
+  page 1 still overlaps the cached front) keeps the tail in place as before
+  and needs no reserve. Side effect: each returning visit saves up to 60
+  backend requests. Backends without cursor support ignore the reserve.
+
+### 1.32.0 — 2026-10-03
+- **Feedback button.** Signed-in users get a floating button bottom-right,
+  above the footer, styled like the channel logo (volt disc, black
+  speech-bubble mark with a burnt-orange outline). It opens a dialog with one
+  text box, an ✕ and Submit; the message goes to the new backend `feedback`
+  action (`api.sendFeedback`) with the session token, page URL, app version
+  and browser, and lands in the Feedback tab of the CUSTOMERS spreadsheet
+  under the sender's email. The button is hidden while signed out and hides
+  again on sign-out (closing the dialog if open). ✕, the backdrop and Escape
+  close without sending and keep the draft; a failed send keeps the draft and
+  shows the server's message; an older backend answers "Feedback isn't
+  available yet". Needs backend ≥ 1.26.0. Why: beta users had no way to
+  report a bug or ask for a creator without leaving the site.
+
+### 1.31.0 — 2026-10-02
+- **IndexedDB is now the default cache storage for everyone.**
+  `STORAGE_ENGINE_DEFAULT` flips from `'legacy'` to `'idb'`, so the large
+  snapshots (feed, search index, Top This Week, channels) move from
+  localStorage to IndexedDB on each browser's next load. The existing
+  localStorage copy is migrated over, so this costs no cold load. Why: Safari
+  counts localStorage at 2 bytes/char once any character is outside Latin-1,
+  which caps it at ~2.6M chars. The search index is about that size and
+  growing, and when it doesn't fit it silently isn't saved. Browsers with an
+  explicit `wd_storage_engine` flag keep their choice. `?storage=legacy`
+  stays as the per-browser kill switch, and setting the default back to
+  `'legacy'` rolls it back for everyone. Tests now pin the idb default and
+  run legacy through the explicit flag.
+
+### 1.30.1 — 2026-10-01
+- **Footer fits on phones again.** 1.30.0's extra "Cookies" link pushed the
+  footer row (three links + "© 2026 How You Watch" + version badge) past the
+  width of most phones. The copyright was ellipsized at every width up to
+  375px on the feed, and the nav row overflowed at 320px. Under 480px the
+  footer now uses tighter padding and gaps, so the full row fits from 375px up.
+  At 360px and below, the version badge hides (it's still logged to the
+  console at boot) rather than cutting the copyright. Checked at
+  320/340/360/375/390/414/480/768/1280px on the feed, privacy and terms pages.
+
+### 1.30.0 — 2026-10-01
+- **Google Analytics (GA4, `G-LNXRS74XZ3`), opt-in behind a cookie consent
+  banner.** Uses Google Consent Mode v2 in "basic" mode: every storage type
+  defaults to denied, and `gtag.js` is only injected after the visitor clicks
+  Accept, so nothing is requested from Google and no `_ga` cookie is set
+  before that. Reject and Accept are equal-size, side by side. The choice is
+  kept in `localStorage` (`wd_analytics_consent`), and a new "Cookies" footer
+  link on every public page reopens the banner. Withdrawing consent deletes the
+  `_ga` cookies. Setup lives in `js/analytics.js` rather than Google's inline
+  snippet, so the strict CSP (no `'unsafe-inline'`) holds. The CSP allowlists
+  `www.googletagmanager.com` plus the `*.google-analytics.com` /
+  `*.analytics.google.com` beacon hosts. Loaded on index, privacy, terms and
+  404; not on the operator-only add-channel page.
+- **Privacy policy updated.** It used to promise no analytics and no cookies.
+  It now describes the opt-in analytics, how to change the choice, and lists
+  Google Analytics as a third-party service.
+- E2E contexts start with consent pre-answered (`playwright.config.js`
+  `storageState`) so the fixed banner never covers what specs click.
+  `cookie_banner.spec.js` covers the banner itself on both viewports.
+
+### 1.29.0 — 2026-09-25
+- **Transient backend failures are retried instead of surfacing as "API error:
+  404".** `/exec` answers with a 302 to a one-shot googleusercontent "echo" URL,
+  and that hop intermittently returns a 404 page instead of the JSON — in
+  bursts, with the script itself healthy (reproduced against production
+  2026-09-23; 4 of ~20 requests in one burst). `api.js` now treats any body that
+  parses as a JSON result as the result, whatever the HTTP status; retries an
+  idempotent GET, or a POST that never reached the script, on
+  `CONFIG.API_RETRY_DELAYS_MS` (400 ms, 1.2 s); and marks a POST that failed
+  *at the echo hop* — so it did execute — as `resultLost`, never resending it
+  (a toggle would double-fire). Votes, stars and bookmarks keep their optimistic
+  flip on `resultLost` and confirm it from the server's own list
+  (myVotes / myStars / bootstrap) instead of rolling back with a toast.
+- **IndexedDB storage for the cache snapshots, behind a per-browser flag —
+  shipped OFF.** The feed, search index, Top This Week and channel snapshots can
+  now live in IndexedDB instead of localStorage, chosen per browser by
+  `localStorage.wd_storage_engine` (`idb` | `legacy`), or once via
+  `?storage=idb|legacy|default` (applied, then removed from the URL — it works
+  on iPhones, which have no devtools). The default is
+  `CONFIG.STORAGE_ENGINE_DEFAULT = 'legacy'`, so nobody changes storage with
+  this release; the boot log prints `storage engine: <engine> (<flag|default>)`.
+  Why it exists: Safari counts localStorage at 2 bytes per character once any
+  character is outside Latin-1 (production titles have em dashes and curly
+  quotes), halving its cap to ~2.6M characters — and the full search index
+  sits right around that. When it doesn't fit, the quota error is swallowed,
+  and every returning visitor's search re-walks the whole catalog (measured on
+  WebKit against production: 43 requests, ~36 s, vs 1 request / ~170 ms from
+  IndexedDB). `legacy` never opens IndexedDB, so it is a safe kill switch; in
+  `idb` mode every storage call is time-bounded, so an IndexedDB that never
+  answers (a known iOS failure) costs about a second and falls back to
+  localStorage instead of stalling boot. Rolling it out = flipping the default.
+- **What changes at the default (`legacy`), even with the flag off:** cache
+  snapshot reads and writes are now async, queued per key so they always land
+  in call order; the search index is persisted without its per-row token memo
+  (`_searchFields`), which roughly doubled it — that alone brings today's index
+  under Safari's cap, with ~10% headroom; and opening Top This Week and then
+  leaving before its snapshot loads no longer clears the tab you moved to.
+
 ### 1.28.2 — 2026-09-22
 - **Header badge reads "Beta" instead of "Alpha."** The `header__logo-icon`
   label next to the site title, on every page (home, add-channel, privacy,
@@ -711,6 +851,125 @@ that component's heading.
 
 ## Backend
 
+### 1.26.2 — 2026-10-08
+- **A request still gets its error JSON when the Spreadsheet service is what
+  failed.** Every "Failed" `doGet` row in the Apps Script console over
+  2026-10-03..08 had the same stack: the handler threw "Too many simultaneous
+  invocations: Spreadsheets", the catch block called `log()`, `log()` opened
+  the Meta sheet to read `log_level`, the Spreadsheet service threw *again*,
+  and that second throw escaped `doGet`. The execution died as Failed and the
+  client got Google's HTML error page instead of the `{status:'error'}` JSON
+  it knows how to retry. `log()` now falls back to the ERROR-only threshold
+  when the level can't be read, and both `doGet` and `doPost` wrap the log
+  call so the response never depends on it.
+- **A whole-catalog cache miss is rebuilt once, not once per request in
+  flight.** 1.26.1 made every request *after* a scan cheap, but the miss
+  itself was shared by everything that landed on it — a cold landing is feed
+  + Top Week + comments, a search focus is four parallel chunk pages — and
+  each of those ran its own full Videos-sheet scan. Those concurrent scans
+  were the 1,200+ "Too many simultaneous invocations: Spreadsheets" failures
+  in Cloud Logging and, once the service was saturated, the `doGet`
+  executions wedged at the 6-minute limit. `cachedSortedList` now takes the
+  script lock on a miss, re-checks the cache (the holder ahead of it has
+  usually just populated it), and scans only if it is still a miss; waiting
+  on the lock touches no sheet. The wait is bounded
+  (`SORTED_LIST_REBUILD_LOCK_MS`, 30s) and best-effort — past the bound a
+  request scans unshared, exactly the 1.26.1 behaviour. Only the read-only
+  paths reach the guard, none of which hold the (non-reentrant) lock.
+
+### 1.26.1 — 2026-10-06
+- **The whole sorted catalog is cached, so feed pages past the head and
+  search chunks stop re-scanning the Videos sheet.** Every request the 50-row
+  feed head couldn't answer — cursor pages 2+ (each scrolled page and each
+  read-ahead prefetch), offset pages past the head, and the search index's
+  limit=100 chunks — re-read and re-sorted the entire sheet (~2,100 rows,
+  2.4–7.7s each, 30s+ under contention). Measured on 2026-10-06, one browser's
+  first search-box focus fired 22 of those scans plus 28 archive pages, and a
+  cold load 4 more; those scans made up most of the 592k executions in the
+  week that pushed the project to Google's simultaneous-executions limit, at
+  which point even a no-op `/exec` waited 30s for a slot and the UI stalled.
+  `getVideos`, `handleTopWeek` and `handleVideo` now read `readSortedCatalog()`,
+  one scan per 300s or per invalidation (every writer that changes a row still
+  bumps the generation and now also drops the snapshot). The ~1.2MB payload is
+  far past CacheService's 100KB/key cap, so the shared sorted-list cache gains
+  chunking: values are ASCII-escaped (the cap is in bytes), split into 90KB
+  pieces keyed by generation, and stitched back with one `getAll` plus a
+  length check — a missing piece is a miss, never a truncated catalog. Small
+  values (head, Top This Week) are stored exactly as before. The whole-archive
+  snapshot was over the same cap and silently failing to cache on every
+  request; it caches now too. The head is repopulated once per scan instead of
+  on every warm cursor page. No response shape or ordering changes.
+
+### 1.26.0 — 2026-10-03
+- **`feedback` action.** New signed-in POST (`message` + `token`) backing the
+  site's feedback button. The row — id, time, verified email and name, the
+  message, page, app version, user agent — is appended to a **Feedback** tab
+  of the CUSTOMERS spreadsheet (created on first use via `getUserDataTab`, so
+  a person's feedback lives next to their account row and activity tabs;
+  `getCustomersSheet` never claims it as the Customers tab). A missing or
+  invalid token is an error and nothing is written. Guards: a 2,000-character
+  cap (rejected, not clipped), the block list, a 30s spacing per sender, and
+  the '@' plain-text format set before the values so a message can't execute
+  as a formula. `feedback` joins SIGNED_ACTIONS.
+
+### 1.25.1 — 2026-10-02
+- **Shorts ingested on a Data-API fallback crawl are filed as Shorts.** The
+  frontend recognises a Short purely by its `/shorts/` URL, which the channel
+  RSS feed supplies. When YouTube blocks RSS from Apps Script IPs the crawl
+  falls back to `playlistItems.list`, which carries no Shorts signal, and
+  `parseYouTubeUploads` wrote `watch?v=` for every item — so a Short ingested
+  on one of those crawls (`8ois5twG3YY`, The 1916 Company, 2026-10-02)
+  rendered as a long-form video while its siblings from RSS crawls were
+  Shorts. Two fixes in `crawlAllFeeds`: genuinely new Data-API items are
+  probed once via `youtube.com/shorts/<id>` (200 = Short, 303 to `/watch` =
+  not; redirects walked by hand, youtube.com hosts only, three hops), and a
+  row already stored with a watch URL is upgraded in place the next time the
+  RSS feed says `/shorts/` for the same id — one batched, text-formatted
+  column write, never the reverse, since the Data API's watch URL carries no
+  information. An inconclusive probe (404, 5xx, off-site redirect, network
+  error) keeps the watch URL and never fails the channel; the self-heal
+  corrects it on the next unblocked crawl. Only new items are probed, so a
+  blocked crawl costs one or two extra fetches per new video, not fifteen per
+  channel.
+
+### 1.25.0 — 2026-09-25
+- **A channel added from the add-channel page has content immediately.**
+  `handleAddChannel` used to call `scheduleRefresh()` to crawl the new channel
+  "within minutes", but that path has never worked on this deployment:
+  installing a trigger needs the `script.scriptapp` OAuth scope, which the
+  ANONYMOUS web app deliberately doesn't carry (adding it 403'd the live
+  `/exec` — 1.14.3, reverted in 1.14.4). Every `ScriptApp` call threw, the add
+  path swallowed it, and a new channel sat empty until the 4-hour trigger. It
+  now crawls just that one feed inline: `fetchAllFeeds` / `crawlAllFeeds` take
+  an optional `feed_url` and skip every other channel. A single-feed crawl
+  shares the one-crawl-at-a-time marker, and leaves `last_fetch`, the crawl
+  resume index and retention pruning alone — whole-catalog bookkeeping that
+  belongs to the full crawl. The response gains `new_items`. If a full crawl
+  is already running, the row is still saved and the 4-hour cycle picks it up.
+- **`scheduleRefresh`'s missing-scope failure is logged once an hour, not once
+  per visitor.** `handleFeed` calls it on every request while the feed is
+  stale, so one stale window wrote one ERROR per request (dozens a minute).
+  The missing `script.scriptapp` scope is this deployment's permanent state,
+  so it's now reported as a single WARN per hour; it's matched on the scope
+  URL because the rest of the message arrives localized (Hebrew). Every other
+  `scheduleRefresh` failure still gets its own ERROR.
+
+### 1.24.2 — 2026-09-24
+- **`log_level = DEBUG` no longer silences the logs it is supposed to open up.**
+  `log()` resolved its threshold with `LOG_LEVELS[configLevel] ||
+  LOG_LEVELS.ERROR`, and `LOG_LEVELS.DEBUG` is `0` — falsy — so a Meta
+  `log_level` of `DEBUG` fell straight through to the ERROR fallback. Setting
+  the *most verbose* level wrote no DEBUG and no INFO line at all, which made
+  every `log('DEBUG', ...)` call in the crawl dead code in exactly the
+  configuration meant to surface it. The threshold is now resolved on the key's
+  presence (`hasOwnProperty`), so DEBUG means DEBUG; an unset or unrecognized
+  `log_level` still falls back to ERROR-only. WARN and ERROR were never
+  affected, so 1.24.1's "set `log_level` to `WARN` during the observe window"
+  vote-trust rollout step behaved as documented — it was only the DEBUG rung
+  that was unreachable. Covered by `tests/unit/backend/log_level.test.js`
+  against the real `Code.gs`: DEBUG writes all four levels, WARN drops INFO but
+  writes WARN+ERROR, and unset/garbage stays ERROR-only.
+
 ### 1.24.1 — 2026-09-23
 - **Vote-trust rollout fixes (found investigating an upvote report).** Three
   defects in 1.24.0's rollout, none in the counting logic itself:
@@ -1298,6 +1557,55 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.10 — 2026-10-06
+- **No more daily CI run against production.** The `schedule` trigger
+  (09:17 UTC) is gone from `ci.yml`; the live smoke + perf job now runs only
+  on demand via `workflow_dispatch`. Per-push unit + e2e are unchanged. The
+  scheduled run was extra traffic on the Apps Script backend — the project
+  hit Google's 800-of-1,000 simultaneous-executions warning on 2026-10-06 —
+  and it was not catching anything the per-push suites miss.
+
+### 1.2.9 — 2026-10-03
+- **Backend deploy health-check waits out propagation.** `deploy-backend.sh`
+  checked prod 5 times, 5s apart — about 40–60s — but a new deployment
+  version takes 60–90s to propagate. Two consecutive 1.26.0 deploys served
+  the old version for the whole window, were declared failed and rolled back,
+  then went live a minute later anyway (and the rollback raced the same way).
+  The loop now runs `HEALTH_ATTEMPTS` × `HEALTH_SLEEP_SECONDS` (defaults
+  12 × 10s), both overridable per run, and each line shows attempt/total.
+
+### 1.2.8 — 2026-10-01
+- **E2E contexts start with the cookie banner already answered.**
+  `playwright.config.js` sets a `storageState` that seeds
+  `wd_analytics_consent=denied` for the test origin. Without it, the fixed
+  consent banner (Frontend 1.30.0) intercepted clicks on cards near the bottom
+  of the viewport and broke unrelated specs. `cookie_banner.spec.js` opts back
+  out so it can test a true first visit.
+
+### 1.2.7 — 2026-09-25
+- **Storage test tooling.** `npm run test:storage:webkit` runs the
+  storage-engine flag's e2e and perf specs on WebKit (Safari's engine) via a new
+  `webkit-storage` Playwright project — explicit only; CI installs Chromium
+  alone, so no CI job or deploy gate runs it. `npm run test:perf-live`
+  (`playwright.perf-live.config.js`) serves a checkout against the PRODUCTION
+  backend for before/after storage measurements, with `PERF_LIVE_STORAGE=idb|legacy`
+  to measure one checkout in both modes; it's outside every gate too.
+  `fake-indexeddb` is a new devDependency for the storage unit tests.
+
+### 1.2.6 — 2026-09-24
+- **`deploy-backend.sh` can be run from a git worktree again.** The success-hash
+  path was the literal `.git/backend-deploy-hash`, but inside a worktree `.git`
+  is a *file*, not a directory — so the final `echo … > "$HASH_FILE"` died with
+  "not a directory" under `set -e`. That happens *after* prod has been pushed,
+  deployed and health-checked green, so a genuinely successful deploy exited
+  non-zero and never printed its `✅` line: indistinguishable from a failure, and
+  an invitation to re-run a deploy that had already landed. The path now resolves
+  via `git rev-parse --git-common-dir`, which is a real directory in both a
+  worktree and a normal checkout, and keeps the hash repo-global — what is live
+  in prod is a property of the project, not of whichever worktree shipped it.
+  Found deploying Backend 1.24.2 from a worktree, which is where this project's
+  work happens.
 
 ### 1.2.5 — 2026-09-23
 - **The backend deploy gate now health-checks the POST pipeline too.** Every

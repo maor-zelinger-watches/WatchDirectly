@@ -15,6 +15,7 @@
  */
 
 import { CONFIG } from './config.js';
+import { storageEngine } from './flags.js';
 import { state, isFilterActive, typeFilterActive, patchVideoEverywhere, epoch } from './state.js';
 import { api } from './api-client.js';
 import { isShort, mediaType, sortVideos, typeFilterVisible } from './feed.js';
@@ -23,11 +24,13 @@ import { initAuth, getCurrentUser, onAuthChange, signOut } from './auth.js';
 import { setupAuthOverlay, openAuthOverlay, authOverlayOnAuthChange } from './auth-overlay.js';
 import { sanitizeHtml, cssEscape, safeUrl } from './utils.js';
 import { showToast } from './toast.js';
-import { buildCard, insertCardChronologically, renderList, cardTimeMs } from './cards.js';
+import { buildCard, insertCardChronologically, renderList, cardTimeMs, FIRST_PAINT_PRIORITY_CARDS } from './cards.js';
 import { observeLazyIframe } from './lazy-iframe.js';
 import {
   serverHasMore, cursorAfter,
   invalidatePrefetchBuffer, takeBufferedPage, refillPrefetchBuffer,
+  fetchFeedPage,
+  stashFeedReserve,
 } from './prefetch.js';
 import { prefetchComments, updateInlineCommentFormUI, setCommentsToggleCount } from './comments-ui.js';
 import { clearVoteMarkings, setOnVotesChanged } from './votes.js';
@@ -37,6 +40,7 @@ import { loadMyVotesAndStars } from './bootstrap.js';
 import { setupFullscreenKeys } from './fullscreen.js';
 import { handleDeepLink } from './share.js';
 import { setupSinglePlay } from './single-play.js';
+import { setupFeedback, feedbackOnAuthChange } from './feedback.js';
 import { update, setupTabs, setupFeedControls, setOnTypeFilterChanged, loadMoreTop, resortTopRanking } from './views.js';
 
 // The Starred view repaints when a star lands or the server reconciles —
@@ -88,6 +92,10 @@ function filterPaginationParked() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   console.info(`How You Watch frontend v${CONFIG.APP_VERSION}`);
+  // Which cache storage this load runs on, and whether a flag chose it — the
+  // first thing to check when a report involves stale or missing cached data.
+  const storage = storageEngine();
+  console.info(`storage engine: ${storage.engine} (${storage.source})`);
   const versionEl = document.getElementById('app-version');
   if (versionEl) versionEl.textContent = `v${CONFIG.APP_VERSION}`;
 
@@ -124,6 +132,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
   setupFullscreenKeys();
   setupSinglePlay();
+  setupFeedback();
   loadStarsFromStorage();
   loadBookmarksFromStorage();
 
@@ -245,7 +254,7 @@ async function loadNextPage() {
         const epoch = state.prefetchToken;
         state.pendingFetchPage = nextPage;
         try {
-          const data = await api.fetchFeed(nextPage, CONFIG.PAGE_SIZE, state.nextCursor || '');
+          const data = await fetchFeedPage(nextPage, state.nextCursor || '');
           if (epoch !== state.prefetchToken) return;
           batch = { videos: data.videos || [], nextCursor: data.next_cursor };
           state.totalVideos = data.total || 0;
@@ -454,10 +463,15 @@ async function appendCards(videos) {
   const shorts = deduped.filter(isShort);
   const inserted = [];
 
+  // The first network paint into an empty feed: its first cards are the first
+  // screen, so their preview images load eagerly at high priority (the LCP
+  // candidate). Later pages, and appends to a populated feed, stay lazy.
+  const priorityUntil = feedContainer.childElementCount === 0 ? FIRST_PAINT_PRIORITY_CARDS : 0;
+
   // Long-form cards append in batch order (pages arrive chronological).
   const frag = document.createDocumentFragment();
   mains.forEach((video, i) => {
-    const card = buildCard(video);
+    const card = buildCard(video, { priority: i < priorityUntil });
     card.classList.add('media-card--enter');
     card.style.setProperty('--enter-delay', `${i * 60}ms`);
     frag.appendChild(card);
@@ -487,8 +501,10 @@ async function appendCards(videos) {
  */
 async function showCachedFeed() {
   // Validation and corruption handling live in cache.js — an invalid
-  // payload comes back as null and has already been cleared.
-  const cached = loadFeedCache();
+  // payload comes back as null and has already been cleared. The read is
+  // async (Cache Storage / IndexedDB); nothing paints or paginates the feed
+  // until boot's await on this resolves, so there's no race to guard here.
+  const cached = await loadFeedCache();
   if (!cached) return false;
 
   state.videos = cached.videos;
@@ -609,6 +625,9 @@ async function revalidateFeed() {
     // — a search query is active, OR the user is on a different tab. When they
     // return to Latest it re-renders from this state.
     const adoptFreshAsState = () => {
+      // The replaced list becomes the reserve: pagination serves those cards
+      // again, without the network, once it reaches where they start.
+      stashFeedReserve(state.videos, freshVideos);
       state.videos = freshVideos;
       state.totalVideos = data.total || freshVideos.length;
       state.currentPage = 1;
@@ -657,8 +676,9 @@ async function revalidateFeed() {
     // down. When the cached front shares ZERO ids with fresh page 1 the whole
     // visible window is wholesale-stale, so nothing was "pushed down": keeping
     // those cards strands them interleaved with the fresh ones (prefetch_races
-    // bug 4). Fall back to a full replace + re-paginate; a genuine burst of
-    // brand-new items simply re-fetches the tail, no data lost.
+    // bug 4). Fall back to a full replace + re-paginate — but keep the replaced
+    // cards as the feed reserve (prefetch.js), so the tail is served from
+    // memory once pagination reaches it instead of re-fetched page by page.
     const frontOverlap = state.videos
       .slice(0, freshVideos.length)
       .some(v => freshIdSet.has(v.video_id));
@@ -781,6 +801,14 @@ async function revalidateFeed() {
       // persists the merged feed, not the pre-merge snapshot.
       saveFeedCacheSoon(state.videos, state.totalVideos);
     } else {
+      // Full replace — the cards just animated out are NOT thrown away: they
+      // become the feed reserve, served back as pages (zero network) once
+      // pagination reaches the range they cover. Without this a visitor
+      // returning after ~6h (enough new items to push the whole cached front
+      // off page 1) re-fetched every card they already had, one cursor page
+      // at a time, which read as "the feed doesn't load until I reach the
+      // articles I had before".
+      stashFeedReserve(state.videos, freshVideos);
       state.videos = freshVideos;
       state.totalVideos = data.total || freshVideos.length;
       state.currentPage = 1;
@@ -911,6 +939,7 @@ function setupAuthUI() {
   onAuthChange((user) => {
     updateAuthUI(user);
     authOverlayOnAuthChange(user);
+    feedbackOnAuthChange(user);
     state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
     if (user) {
       loadMyVotesAndStars();
@@ -930,6 +959,7 @@ function setupAuthUI() {
   const user = getCurrentUser();
   if (user) {
     updateAuthUI(user);
+    feedbackOnAuthChange(user);
     loadMyVotesAndStars();
     state.expandedComments.forEach(videoId => updateInlineCommentFormUI(videoId));
   } else {

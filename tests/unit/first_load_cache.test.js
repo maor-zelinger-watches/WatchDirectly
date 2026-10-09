@@ -19,6 +19,13 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+// The API client retries a transiently failed GET on a backoff schedule; zero it
+// so the failing-fetch scenario below doesn't wait out the real 1.6s.
+vi.mock('../../js/config.js', async (importOriginal) => {
+  const { CONFIG } = await importOriginal();
+  return { CONFIG: { ...CONFIG, API_RETRY_DELAYS_MS: [0, 0] } };
+});
+
 class FakeIO { constructor() {} observe() {} unobserve() {} disconnect() {} }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -105,8 +112,10 @@ describe('first-load feed cache is written from the first fetch', () => {
     await flush();
 
     // Two page-1 fetches were issued (the second is the one that failed) — this
-    // guarantees we exercised the two-fetch path the bug lived in.
-    expect(page1Calls).toBe(2);
+    // guarantees we exercised the two-fetch path the bug lived in. The failed
+    // one is retried twice by the API client (a network error on a GET is
+    // transient), so the mock sees 1 success + 1 failure + 2 retries.
+    expect(page1Calls).toBe(4);
 
     // The fix: a valid cache exists despite the failed second fetch.
     const raw = localStorage.getItem('wd_feed_cache');

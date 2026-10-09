@@ -20,7 +20,7 @@ import { isSignedIn } from './auth.js';
 import { showToast } from './toast.js';
 import { sanitizeHtml } from './utils.js';
 import {
-  loadFeedCache, loadSearchIndex, saveSearchIndex,
+  loadSearchIndex, saveSearchIndex,
   loadTopCache, saveTopCache,
   loadChannelsCache, saveChannelsCache,
   loadFilterTypes, saveFilterTypes,
@@ -64,15 +64,13 @@ function notifyIndexProgress() {
 
 /**
  * Instant, network-free starting point for search: everything already in
- * memory (the scrolled feed) plus the cached page-1 snapshot, deduped.
- * Lets the first keystroke match against something before any chunk lands.
+ * memory (the scrolled feed), deduped. Lets the first keystroke match against
+ * something before any chunk lands. The persisted feed snapshot needs no
+ * separate read here: boot restored it into state.videos, which only grows
+ * from there.
  */
 function seedFromMemory() {
-  const parts = [];
-  if (Array.isArray(state.videos) && state.videos.length) parts.push(...state.videos);
-  const cachedFeed = loadFeedCache();
-  if (cachedFeed && cachedFeed.videos.length) parts.push(...cachedFeed.videos);
-  return dedupeVideos(parts);
+  return dedupeVideos(Array.isArray(state.videos) ? state.videos : []);
 }
 
 /** Same identity key dedupeVideos uses: url when present, else video_id. */
@@ -301,6 +299,29 @@ async function topUpSearchIndex() {
 }
 
 /**
+ * Restores the persisted index and tops it up, or — with no usable snapshot —
+ * walks the whole catalog. A persisted index is a COMPLETE snapshot (it's only
+ * saved after a full build), so it just needs new head items merged in.
+ *
+ * The restored snapshot is merged UNDER the memory seed: rows already in
+ * memory are this session's (fresher counts after a vote or revalidate), so
+ * they replace their snapshot copies rather than the other way round.
+ *
+ * @returns {Promise<{full: Object[], rebuilt: boolean}>}
+ */
+async function restoreOrBuildIndex() {
+  const cached = await loadSearchIndex();
+  if (cached && cached.length) {
+    indexFromCache = true;
+    const seed = state.searchIndex || [];
+    state.searchIndex = seed.length ? mergeIndexChunk(cached, seed) : cached;
+    notifyIndexProgress();
+    return { full: await topUpSearchIndex(), rebuilt: false };
+  }
+  return { full: await buildSearchIndex(), rebuilt: true };
+}
+
+/**
  * Ensures the full-catalog search index is (being) built, so search and
  * filters reach everything, not just the pages scrolled so far.
  *
@@ -328,32 +349,24 @@ export function ensureSearchIndex(onProgress) {
     }
   }
 
-  // Seed synchronously so progress subscribers have something to show now.
+  // Seed synchronously from memory so progress subscribers have something to
+  // show now. The persisted index is async; restoreOrBuildIndex swaps it in a
+  // few milliseconds later.
   if (!state.searchIndex) {
-    const cached = loadSearchIndex();
-    if (cached && cached.length) {
-      state.searchIndex = cached;
-      indexFromCache = true;
-    } else {
-      state.searchIndex = seedFromMemory();
-      indexFromCache = false;
-    }
+    state.searchIndex = seedFromMemory();
+    indexFromCache = false;
     if (state.searchIndex.length) notifyIndexProgress();
   }
 
   if (!state.searchIndexPromise) {
-    // A fresh cached index is a COMPLETE snapshot (it's only saved after a
-    // full build), so it just needs new head items merged in — not the
-    // whole-catalog walk. Cold sessions (no usable cache) do the full build.
-    const fullBuild = !indexFromCache;
-    state.searchIndexPromise = (fullBuild ? buildSearchIndex() : topUpSearchIndex())
-      .then(full => {
+    state.searchIndexPromise = restoreOrBuildIndex()
+      .then(({ full, rebuilt }) => {
         state.searchIndex = full;
         state.searchIndexComplete = true;
         // Only a full walk may overwrite the persisted snapshot: a top-up
         // re-stamping savedAt would keep deferring the TTL'd full rebuild —
         // the pass that lets server-side deletions age out — indefinitely.
-        if (fullBuild) saveSearchIndex(full);
+        if (rebuilt) saveSearchIndex(full);
         state.searchIndexProgress.clear();
         return full;
       })
@@ -415,34 +428,32 @@ async function revalidateChannels() {
   if (changed && state.view === 'channels') renderChannels();
 }
 
-// Single in-flight fetch of the creator list, shared by the host map (search
+// Single in-flight load of the creator list, shared by the host map (search
 // matching) and the Channels tab. Cached on state.creators (session) and in
-// localStorage (across sessions); a failure clears the promise so the next
-// caller retries.
+// the snapshot store (across sessions); a failure clears the promise so the
+// next caller retries.
 let creatorsPromise = null;
 export function loadCreators() {
   if (state.creators) return Promise.resolve(state.creators);
 
-  // Instant paint from the persisted list, then revalidate in the background.
-  const cached = loadChannelsCache();
-  if (cached && cached.length) {
-    applyCreators(cached);
-    revalidateChannels();
-    return Promise.resolve(cached);
-  }
-
   if (!creatorsPromise) {
-    creatorsPromise = api.fetchChannels()
-      .then(data => {
-        const creators = data.channels || [];
-        applyCreators(creators);
-        saveChannelsCache(creators);
-        return creators;
-      })
-      .catch(err => {
-        creatorsPromise = null; // allow a later view to retry
-        throw err;
-      });
+    creatorsPromise = (async () => {
+      // Instant paint from the persisted list, then revalidate in the background.
+      const cached = await loadChannelsCache();
+      if (cached && cached.length) {
+        applyCreators(cached);
+        revalidateChannels();
+        return cached;
+      }
+      const data = await api.fetchChannels();
+      const creators = data.channels || [];
+      applyCreators(creators);
+      saveChannelsCache(creators);
+      return creators;
+    })().catch(err => {
+      creatorsPromise = null; // allow a later view to retry
+      throw err;
+    });
   }
   return creatorsPromise;
 }
@@ -606,14 +617,22 @@ async function switchView(view) {
     // Instant paint from the cached first page, then revalidate in the
     // background. Only fall back to the skeleton + blocking fetch when there's
     // no cache to show — a first-ever open (or a cleared cache).
-    const cachedTop = loadTopCache();
-    if (cachedTop) {
+    const cachedTop = await loadTopCache();
+    if (state.topLoaded) {
+      // A newer switch to Top restored (or fetched) the list during that
+      // await — it owns the revalidate; don't start a second one.
+    } else if (cachedTop) {
       state.topVideos = cachedTop.videos;
       state.topTotal = cachedTop.total;
       state.topCursor = cachedTop.cursor;
       state.topHasMore = typeof cachedTop.cursor === 'string' && cachedTop.cursor !== '';
       state.topLoaded = true;
       revalidateTop(); // background freshness; repaints only if the ranking moved
+    } else if (token !== viewToken) {
+      // The user left Top while the snapshot was being read. The cold path
+      // below wipes the container for its skeleton — that container belongs
+      // to the newer view now. Reopening Top re-runs this branch.
+      return;
     } else {
       const container = document.getElementById('feed-container');
       const skeleton = document.getElementById('feed-skeleton');

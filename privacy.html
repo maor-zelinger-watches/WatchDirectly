@@ -3,8 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' https://accounts.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://accounts.google.com https://www.youtube-nocookie.com https://www.youtube.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com https://oauth2.googleapis.com">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' https://accounts.google.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; frame-src https://accounts.google.com https://www.youtube-nocookie.com https://www.youtube.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://accounts.google.com https://oauth2.googleapis.com https://www.googletagmanager.com https://*.google-analytics.com https://*.analytics.google.com">
   <meta name="referrer" content="strict-origin-when-cross-origin">
+
+  <!-- Google Analytics (GA4), opt-in: js/analytics.js shows the cookie banner and
+       loads gtag.js only after Accept. External file — no inline script under the CSP. -->
+  <script src="js/analytics.js"></script>
   <title>Privacy Policy — How You Watch</title>
   <meta name="description" content="Privacy Policy for How You Watch, a curated watch content feed.">
   
@@ -32,7 +36,7 @@
   <main class="main">
     <article class="legal-page">
       <h2 class="legal-page__title">Privacy Policy</h2>
-      <p class="legal-page__updated">Last updated: September 22, 2026</p>
+      <p class="legal-page__updated">Last updated: October 1, 2026</p>
 
       <section class="legal-page__section">
         <h3>1. Overview</h3>
@@ -62,7 +66,10 @@
         <h4>2.4 Local Storage</h4>
         <p>We use your browser's <code>localStorage</code> to cache the video feed for faster page loads. This data stays on your device and is not transmitted to us. You can clear it at any time through your browser settings.</p>
 
-        <h4>2.5 Email Newsletter (Opt-In Only)</h4>
+        <h4>2.5 Usage Analytics</h4>
+        <p>We use <strong>Google Analytics</strong> to understand how the Service is used in aggregate — for example, which pages are visited, roughly where visitors come from, and what device and browser they use. Google Analytics is <strong>off by default</strong>: it only loads, and only sets cookies, after you click <strong>Accept</strong> on the cookie banner. When enabled, it collects this through cookies and a pseudonymous identifier; it does not receive your name, email address, or comments. We use these statistics only to improve the Service. You can change your choice at any time using the <strong>Cookies</strong> link in the footer.</p>
+
+        <h4>2.6 Email Newsletter (Opt-In Only)</h4>
         <p>When you sign in, we record your name and email address in a private list, together with your answer to the marketing-email question, the time you answered, and where the record came from. We send marketing emails <strong>only</strong> to people who explicitly chose "Yes, email me" — signing in alone never subscribes you, and no answer is treated as no.</p>
         <p>You can change your choice at any time: tap your avatar in the header, then <strong>Email preferences</strong>. Choosing "No emails" takes effect immediately and is our unsubscribe path; every marketing email we send also tells you how to opt out.</p>
       </section>
@@ -74,13 +81,14 @@
           <li><strong>Anti-abuse:</strong> Your email address is used to enforce rate limits and to block abusive users. It is never displayed publicly.</li>
           <li><strong>Newsletter (opt-in only):</strong> If — and only if — you explicitly said yes to marketing emails, we may send you an occasional email about new watch content. Your consent record (your answer and its timestamp) is kept as required by law.</li>
           <li><strong>Feed caching:</strong> We cache the video feed locally to reduce load times on return visits.</li>
+          <li><strong>Aggregate analytics:</strong> We use Google Analytics statistics to see how the Service is used and improve it.</li>
         </ul>
-        <p>We do <strong>not</strong> use your information for advertising, analytics, profiling, or any purpose other than providing the Service.</p>
+        <p>We do <strong>not</strong> use your information for advertising, profiling, or any purpose other than providing and improving the Service.</p>
       </section>
 
       <section class="legal-page__section">
         <h3>4. Information Sharing</h3>
-        <p>We do <strong>not</strong> sell, share, or transfer your personal information to any third parties. Comments you post are publicly visible on the Service.</p>
+        <p>We do <strong>not</strong> sell your personal information or share it with third parties, except the usage data that Google Analytics collects on our behalf (see section 2.5). Comments you post are publicly visible on the Service.</p>
       </section>
 
       <section class="legal-page__section">
@@ -89,12 +97,13 @@
         <ul>
           <li><strong>YouTube API Services</strong> — for embedded video playback. Subject to the <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener">YouTube Terms of Service</a> and <a href="https://www.google.com/policies/privacy" target="_blank" rel="noopener">Google Privacy Policy</a>.</li>
           <li><strong>Google Sign-In</strong> — for optional user authentication. Subject to the <a href="https://www.google.com/policies/privacy" target="_blank" rel="noopener">Google Privacy Policy</a>.</li>
+          <li><strong>Google Analytics</strong> — for aggregate usage statistics. See <a href="https://policies.google.com/technologies/partner-sites" target="_blank" rel="noopener">How Google uses information from sites that use its services</a>.</li>
         </ul>
       </section>
 
       <section class="legal-page__section">
-        <h3>6. Cookies &amp; Tracking</h3>
-        <p>How You Watch itself does <strong>not</strong> set cookies. However, the embedded YouTube player and Google Sign-In may set cookies on your device. We use <code>localStorage</code> (not cookies) to cache the video feed. Please refer to the <a href="https://www.google.com/policies/privacy" target="_blank" rel="noopener">Google Privacy Policy</a> for information on how Google handles cookies.</p>
+        <h3 id="cookies">6. Cookies &amp; Tracking</h3>
+        <p>With your consent, How You Watch sets Google Analytics cookies (such as <code>_ga</code>) to measure usage in aggregate. We ask on your first visit; if you reject, or don't answer, no analytics cookies are set and nothing is sent to Google Analytics. Your choice is remembered in <code>localStorage</code>, and you can change it at any time with the <a href="#cookies" data-cookie-settings>Cookies</a> link in the footer — withdrawing consent deletes the analytics cookies. The embedded YouTube player and Google Sign-In may also set cookies on your device. We use <code>localStorage</code> (not cookies) to cache the video feed. Please refer to the <a href="https://www.google.com/policies/privacy" target="_blank" rel="noopener">Google Privacy Policy</a> for information on how Google handles cookies.</p>
       </section>
 
       <section class="legal-page__section">
@@ -127,6 +136,7 @@
       <nav class="footer__nav" id="footer-nav">
         <a href="terms.html" class="footer__nav-link">Terms</a>
         <a href="privacy.html" class="footer__nav-link footer__nav-link--active">Privacy</a>
+        <a href="/privacy.html#cookies" class="footer__nav-link" data-cookie-settings>Cookies</a>
       </nav>
       <div class="footer__meta">
         <span class="footer__copyright">© <span id="footer-year">2026</span> How You Watch</span>
