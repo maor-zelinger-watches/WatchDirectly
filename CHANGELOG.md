@@ -21,6 +21,15 @@ that component's heading.
 
 ## Frontend
 
+### 1.38.1 — 2026-10-10
+- **Google Analytics finally receives data.** The GA4 measurement ID shipped
+  in 1.30.0 (`G-LNXRS74XZ3`) never existed on Google's side — the gtag.js
+  loader returned 404 from day one, so every accepted consent since
+  2026-10-01 produced zero hits. Swapped `GA_ID` in `js/analytics.js` to the
+  live property `G-M9PXYBQ5X7` (loader returns 200; a page_view collect hit
+  and the `_ga_M9PXYBQ5X7` cookie were verified headless after Accept).
+  Consent gating, CSP and the privacy policy are unchanged.
+
 ### 1.38.0 — 2026-10-10
 - **The site installs as an app and opens offline.** Android, desktop
   Chrome/Edge and (via Add to Home Screen) iOS now offer How You Watch as a

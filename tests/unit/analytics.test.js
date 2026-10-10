@@ -57,7 +57,7 @@ describe('analytics consent', () => {
     expect(gtagScript()).not.toBeNull();
     expect(gtagScript().async).toBe(true);
     expect(consentCalls()).toContainEqual(['update', { analytics_storage: 'granted' }]);
-    expect(window.dataLayer.find(a => a[0] === 'config')[1]).toBe('G-LNXRS74XZ3');
+    expect(window.dataLayer.find(a => a[0] === 'config')[1]).toBe('G-M9PXYBQ5X7');
   });
 
   it('Reject: remembers the choice and never loads GA', () => {
