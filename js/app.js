@@ -90,6 +90,16 @@ function filterPaginationParked() {
 // INITIALIZATION
 // ============================================================
 
+// Installable-app plumbing (service worker, "Install app" link) loads after
+// everything else: a dynamic import keeps js/pwa.js off the cold-load
+// critical path and out of index.html's modulepreload wave (the preload
+// test only follows static imports — by design, see tests/unit/pwa.test.js).
+window.addEventListener('load', () => {
+  import('./pwa.js')
+    .then((m) => m.initPwa())
+    .catch((err) => console.warn('[pwa] not initialized:', err && err.message));
+});
+
 document.addEventListener('DOMContentLoaded', async () => {
   console.info(`How You Watch frontend v${CONFIG.APP_VERSION}`);
   // Which cache storage this load runs on, and whether a flag chose it — the

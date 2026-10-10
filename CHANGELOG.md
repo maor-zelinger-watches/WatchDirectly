@@ -21,6 +21,29 @@ that component's heading.
 
 ## Frontend
 
+### 1.38.0 — 2026-10-10
+- **The site installs as an app and opens offline.** Android, desktop
+  Chrome/Edge and (via Add to Home Screen) iOS now offer How You Watch as a
+  standalone app: `manifest.webmanifest` with 192/512 icons and a maskable
+  512 rendered from the favicon, plus the iOS home-screen metas in
+  `index.html`. A footer "Install app" link appears when the browser fires
+  `beforeinstallprompt`. This is step one of the path to the app stores —
+  the same shell is what a Capacitor wrapper will carry.
+- **Offline app shell via a module service worker (`sw.js`).** The worker
+  precaches HTML, CSS, every ES module, fonts and icons into a cache named
+  after `APP_VERSION`, which it imports straight from `js/config.js` — so a
+  release bump is also what rolls the shell forward, and the browser sees a
+  changed worker whenever the version changes. It answers same-origin GETs
+  only; the backend, Google Sign-In, YouTube and analytics are untouched, and
+  the feed keeps its own IndexedDB cache. Nothing is cached at runtime: a new
+  version installs a whole new shell and deletes the old one, so a page never
+  runs modules from two releases. Navigations are network-first with the
+  precached page as the offline fallback (deep links `/?v=…` included).
+- **`js/pwa.js` loads after `load` through a dynamic import**, keeping the
+  registration off the cold-load critical path and out of the modulepreload
+  wave. After a release takes over, a toast tells the visitor a reload brings
+  the new version; nothing reloads on its own.
+
 ### 1.37.0 — 2026-10-09
 - **Poppins is served from the site itself; the Google Fonts round trips before
   first paint are gone.** Every page pulled the font through a render-blocking
@@ -1687,6 +1710,14 @@ that component's heading.
   blocklist. Adds `version` stamp on all responses and `?action=version`.
 
 ## Repo
+
+### 1.2.14 — 2026-10-10
+- **Playwright blocks service workers in every spec** (`serviceWorkers:
+  'block'` in `playwright.config.js`). With Frontend 1.38.0's worker
+  registered, same-origin requests it answers from the precache never reach
+  `page.route()`, so a spec's mocks — and the live-backend guard — would be
+  silently bypassed. `tests/e2e/pwa.spec.js` opts back in to exercise the
+  worker for real (install, versioned precache, offline reload).
 
 ### 1.2.13 — 2026-10-09
 - **`assets/**` now counts as Frontend in the release gate.** `assets/` holds
