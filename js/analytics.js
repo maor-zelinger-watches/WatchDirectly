@@ -17,7 +17,7 @@
  * index.html, terms.html, privacy.html, and 404.html.
  */
 (function () {
-  var GA_ID = 'G-LNXRS74XZ3';
+  var GA_ID = 'G-M9PXYBQ5X7';
   var STORAGE_KEY = 'wd_analytics_consent';
   var loaded = false;
 
