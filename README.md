@@ -87,6 +87,31 @@ characters. The full search index is around that size and growing. When it
 doesn't fit, it silently isn't saved, and a returning visitor's search re-walks
 the whole catalog.
 
+## Installable app (PWA)
+
+The site installs as an app on Android, desktop Chrome/Edge, and (via "Add to
+Home Screen") iOS. Three files make it one:
+
+- [`manifest.webmanifest`](manifest.webmanifest) — name, icons
+  (`assets/icon-*.png`, rendered from `assets/favicon.svg`), standalone display.
+- [`sw.js`](sw.js) — a module service worker that precaches the app shell
+  (HTML, CSS, every ES module, fonts, icons) into a cache named after
+  `CONFIG.APP_VERSION`, imported straight from `js/config.js`. It answers
+  same-origin GETs only; the backend, Google Sign-In, YouTube and analytics are
+  never touched. Nothing is cached at runtime — a version bump installs a whole
+  new shell and deletes the old one, so a page never mixes modules from two
+  versions.
+- [`js/pwa.js`](js/pwa.js) — registers the worker after `load`, shows a toast
+  when a new version has taken over, and reveals the footer "Install app" link
+  when the browser fires `beforeinstallprompt`.
+
+Because the worker is keyed on `APP_VERSION`, shipping any frontend change
+through the deploy skill (which bumps that version) is also what rolls the
+offline shell forward. `tests/unit/pwa.test.js` keeps the precache list in
+step with `index.html`; `tests/e2e/pwa.spec.js` installs the worker for real
+and reloads offline. Every other e2e spec runs with service workers blocked
+(`playwright.config.js`), so `page.route()` mocks keep seeing every request.
+
 ## Shipping
 
 Nothing ships by hand — releases go through the **deploy skill**, which bumps

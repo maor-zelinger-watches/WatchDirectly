@@ -59,6 +59,17 @@
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <meta name="theme-color" content="#000000">
 
+  <!-- Installable app (PWA): the manifest makes Chrome/Edge/Android offer
+       "Install", and sw.js (registered by js/pwa.js after load) gives the
+       shell an offline fallback. Safari ignores the manifest's display mode
+       and reads the apple-* metas instead: a home-screen install opens
+       without browser chrome, with a black status bar and this title. -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="How You Watch">
+
   <!-- Fonts — self-hosted Poppins (see css/style.css @font-face). Preloading the
        four latin weights lets them ride the first request wave instead of
        waiting for the stylesheet to be parsed. -->
@@ -259,6 +270,8 @@
         <a href="./terms.html" class="footer__nav-link">Terms</a>
         <a href="./privacy.html" class="footer__nav-link">Privacy</a>
         <a href="/privacy.html#cookies" class="footer__nav-link" data-cookie-settings>Cookies</a>
+        <!-- Shown by js/pwa.js only once the browser fires beforeinstallprompt. -->
+        <a href="#" class="footer__nav-link" id="install-app" hidden>Install app</a>
       </nav>
       <div class="footer__meta">
         <span class="footer__copyright">© <span id="footer-year">2026</span> How You Watch</span>

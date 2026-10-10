@@ -42,6 +42,11 @@ export default defineConfig({
       }],
     },
     viewport: { width: 375, height: 812 }, // iPhone X — mobile-first
+    // No service worker in specs: sw.js answers same-origin requests from
+    // its precache, and requests a worker serves never reach page.route(),
+    // so a registered worker would silently bypass the specs' mocks (and
+    // the live-backend guard). tests/e2e/pwa.spec.js opts back in.
+    serviceWorkers: 'block',
     actionTimeout: 5000,
     // Diagnostics kept cheap: full artifacts only when a test actually fails.
     trace: 'on-first-retry',
